@@ -217,7 +217,7 @@ class ConfigManager:
             "Configuration file validation completed successfully."
         )
  
-
+ 
 # Initialize CentralizedLogger from YAML
 try:
     with open("config.yaml", "r") as file:
