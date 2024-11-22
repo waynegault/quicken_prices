@@ -3,7 +3,7 @@
 # Tickers to track
 tickers:
   [
-  "002256.SZ",    # (CNY)
+  "002256.SZ",    # a stock in Shenzhen Exchange (CNY currency)
   "0P00013P6I.L", # HSBC FTSE All-World Index C Acc (GBP)
   "0P00018XAP.L", # Vanguard FTSE 100 Idx Unit Tr £ Acc (GBP)
   "ADH2.BE",      # (EUR)
