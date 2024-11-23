@@ -1,0 +1,49 @@
+base_directory: ./
+mock_data: simulator data.json
+output_file: simulator output.csv
+log_file: simulator.log
+exchange_rates: 
+  [ 
+    "EURGBP=X", 
+    "GBP=X", 
+    "JPYGBP=X", 
+    "AUDGBP=X", 
+    "CADGBP=X",
+    "NZDGBP=X", 
+    "CHFGBP=X", 
+    "CNYGBP=X", 
+  ]
+
+tickers:
+  [
+    "002256.SZ",    # a stock in Shenzhen Exchange (CNY currency)
+    "0P00013P6I.L", # HSBC FTSE All-World Index C Acc (GBP)
+    "0P00018XAP.L", # Vanguard FTSE 100 Idx Unit Tr £ Acc (GBP)
+    "ADH2.BE",      # (EUR)
+    "AMGN",         # Amgen Inc. (USD)
+    "APS.TO",       # (CAD)
+    "BKMT.V",       #  (CAD)
+    "BZ=F",         # Brent Crude Oil Last Day Finance (USD)
+    "CUKX.L",       # iShares VII PLC - iShares Core FTSE 100 ETF GBP Acc (GBP)
+    "CYSE.L",       # WisdomTree Cybersecurity UCITS ETF USD Acc (GBP)
+    "ELIX.L",       # Elixirr International plc (GBP)
+    "EURGBP=X",     # EUR/GBP
+    "^FTAS",        # FTSE All-share (GBP)    
+    "^FTSE",        # FTSE 100 (GBP)
+    "GBP=X",        # USD/GBP
+    "GL1S.MU",      # Invesco Markets II Plc - Invesco UK Gilt UCITS ETF (EUR)
+    "GLTA.L",       # Invesco UK Gilts UCITS ETF (GBP)
+    "GC=F",         # Gold (USD)
+    "HMWO.L",       # HSBC MSCI World UCITS ETF (GBP)
+    "IHCU.L",       # iShares S&P 500 Health Care Sector UCITS ETF USD (Acc) (GBP)
+    "IIND.L",       # iShares MSCI India UCITS ETF USD Acc (GBP)
+    "IUIT.L",       # iShares S&P 500 Information Technology Sector UCITS ETF USD (Acc) (USD)
+    "LAU.AX",       # (AUD)
+    "SEE.L",        # Seeing Machines Limited (GBP)
+    "^OEX",         # S&P 100 INDEX (USD)
+    "^GSPC",        # S&P 500 INDEX (USD)
+    "SQX.CN",       # (CAD)
+    "VHVG.L",       # Vanguard FTSE Developed World UCITS ETF USD Accumulation (GBP)
+    "VNRX",         # VolitionRX Limited (USD)
+    "VUKG.L",       # Vanguard FTSE 100 UCITS ETF GBP Accumulation (GBP)
+  ]

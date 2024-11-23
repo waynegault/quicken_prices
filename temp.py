@@ -1,238 +1,161 @@
-import yaml
 import logging
-from logging.handlers import RotatingFileHandler
-from functools import wraps
+import os
 import time
-from typing import Any
+from typing import List, Dict, Any
 
 
-# Logging Decorator
-def log_function(logger: logging.Logger = None):
-    """
-    A decorator to log function entry, exit, and execution details.
-    """
+# YFinance Simulator for testing
+class YFinanceSimulator:
+    def fetch_data(self, ticker: str, period: str) -> Dict[str, Any]:
+        simulated_data = {
+            "AAPL": {"quoteType": "EQUITY", "prices": [150, 152, 151, 149, 150]},
+            "EURUSD=X": {
+                "quoteType": "CURRENCY",
+                "prices": [1.1, 1.12, 1.11, 1.13, 1.1],
+            },
+            "GC=F": {"quoteType": "FUTURE", "prices": [1800, 1810, 1795, 1805, 1815]},
+            "FAKE": {"quoteType": None, "prices": None},
+            "NONE": {"quoteType": None, "prices": None},
+        }
+        if ticker in simulated_data:
+            return simulated_data[ticker]
+        raise ValueError(f"No data found for ticker: {ticker}")
 
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            start_time = time.time()
-            if logger:
-                logger.debug(
-                    f"Entering: {func.__name__} with args: {args}, kwargs: {kwargs}"
-                )
-            result = func(*args, **kwargs)
-            elapsed_time = time.time() - start_time
-            if logger:
-                logger.debug(
-                    f"Exiting: {func.__name__}, took {elapsed_time:.4f}s, result: {result}"
-                )
-            return result
 
-        return wrapper
+# Logger Configuration
+class CentralizedLogger:
+    logger = None
 
-    return decorator
+    @staticmethod
+    def setup(config: Dict[str, Any]):
+        log_file = os.path.join(config["paths"]["base"], config["paths"]["log_file"])
+        log_level_file = config["logging"]["levels"]["file"]
+        log_level_terminal = config["logging"]["levels"]["terminal"]
+
+        # Create logger
+        CentralizedLogger.logger = logging.getLogger("QuickenPricesLogger")
+        CentralizedLogger.logger.setLevel(logging.DEBUG)
+
+        # File handler
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(getattr(logging, log_level_file))
+        file_formatter = logging.Formatter(
+            config["logging"]["message_formats"]["file"]["basic"]
+        )
+        file_handler.setFormatter(file_formatter)
+
+        # Console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(getattr(logging, log_level_terminal))
+        console_formatter = logging.Formatter(
+            config["logging"]["message_formats"]["terminal"]["basic"]
+        )
+        console_handler.setFormatter(console_formatter)
+
+        # Add handlers
+        CentralizedLogger.logger.addHandler(file_handler)
+        CentralizedLogger.logger.addHandler(console_handler)
 
 
 # Retry Decorator
-def enhanced_retry(max_retries: int = 3, delay: int = 2, logger: logging.Logger = None):
-    """
-    A decorator to retry a function on failure with a delay.
-    Logs each retry attempt and eventual success or failure.
-    """
-
+def retry(max_retries: int, delay: int):
     def decorator(func):
-        @wraps(func)
         def wrapper(*args, **kwargs):
-            attempts = 0
-            last_exception = None
-            while attempts < max_retries:
+            for attempt in range(max_retries):
                 try:
-                    result = func(*args, **kwargs)
-                    if logger:
-                        logger.debug(
-                            f"Success on attempt {attempts + 1} for {func.__name__}"
-                        )
-                    return result
+                    return func(*args, **kwargs)
                 except Exception as e:
-                    attempts += 1
-                    last_exception = e
-                    if logger:
-                        logger.warning(
-                            f"Attempt {attempts} failed for {func.__name__} with error: {e}",
-                            exc_info=True,
+                    if attempt < max_retries - 1:
+                        CentralizedLogger.logger.warning(
+                            f"Retry {attempt + 1}/{max_retries} failed. Reason: {str(e)}"
                         )
-                    if attempts < max_retries:
                         time.sleep(delay)
-            if logger:
-                logger.error(
-                    f"All {max_retries} retries failed for {func.__name__}. Last error: {last_exception}",
-                    exc_info=True,
-                )
-            raise last_exception  # Raise the last exception explicitly
+                    else:
+                        raise e
 
         return wrapper
 
     return decorator
 
 
-# Centralized Logger Class
-class CentralizedLogger:
-    """
-    Centralized logging class to manage logging configurations dynamically.
-    Extracts settings from YAML and ensures consistency across all classes.
-    """
-
-    def __init__(self, config: dict):
-        self.logger = logging.getLogger("ApplicationLogger")
-        self.logger.setLevel(logging.DEBUG)  # Set to capture all logs
-
-        # Extract logging configuration from YAML or use defaults
-        log_file = config.get("paths", {}).get("log_file", "application.log")
-        max_bytes = config.get("logging", {}).get("max_bytes", 5 * 1024 * 1024)
-        backup_count = config.get("logging", {}).get("backup_count", 5)
-        terminal_level = (
-            config.get("logging", {}).get("levels", {}).get("terminal", "INFO").upper()
-        )
-        file_level = (
-            config.get("logging", {}).get("levels", {}).get("file", "DEBUG").upper()
-        )
-
-        # File Handler with Rotation
-        self.file_handler = RotatingFileHandler(
-            log_file, maxBytes=max_bytes, backupCount=backup_count
-        )
-        file_formatter = logging.Formatter(
-            "%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s",
-            "%Y-%m-%dT%H:%M:%S",
-        )
-        self.file_handler.setFormatter(file_formatter)
-        self.file_handler.setLevel(getattr(logging, file_level))
-        self.logger.addHandler(self.file_handler)
-
-        # Console Handler
-        self.console_handler = logging.StreamHandler()
-        console_formatter = logging.Formatter(
-            "%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s"
-        )
-        self.console_handler.setFormatter(console_formatter)
-        self.console_handler.setLevel(getattr(logging, terminal_level))
-        self.logger.addHandler(self.console_handler)
-
-    def update_log_levels(self, terminal_level: str, file_level: str):
-        """
-        Updates the logging levels for terminal and file handlers dynamically.
-        """
-        self.console_handler.setLevel(getattr(logging, terminal_level.upper()))
-        self.file_handler.setLevel(getattr(logging, file_level.upper()))
-        self.logger.info(
-            f"Updated logging levels: Terminal={terminal_level}, File={file_level}"
-        )
+# Error Handler
+def handle_error(message: str, error: Exception):
+    CentralizedLogger.logger.error(f"{message}: {str(error)}")
 
 
-# ConfigManager Class
-class ConfigManager:
-    """
-    Manages application configuration with centralized logging, error handling, and retry logic.
-    """
+# Data Fetcher
+class DataFetcher:
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.simulator = YFinanceSimulator()
 
-    def __init__(self, config_path: str, logger: CentralizedLogger):
-        self.config_path = config_path
-        self.config_data = None
-        self.logger = logger
+    @retry(max_retries=3, delay=2)
+    def fetch_ticker_data(self, ticker: str):
+        if not hasattr(self, "_fetch_attempts"):
+            self._fetch_attempts = {}
+        self._fetch_attempts[ticker] = self._fetch_attempts.get(ticker, 0) + 1
 
-    @log_function(logger=None)  # Log function start/stop
-    @enhanced_retry(max_retries=3, delay=2, logger=None)  # Retry on transient errors
-    def load_config(self) -> None:
-        """
-        Loads the YAML configuration file and validates its contents.
-        Updates the logger levels based on the configuration.
-        """
-        self.logger.logger.info(
-            f"Attempting to load configuration from: {self.config_path}"
-        )
-        try:
-            with open(self.config_path, "r") as file:
-                self.config_data = yaml.safe_load(file)
-            self.logger.logger.info("Configuration successfully loaded.")
-            self.validate_config()
+        if self._fetch_attempts[ticker] == 1:
+            CentralizedLogger.logger.info(f"Fetching data for ticker: {ticker}")
 
-            # Update logger levels dynamically based on the YAML config
-            logging_config = self.config_data.get("logging", {}).get("levels", {})
-            terminal_level = logging_config.get("terminal", "INFO")
-            file_level = logging_config.get("file", "DEBUG")
-            self.logger.update_log_levels(terminal_level, file_level)
+        data = self.simulator.fetch_data(ticker, period="5d")
+        if not data or "prices" not in data or not data["prices"]:
+            raise ValueError("No data found or invalid ticker type")
+        return data
 
-        except FileNotFoundError:
-            self.logger.logger.error(
-                f"Configuration file not found at {self.config_path}", exc_info=True
-            )
-            raise
-        except yaml.YAMLError as e:
-            self.logger.logger.error(f"Error parsing YAML file: {e}", exc_info=True)
-            raise ValueError(f"Invalid YAML syntax in configuration file: {e}")
-
-    @log_function(logger=None)  # Log function start/stop
-    def validate_config(self) -> None:
-        """
-        Validates the essential sections of the configuration file.
-        Raises errors if critical fields are missing or invalid.
-        """
-        self.logger.logger.debug("Starting validation of the configuration file.")
-        required_sections = ["tickers", "paths", "collection", "logging"]
-        for section in required_sections:
-            if section not in self.config_data:
-                self.logger.logger.error(
-                    f"Missing required section in config: {section}"
+    def process_tickers(self, tickers: List[str]):
+        results = {"success": [], "failed": []}
+        for ticker in tickers:
+            try:
+                data = self.fetch_ticker_data(ticker)
+                results["success"].append({"ticker": ticker, "type": data["quoteType"]})
+                CentralizedLogger.logger.info(
+                    f"Ticker: {ticker} ({data['quoteType']}) processed successfully."
                 )
-                raise ValueError(f"Missing required section in config: {section}")
+            except Exception as e:
+                results["failed"].append({"ticker": ticker, "reason": str(e)})
+                if self._fetch_attempts.get(ticker, 1) == 3:
+                    CentralizedLogger.logger.error(
+                        f"Ticker: {ticker} failed after 3 retries. Reason: {str(e)}"
+                    )
+                else:
+                    CentralizedLogger.logger.warning(
+                        f"Ticker: {ticker} - Retry {self._fetch_attempts.get(ticker)} failed. Reason: {str(e)}"
+                    )
+        return results
 
-        # Validate paths
-        paths = self.config_data.get("paths", {})
-        required_paths = ["base", "quicken", "data_file", "log_file", "cache"]
-        for path in required_paths:
-            if not paths.get(path):
-                self.logger.logger.error(f"Missing required path: {path}")
-                raise ValueError(f"Missing required path: {path}")
 
-        # Validate tickers
-        if not self.config_data.get("tickers", []):
-            self.logger.logger.error("Ticker list cannot be empty.")
-            raise ValueError("Ticker list cannot be empty.")
+# Main Script
+if __name__ == "__main__":
+    # Config placeholder
+    config = {
+        "paths": {
+            "base": "./",
+            "log_file": "test.log",
+        },
+        "logging": {
+            "levels": {
+                "file": "DEBUG",
+                "terminal": "INFO",
+            },
+            "message_formats": {
+                "file": {"basic": "%(asctime)s - %(levelname)s - %(message)s"},
+                "terminal": {"basic": "%(asctime)s - %(levelname)s - %(message)s"},
+            },
+        },
+    }
 
-        # Validate logging configuration
-        logging_config = self.config_data.get("logging", {})
-        if (
-            "levels" not in logging_config
-            or not logging_config["levels"].get("file")
-            or not logging_config["levels"].get("terminal")
-        ):
-            self.logger.logger.error(
-                "Logging levels for 'file' and 'terminal' must be specified."
-            )
-            raise ValueError(
-                "Logging levels for 'file' and 'terminal' must be specified."
-            )
+    # Setup Logger
+    CentralizedLogger.setup(config)
 
-        self.logger.logger.debug(
-            "Configuration file validation completed successfully."
-        )
- 
- 
-# Initialize CentralizedLogger from YAML
-try:
-    with open("config.yaml", "r") as file:
-        config_yaml = yaml.safe_load(file)
-    central_logger = CentralizedLogger(config_yaml)
-except Exception as e:
-    print(f"Failed to initialize logger: {e}")
-    raise
+    # Simulated tickers
+    tickers = ["AAPL", "EURUSD=X", "GC=F", "FAKE", "NONE"]
 
-# Reinitialize ConfigManager with CentralizedLogger
-config_manager = ConfigManager(
-    config_path="config.yaml", logger=central_logger
-)
+    # Fetch and process data
+    fetcher = DataFetcher(config)
+    results = fetcher.process_tickers(tickers)
 
-try:
-    config_manager.load_config()
-except Exception as e:
-    central_logger.logger.error(f"Configuration loading failed: {e}")
+    # Final summary
+    CentralizedLogger.logger.info("Processing complete.")
+    CentralizedLogger.logger.info(f"Successful Tickers: {len(results['success'])}")
+    CentralizedLogger.logger.info(f"Failed Tickers: {len(results['failed'])}")

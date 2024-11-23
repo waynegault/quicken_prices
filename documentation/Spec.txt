@@ -1,0 +1,452 @@
+QuickenPrice Spec
+1	Core Purpose
+The QuickenPrices app automates fetching, processing, and validating stock prices, exchange rates, and related data. Its outputs are in a Quicken-compatible CSV containing select data, formatted and optimized for automated uploading to Quicken 2004. It ensures robust logging, error handling, and a retry mechanism while presenting clear terminal and logfile outputs.
+
+2	Core Features and Functionalities
+1. Technical Design
+Language: Python.
+API: Leverages the yfinance library to fetch stock and market data.
+Time Zone Handling: Exchange rates and prices must be date matched precisely. Data comes from different time zones so all dates must be converted to UTC and then normalised and formatted to iso standard before use. This enables exchange rate and price data to be day matched easily in cases where data comes from different time zones. Dates presented in logfile in iso format. Dates presented in terminal and saved to CSV in dd/mm/yyyy format. Multiple date handling and conversion methods should be consolidated into a single utility class.
+Design Philosophy: 
+•	Separation of concerns through well-defined classes and modular functions.
+        Class Hierarchy: Classes sharing similar methods benefit from inheritance structure.
+•	Use of decorators for cross-cutting concerns (e.g., logging, retries).
+        Function Parameter Reduction: through parameters consolidated into configuration objects.
+•	Comprehensive centralised error handling with graceful degradation and use of convenience functions for each logging category.
+•	Configurable operational settings via a separate config.yaml file.
+•	Constructed in one python file.
+        Consolidated validation logic where possible using utility functions.
+	Utilisation of memory management and parallel processing where necessary
+•	UK English is used for variable names, comments, and terminal outputs.
+	Use of Type hints and commenting to improve code readability and understanding
+Anticipated components:
+
+
+Configuration Management - YAML-based dynamic configuration with fallback.
+Utilities - Date formatting and consolidated formatting utilities.
+Centralized Logger - Logging for terminal and file outputs.
+Error Handling - Distinct ErrorHandler class with reusable decorators and fallback logic.
+Retry Mechanism - @retry decorator for transient issues.
+Data Fetching - API interactions with validation and caching.
+Data Processing - Validation, conversion, and handling of exchange rates.
+Output Generation - Terminal summaries, logs, and Quicken-compatible CSV.
+Quicken Automation - Detect elevated permissions and manage GUI interaction.
+
+2. Configuration Management
+YAML Configuration File:
+A single config.yaml file stores all configurable parameters to eliminate hardcoding. Dynamically loads YAML-based configuration. Defaults are provided for missing settings or missing YAML enabling meaningful fallback values and logging of such eventualities.
+Key Configuration Parameters:
+Tickers:
+List of tickers categorized dynamically using quoteType ticker metadata from yfinance. This will include Equity, Index, Currency, ETF, Mutual Fund, Commodity and more.
+Invalid tickers are gracefully handled and logged.
+Debugging: 
+Specific tickers are flagged for additional debugging section to examine calculations.
+Paths:
+Base directory: The root folder for operations.
+Quicken: Path to the Quicken executable for automation.
+Data file: Name of the CSV output file.
+Log file: Name of the log file.
+Cache directory: Directory for caching fetched data.
+Collection Settings:
+period_years: Defines data collection period in years (e.g., 0.08 for ~1 month).
+max_retries and retry_delay for handling transient issues.
+Default collection periods for different tickers:
+Mutual Funds: 1 month.
+Equities , ETFs, Commodities, Futures, and Currencies: 5 days.
+Cache Settings:
+Cache expiration in hours.
+Clean-up thresholds to prevent excessive cache usage.
+API Settings:
+Rate limits to ensure compliance with Yahoo Finance's API usage.
+Logging Settings:
+Logging levels defined (ERROR, WARNING, INFO, DEBUG) for terminal and logfile output.
+Rotating file handler with configurable size.
+3. Logging and Error Handling
+Centralized Logger:
+Handles both file logging (rotating handler) and terminal logging (color-coded for readability).
+Configurable message formats for INFO, DEBUG, WARNING, and ERROR levels in each of terminal and logfile via YAML.. Use of colour in terminal.
+
+Logs function entry/exit and details of execution at logfile INFO level using a reusable @log_function decorator.
+Distinct formatting for terminal vs. file outputs.
+Logs API errors, cache usage, currency conversions, and processing summaries.
+Error Handling:
+Centralized handling for all expected and unexpected exceptions to prevent crashes.
+Don't use @log_function on CentralizedLogger but use the internal python logger.
+Graceful degradation for non-critical failures (e.g., invalid tickers) with fallback provision.
+Logs both expected and unexpected errors with current operation and code line number and with logfile tracebacks for debugging.
+
+Capacity to deal with edge cases, e.g.: 
+Invalid or misspelled tickers.
+Missing or corrupted cache files.
+Non-trading days (e.g., weekends).
+API rate limits or network timeouts.
+Missing exchange rates.
+Unknown currency and currency to GBP exchange rate pair
+Unknown quoteType.
+Retry Mechanism:
+Implements a @retry decorator to handle transient errors with configurable retry count and delays.
+Logs retry attempts and eventual outcomes.
+4. Data Processing
+Ticker Validation:
+Excludes duplicates.
+Fetches metadata to confirm presence of ticker and dynamically categorizes tickers types (equity, ETF, currency, etc) using ‘quoteType’ metadata and ‘currency’ denomination metadata from yfinance.
+Logs invalid or unknown tickers.
+Fetching Price Data:
+Pulls historical prices based on quoteType category minimum default periods and the users YAML specified period.
+Caches historical price data to minimize redundant API calls. 
+Adjusts for non-trading days or missing data by skipping unavailable dates.
+Logs whether data was fetched (✓ New Data), loaded from cache (# Cached), or x failed.
+Collects closing price for all dates other than today. Today’s price is a live price, always drawn from yfinance and never cached.
+Cache Management
+Caches historical data for reuse, excluding live data for today because it might change.
+Today's data is not cached because it could change.
+Cache stored in a JSON-based cache file for reuse, named to reflect it's contents.
+Loads, validates, and saves cached data to reduce API calls.
+Periodically cleans up old or excess cache files.
+Fetching Currency Exchange Data:
+In addition to any currencies listed as a ticker for download, ticker currency metadata is used to identify all currency exchange rates required.
+Available currency pair exchange rate tickers are listed in YAML. Currency pair not provided for a ticker with unusual currency can be inferred and tested. User warning for currencies that do not have a defined currency pair ticker defined or inferred.
+Caches historical exchange data to minimize redundant API calls. 
+Adjusts for non-trading days or missing data by skipping unavailable dates.
+Logs whether data was fetched (✓ New Data), loaded from cache (# Cached), or ✗ failed.
+Collects closing exchange rate for all dates other than today. Today’s exchange rate is a live rate, always drawn from yfinance and never cached.
+Currency Conversion:
+All tickers with non-GBP prices should be converted to GBP using exchange rates other than tickers with the ‘quoteType’  category Currency, Index and Commodity these should not be converted and should remain in their base currency. 
+Prices in GBp (pence) do not need an exchange rate to convert to GBP but simply divided by 100.
+Log all conversions, including rates and results.
+5. Outputs
+Formatting of major and minor heading should be consolidated into a single utility class.
+Terminal Output:
+Clear terminal screen.
+Outputs are highly readable, organized into sections with headings for:
+
+Info logging: Initiation sequence of script
+
+Period and dates of collection
+Validation. Count of validated tickers by category and counts of those failed validation. Identify failed tickers and reason for failure.
+
+Count of different currencies. And number of inferred currency pair tickers.
+
+Exchange rates fetched and their result, successfully processed (✓), cached (#), or failed (✗).
+
+Prices fetched and their result, successfully processed (✓), cached (#), or failed (✗). (this should not include currency exchange rate tickers as they will be included above). 
+Debugging details for tickers specified in YAML. This includes ticker,  date, original price and currency, if conversion required, date, currency ticker and exchange rate, calculation and revised price in GBP.
+Summary of processing results.
+Status indicators for each item:
+✓: Total number of tickers successfully processed from downloaded data
+#: Total number of tickers successfully processed from cached data
+✗: Number of tickers which are invalid or failed to fetch data
+
+Number of conversions from each currency.
+% Success rate and execution time.
+
+Paths to output files.
+
+Status at each stage of quicken import sequence.
+Confirmation that terminal output has been copied to clipboard.
+
+The format of terminal output might look something like this:
+
+Stock Price Update
+==================
+Range 23/10/2024 - 21/11/2024:
+22 business days
+Exchange Rates
+--------------
+Status: ✓ = New Data  # = Cached  ✗ = Failed
+CAD exchange rates (using CADGBP=X):
+  ✓ 21/11/2024 rate: 0.5680
+  # 20/11/2024 rate: 0.5644
+  # 19/11/2024 rate: 0.5624
+Number of days fetched: 22
+CNY exchange rates (using CNYGBP=X):
+  ✓ 21/11/2024 rate: 0.1096
+  # 20/11/2024 rate: 0.1088
+  # 19/11/2024 rate: 0.1090
+Number of days fetched: 22
+USD exchange rates (using GBP=X):
+  ✓ 21/11/2024 rate: 0.7940
+  # 20/11/2024 rate: 0.7877
+  # 19/11/2024 rate: 0.7887
+Number of days fetched: 22
+AUD exchange rates (using AUDGBP=X):
+  ✓ 21/11/2024 rate: 0.5169
+  # 20/11/2024 rate: 0.5150
+  # 19/11/2024 rate: 0.5129
+Number of days fetched: 22
+EUR exchange rates (using EURGBP=X):
+  ✓ 21/11/2024 rate: 0.8318
+  # 20/11/2024 rate: 0.8356
+  # 19/11/2024 rate: 0.8356
+Number of days fetched: 22
+Downloading Prices
+------------------
+Status: ✓ = New Data  # = Cached  ✗ = Failed
+Successful Downloads (21 days fetched)
+✓ 002256.SZ (CNY)                ✓ 0P00013P6I.L (GBp)             ✓ 0P00018XAP.L (GBp)
+✓ ADH2.BE (EUR)                  ✓ AMGN (USD)                     ✓ APS.TO (CAD)
+✓ BKMT.V (CAD)                   ✓ BZ=F (USD)                     ✓ CUKX.L (GBp)
+✓ CYSE.L (GBp)                   ✓ ELIX.L (GBp)                   ✓ EURGBP=X (GBP)
+✓ GBP=X (GBP)                    ✓ GL1S.MU (EUR)                  ✓ GLTA.L (GBp)
+✓ HMWO.L (GBp)                   ✓ IHCU.L (GBp)                   ✓ IIND.L (GBP)
+✓ IUIT.L (USD)                   ✓ LAU.AX (AUD)                   ✓ SEE.L (GBp)
+✓ SQX.CN (CAD)                   ✓ VHVG.L (GBP)                   ✓ VNRX (USD)
+✓ VUKG.L (GBP)
+Failed Downloads:
+✗ fake (Unknown currency) - WARNING: No data available
+✗ fake2 (Unknown currency) - WARNING: No data available
+Debugging
+---------
+Debug - ELIX.L:
+Date: 20/11/2024
+Currency: GBp
+Original price: 795.0000 GBp
+Converting GBp to GBP (divide by 100)
+Revised price = 795.0000 / 100 = 7.9500 GBP
+Debug - EURGBP=X:
+Date: 20/11/2024
+Currency: GBP
+Original price: 0.8356 GBP
+No need for conversion
+Debug - VHVG.L:
+Date: 20/11/2024
+Currency: GBP
+Original price: 86.8150 GBP
+No need for conversion
+Debug - VNRX:
+Date: 20/11/2024
+Currency: USD
+Original price: 0.8100 USD
+20/11/2024 Exchange rate (USD/GBP): 0.7877
+Revised price = 0.8100 * 0.7877 = 0.6381 GBP
+Summary
+-------
+Tickers Processed: 27
+Unknown tickers: 2
+Tickers changed from AUD to GBP: 1
+Tickers changed from CAD to GBP: 3
+Tickers changed from CNY to GBP: 1
+Tickers changed from EUR to GBP: 2
+Tickers changed from GBp to GBP: 9
+Tickers changed from USD to GBP: 4
+Success Rate: 96.2%
+Execution Time: 5.09s
+✓ Log file saved to \QuickenPrices\prices.log
+✓ Data saved to: \QuickenPrices\data.csv
+✓ Terminal output copied to clipboard
+Import to Quicken 2004
+----------------------
+✗ Quicken cannot be opened from here.
+Instead:
+1. Close this window.
+2. Click the Quicken 'Update Prices' shortcut.
+END
+===
+Points to note:
+Uses heading functions to structure terminal output into:
+Major Headings (e.g., "Stock Price Update").
+Minor Headings (e.g., "Downloading Prices").
+Ensures readability by clearly separating different sections, such as:
+Exchange rate updates.
+Stock price updates.
+Debugging information.
+Summary and next steps.
+
+Log File:
+Rotating log captures all detailed logging for traceability., including:
+Errors, warnings, info
+retries, conversions
+info for starting and ending key functions.
+Cache usage.
+Conversion details.
+API interactions.
+Uses ISO date format for timestamps.
+Status at each stage of quicken import sequence.
+Excludes price and exchange rate  data collected other than saying successfully or not successfully collected.
+CSV Output:
+Includes all tickers listed in YAML other than invalid or failed tickers. Exchange rates not included in the ticker list and obtained just for conversion calculations are not included.
+Only includes non GBP prices where a successful currency conversion has been achieved. Dates where this was not achieved are excluded.
+3 Columns: Ticker, Price in GBP, Date (dd/mm/yyyy).
+Ordered in descending iso date.
+No header provided.
+6. Automation
+Automates CSV import into Quicken.
+Detects issues such as Quicken being unavailable and provides next steps for the user.
+Quicken needs to be elevated to open. Script needs to acquire elevation.
+When running the script from VS Code during development, try to obtain elevation. If unsuccessful handle elegantly with terminal notification:
+
+“Import to Quicken 2004
+----------------------
+✗ Quicken cannot be opened from here.
+Instead:
+1. Close this window.
+2. Click the Quicken 'Update Prices' shortcut.”
+
+In normal use, the script will be triggered via an elevated shortcut to a bat file:
+
+“@echo off
+python C:\Users\wayne\OneDrive\Documents\Python\Projects\QuickenPrices\QuickenPrices.py 
+exit”
+Once elevated, add section title to terminal, ‘Import to Quicken 2004’.
+
+Execute GUI import sequence, sending log and terminal status at each step:
+-	open quicken with the YAML defined executable path.
+-	Sleep for 8 seconds to allow application to open
+-	Navigate to portfolio view (hotkey("ctrl", "u"))
+-	Sleep for 1 second
+-	Open import dialogue (hold "alt" and "f" then "i" then "i"]
+-	Send CSV path to import price dialog box and press enter.
+-	Respond to acknowledgement dialog success or failure.
+-	If failure retry import sequence.
+3	Key Deliverables
+Core Functionalities:
+
+Centralized logger, error handler, retry mechanism, and cache manager.
+Configurable settings via YAML.
+Validation of tickers and robust handling of quoteType.
+Reliable data fetching, processing, and conversion.
+Comprehensive logging and debugging tools.
+Quicken-compatible CSV export and automation.
+Outputs:
+
+User-friendly terminal summaries.
+Detailed log file.
+Clean, validated CSV for Quicken.
+
+7. Master List of Functionality 
+(to be revised following AI's evaluation of this spec)
+
+
+Instruction:
+Before making any change, no matter how small, review this list to ensure that the proposed change does not disturb any existing functionality. After making a change, update the list to reflect the new state and present it to ensure the change aligns with the project goals. This instruction and the full list must be reviewed and presented every time new code is presented.
+Status: A - Implemented-must retain; B - Partially implemented; C - Not yet implemented
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Feature/Functionality                                    | Sub-Feature/Task                                             | Status | Key parameters  | Dependencies | Notes  |
+---------------------------------------------------------|--------------------------------------------------------------|--------|-----------------|--------------|--------|
+Centralized Logger                                       | Logger setup with structured logging                         |        |                 |              |        |  
+Centralized Logger                                       | Logging formats for terminal and file                        |        |                 |              |        |        
+Centralized Logger                                       | Rotating log file handling                                   |        |                 |              |        | 
+YAML Configuration Management                            | Loading and validation of YAML configuration                 |        |                 |              |        |     
+YAML Configuration Management                            | Support for dynamic configuration                            |        |                 |              |        |      
+Simulator for API Calls                                  | Accurate simulation of yfinance API outputs                  |        |                 |              |        |      
+Simulator for API Calls                                  | Support for diverse tickers (Equities, Indices, Commodities) |        |                 |              |        |      
+Validation of Tickers                                    | Ensure all required fields (ticker, price, currency) exist   |        |                 |              |        |      
+Validation of Tickers                                    | Verify yfinance quoteType and currency consistency           |        |                 |              |        |       
+Terminal Output Formatting                               | Display date range and business days count                   |        |                 |              |        | 
+Terminal Output Formatting                               | Detailed logging for exchange rate usage                     |        |                 |              |        | 
+Terminal Output Formatting                               | Include processing summary                                   |        |                 |              |        | 
+Data Conversion                                          | Convert GBp to GBP                                           |        |                 |              |        | 
+Data Conversion                                          | Currency conversion using exchange rates                     |        |                 |              |        | 
+CSV Output                                               | Output in the correct structure (Ticker, Price, Date)        |        |                 |              |        | 
+CSV Output                                               | Ensure correct date format (dd/mm/yyyy)                      |        |                 |              |        | 
+Error Handling and Graceful Degradation                  | Handle missing tickers gracefully                            |        |                 |              |        | 
+Error Handling and Graceful Degradation                  | Log unexpected exceptions with traceback                     |        |                 |              |        | 
+Exchange Rate Management                                 | Identify exchange rates for all required currencies          |        |                 |              |        | 
+Exchange Rate Management                                 | Handle unavailable exchange rates gracefully                 |        |                 |              |        | 
+Debugging Logs for Detailed Execution                    | Log function entry/exit points                               |        |                 |              |        | 
+Debugging Logs for Detailed Execution                    | Log detailed processing steps                                |        |                 |              |        | 
+Date Range and Business Days Count                       | Calculate and display range and business days                |        |                 |              |        | 
+Comprehensive Edge Case Testing                          | Systematic testing of edge cases                             |        |                 |              |        | 
+Automated Quicken Import                                 | Automate CSV import into Quicken                             |        |                 |              |        | 
+Output Logs Detailing Exchange Rates and Processing      | Align logs with spec formatting                              |        |                 |              |        | 
+Output Logs Detailing Exchange Rates and Processing      | Include conversion details (rate, original value, converted) |        |                 |              |        | 
+Integration of Config and Data Validation                | Validate configuration keys and data dependencies            |        |                 |              |        | 
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+8. Testing Environment and Simulator Requirements
+
+Purpose
+
+The testing environment and simulator are critical to:
+
+Validate application functionality without reliance on live API access.
+Replicate expected outputs from the API for robust testing and debugging.
+Ensure consistent testing conditions to detect and resolve errors efficiently.
+
+Key Requirements
+
+Simulation of API Responses:
+
+The simulator should mimic the live API's structure and behavior, including:
+Metadata fields (e.g., quoteType, currency, symbol).
+Historical data (e.g., date, open, high, low, close, volume).
+Include diverse examples such as:
+Equities, Indices, Commodities, ETFs, Mutual Funds, and Currencies.
+Tick data in various currencies (e.g., USD, GBP, EUR).
+Handle invalid or unavailable tickers gracefully (e.g., simulate 404 errors).
+
+Dataset Collection for Simulator Construction:
+
+Initially fetch real data from the live API to identify:
+Field structure.
+Data formats (e.g., date formats, decimal places).
+Naming conventions for tickers and exchange rates.
+Save a sample dataset with varied tickers to form the basis of the simulator.
+
+Simulator Implementation:
+
+Build a simulator script to:
+Parse the sample dataset.
+Generate responses identical to the live API, including:
+Metadata and historical data endpoints.
+Errors for invalid tickers or fields.
+Include randomness in outputs (e.g., slight variations in price) for stress testing.
+
+Testing Script Design:
+
+Develop scripts to:
+Fetch data using the live API and the simulator.
+Compare outputs for equivalence to verify simulator accuracy.
+Log discrepancies for manual review.
+Include unit tests to validate:
+Data transformation (e.g., currency conversions, date handling).
+Integration of simulator responses into the application logic.
+
+Environment Configuration:
+
+Ensure seamless switching between live API and simulator using:
+A configuration flag in the YAML (e.g., use_simulator: true).
+Conditional imports or dynamic module selection.
+Provide clear instructions for setup, including dependencies.
+
+Error Handling and Fallbacks:
+
+Simulator must replicate potential API errors (e.g., timeouts, rate limits).
+
+Application should gracefully handle these scenarios:
+Log meaningful messages.
+Retry logic where applicable.
+Why This Was Required
+Development Without API Access:
+
+API access may be restricted (e.g., by network policies or rate limits).
+The simulator ensures development and testing can continue in such scenarios.
+
+Consistency in Testing:
+
+Live API data can change unpredictably, causing test inconsistencies.
+The simulator provides a stable dataset for repeatable testing.
+
+Error Debugging:
+
+Simulated errors allow testing of edge cases without waiting for real API failures.
+Improves the robustness of error handling and fallback mechanisms.
+
+Faster Iterations:
+
+Simulator responses are faster than waiting for live API calls, speeding up development.
+
+Futureproofing:
+
+If the live API changes or becomes unavailable, the simulator can act as a long-term fallback.
+
+Implementation Guidelines
+
+Start with a thorough exploration of the live API, documenting all fields and structures.
+Use a small script to collect diverse API data samples for simulator construction.
+Build the simulator iteratively, starting with core features (e.g., fetching historical prices).
+Regularly validate the simulator's responses against live API outputs.
+Integrate the simulator into the application using modular design to simplify switching.
+
+A public git repository for this project is here: https://github.com/waynegault/quicken_prices. 
