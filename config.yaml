@@ -1,5 +1,7 @@
 # QuickenPrices Configuration: config.yaml
 
+use_simulator: true  # Set to 'false' to use the real API
+
 # Tickers to track
 tickers:
   [
@@ -49,7 +51,7 @@ debug:
 
 # Application Paths - data files, logs, cache and quicken executable
 paths:
-  base: "C:\\Users\\wayne\\OneDrive\\Documents\\Python\\Projects\\quicken_prices\\"
+  base: "C:\\Users\\wayne\\OneDrive\\Documents\\GitHub\\Python\\Projects\\quicken_prices\\"
   quicken: "C:\\Program Files (x86)\\Quicken\\qw.exe"
   data_file: "data.csv"                                                               # Data file 
   log_file: "prices.log"                                                              # Log file 
