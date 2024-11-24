@@ -322,7 +322,7 @@ No header provided.
 
 6. Automation
 
-Automates CSV import into Quicken.
+Automates CSV import into  Quicken XG 2004 UK edition running on  Windows 11. I'd suggest pyautogui library for automation but the choice is entirely yours.
 Detects issues such as Quicken being unavailable and provides next steps for the user.
 Quicken needs to be elevated to open. Script needs to acquire elevation.
 When running the script from VS Code during development, try to obtain elevation. 
@@ -373,7 +373,8 @@ Clean, validated CSV for Quicken.
 (to be revised following AI's evaluation of this spec)
 
 "Instruction:
-Before making any change, no matter how small, review this list to ensure that the proposed change does not disturb any existing functionality. After making a change, update the list to reflect the new state and present it to ensure the change aligns with the project goals. This instruction and the full list must be reviewed and presented every time new code is presented.
+Before making any change, no matter how small, review the  Master List of Functionality  to ensure that the proposed change does not disturb any existing functionality. After making a change, update the Master List of Functionality  to reflect the new state and present it to ensure the change aligns with the project goals. This instruction and the full unabridged Master List of Functionality  must be reviewed and presented every time new code is presented.
+
 Status: A - Implemented-must retain; B - Partially implemented; C - Not yet implemented
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------

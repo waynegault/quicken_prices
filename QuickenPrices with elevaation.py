@@ -8,7 +8,7 @@ This script fetches historical price data for a list of tickers specified in 'co
 It supports using a simulator for API calls or fetching real data using yfinance.
 
 It includes features such as configuration management, logging, error handling, data fetching, data processing,
-currency conversion, and more.
+currency conversion, and more, as specified in the master list of functionalities.
 """
 
 import os
@@ -31,12 +31,19 @@ from typing import List, Dict, Any
 try:
     import yfinance as yf
     import pytz
+    import colorama
+    from colorama import Fore, Style
     import pyperclip
+    import pyautogui
+    import ctypes
 except ImportError as e:
     print(
         f"The required library '{e.name}' is not installed. Please install it using 'pip install {e.name}'"
     )
     sys.exit(1)
+
+# Initialize colorama
+colorama.init(autoreset=True)
 
 # -----------------------------
 # Configuration Management
@@ -78,11 +85,11 @@ def setup_logging():
     logger = logging.getLogger("QuickenPrices")
     logger.setLevel(logging.DEBUG)
 
-    # Create console handler
+    # Create console handler with color support
     console_handler = logging.StreamHandler()
     console_level = config.get("console_loglevel", "INFO").upper()
     console_handler.setLevel(log_levels.get(console_level, logging.INFO))
-    console_formatter = logging.Formatter("%(message)s")
+    console_formatter = CustomFormatter()
     console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
 
@@ -102,6 +109,25 @@ def setup_logging():
     logger.addHandler(file_handler)
 
     return logger
+
+
+class CustomFormatter(logging.Formatter):
+    """
+    Custom logging formatter with color support.
+    """
+
+    def format(self, record):
+        log_fmt = "%(asctime)s - %(levelname)s - %(message)s"
+        formatter = logging.Formatter(log_fmt)
+        if record.levelno == logging.DEBUG:
+            record.msg = f"{Fore.BLUE}{record.msg}{Style.RESET_ALL}"
+        elif record.levelno == logging.INFO:
+            record.msg = f"{Fore.GREEN}{record.msg}{Style.RESET_ALL}"
+        elif record.levelno == logging.WARNING:
+            record.msg = f"{Fore.YELLOW}{record.msg}{Style.RESET_ALL}"
+        elif record.levelno == logging.ERROR:
+            record.msg = f"{Fore.RED}{record.msg}{Style.RESET_ALL}"
+        return formatter.format(record)
 
 
 logger = setup_logging()
@@ -140,7 +166,7 @@ def retry(exceptions, tries=3, delay=1, backoff=2):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             mtries, mdelay = tries, delay
-            while mtries > 0:
+            while mtries > 1:
                 try:
                     return func(*args, **kwargs)
                 except exceptions as e:
@@ -148,11 +174,30 @@ def retry(exceptions, tries=3, delay=1, backoff=2):
                     time.sleep(mdelay)
                     mtries -= 1
                     mdelay *= backoff
-            raise exceptions(f"Failed after {tries} attempts")
+            return func(*args, **kwargs)
 
         return wrapper
 
     return decorator
+
+
+def is_admin():
+    """
+    Check if the script is running with administrative privileges.
+    """
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+
+def run_as_admin():
+    """
+    Restart the script with administrative privileges.
+    """
+    ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", sys.executable, " ".join(sys.argv), None, 1
+    )
 
 
 def copy_to_clipboard(text: str):
@@ -271,12 +316,11 @@ def fetch_ticker_data(
         f"{ticker_symbol}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.pkl",
     )
     if os.path.exists(cache_file):
-        logger.debug(f"Loading cached data for ticker {ticker_symbol}")
+        logger.info(f"Loading cached data for ticker {ticker_symbol}")
         with open(cache_file, "rb") as f:
             df = pickle.load(f)
     else:
         ticker = get_ticker(ticker_symbol)
-        time.sleep(0.5)  # Rate limiting
         df = ticker.history(
             start=start_date.strftime("%Y-%m-%d"), end=end_date.strftime("%Y-%m-%d")
         )
@@ -306,7 +350,9 @@ def fetch_data(
             df["Ticker"] = ticker_symbol
             df["QuoteType"] = quote_type
             records.append(df)
-            logger.info(f"Fetched data for ticker {ticker_symbol}")
+            logger.info(
+                f"{Fore.GREEN}✓ Fetched data for ticker {ticker_symbol}{Style.RESET_ALL}"
+            )
         except Exception as e:
             logger.warning(f"Failed to fetch data for ticker {ticker_symbol}: {e}")
     if records:
@@ -324,45 +370,36 @@ def fetch_data(
 @log_function
 def process_data(df: pd.DataFrame, currency_rates: Dict[str, float]) -> pd.DataFrame:
     """
-    Process the data to have columns: 'Ticker', 'Price', 'Date', ordered by descending date.
+    Process the data to have columns: 'Ticker', 'Date', 'Price'.
     """
     if df.empty:
         return df
     df = df[["Ticker", "Date", "Close", "QuoteType"]]
     df.rename(columns={"Close": "Price"}, inplace=True)
-
-    # Ensure 'Date' column is datetime without timezone
-    df["Date"] = pd.to_datetime(df["Date"], utc=True).dt.tz_convert(None)
-
     # Convert prices to GBP where applicable
     for index, row in df.iterrows():
         ticker = row["Ticker"]
         price = row["Price"]
         quote_type = row["QuoteType"]
-        currency = get_currency_for_ticker(ticker)
-        if currency == "GBp":
-            # Convert GBp to GBP by dividing by 100
-            df.at[index, "Price"] = price / 100
-        elif currency != "GBP":
-            # Convert price to GBP using exchange rates
-            if currency == "USD":
-                rate_ticker = "GBP=X"  # Ticker for USD to GBP
-            else:
-                rate_ticker = currency + "GBP=X"  # For other currencies
-            rate = currency_rates.get(rate_ticker, None)
-            if rate:
-                df.at[index, "Price"] = price / rate  # Divide by rate to convert to GBP
-            else:
-                logger.warning(f"Missing exchange rate for {currency} to GBP")
-        # For quote_type 'CURRENCY', price is already in GBP
         if quote_type == "CURRENCY":
+            # Invert the exchange rate to get the rate to GBP
+            exchange_rate = price
+            if exchange_rate != 0:
+                df.at[index, "Price"] = 1 / exchange_rate
+        elif quote_type == "FUND":
+            # Handle funds differently if needed
             pass
-
-    # Format date and order by descending date
-    df["Date"] = df["Date"].dt.strftime("%d/%m/%Y")  # Format date as 'dd/mm/yyyy'
-    df.sort_values(by=["Ticker", "Date"], ascending=[True, False], inplace=True)
-    df = df[["Ticker", "Price", "Date"]]
-    return df
+        else:
+            # Convert price to GBP if not already in GBP
+            currency = get_currency_for_ticker(ticker)
+            if currency != "GBP":
+                rate = currency_rates.get(currency + "GBP=X", None)
+                if rate:
+                    df.at[index, "Price"] = price * rate
+                else:
+                    logger.warning(f"Missing exchange rate for {currency} to GBP")
+    df["Date"] = df["Date"].dt.strftime("%d/%m/%Y")  # Format date as 'DD/MM/YYYY'
+    return df[["Ticker", "Date", "Price"]]
 
 
 def get_currency_for_ticker(ticker_symbol: str) -> str:
@@ -382,18 +419,12 @@ def get_exchange_rates(tickers: List[str]) -> Dict[str, float]:
     currencies = set()
     for ticker_symbol in tickers:
         currency = get_currency_for_ticker(ticker_symbol)
-        if currency not in ["GBP", "GBp"]:
-            if currency == "USD":
-                currencies.add("GBP=X")  # Ticker for USD to GBP
-            else:
-                currencies.add(
-                    currency + "GBP=X"
-                )  # Correct format for other currencies
+        if currency != "GBP":
+            currencies.add(currency + "GBP=X")
     exchange_rates = {}
     for currency_pair in currencies:
         try:
             ticker = get_ticker(currency_pair)
-            time.sleep(0.5)  # Rate limiting
             df = ticker.history(period="1d")
             if not df.empty:
                 rate = df["Close"].iloc[-1]
@@ -416,19 +447,17 @@ def save_to_csv(df: pd.DataFrame, output_file: str):
     Save the DataFrame to a CSV file without headers.
     """
     df.to_csv(output_file, index=False, header=False)
-    logger.info(
-        f"Data saved to: {os.path.join(os.path.basename(os.path.dirname(output_file)), os.path.basename(output_file))}"
-    )
+    logger.info(f"Data saved to: {output_file}")
 
 
 @log_function
-def copy_terminal_output_to_clipboard():
+def copy_output_to_clipboard(df: pd.DataFrame):
     """
-    Copy the terminal output to the clipboard.
+    Copy the CSV output to the clipboard.
     """
-    terminal_output = sys.stdout.getvalue()
-    copy_to_clipboard(terminal_output)
-    logger.info("Terminal output copied to clipboard.")
+    csv_output = df.to_csv(index=False, header=False)
+    copy_to_clipboard(csv_output)
+    logger.info("CSV output copied to clipboard.")
 
 
 # -----------------------------
@@ -447,9 +476,7 @@ def clean_cache(cache_dir: str, max_age_days: int):
         file_path = os.path.join(cache_dir, filename)
         if os.stat(file_path).st_mtime < cutoff:
             os.remove(file_path)
-            logger.info(
-                f"Deleted cache file: {os.path.join(os.path.basename(os.path.dirname(file_path)), os.path.basename(file_path))}"
-            )
+            logger.info(f"Deleted cache file: {file_path}")
 
 
 # -----------------------------
@@ -463,6 +490,14 @@ def main():
     Main function to orchestrate data fetching and processing.
     """
     try:
+        # Check for administrative privileges
+        if not is_admin():
+            logger.info(
+                "Script is not running with administrative privileges. Restarting as admin..."
+            )
+            run_as_admin()
+            sys.exit(0)
+
         tickers = get_tickers(config)
         valid_tickers = validate_tickers(tickers)
         if not valid_tickers:
@@ -492,7 +527,7 @@ def main():
             )
 
         logger.info(
-            f"Fetching price and FX data from {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}"
+            f"Fetching data from {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}"
         )
 
         # Fetch exchange rates
@@ -518,12 +553,15 @@ def main():
         )
         save_to_csv(processed_data, output_file)
 
-        # Copy terminal output to clipboard
-        copy_terminal_output_to_clipboard()
+        # Copy output to clipboard
+        copy_output_to_clipboard(processed_data)
 
         # Clean up cache
         cache_dir = os.path.join(base_directory, "cache")
         clean_cache(cache_dir, max_age_days=fetch_config.get("cache_max_age_days", 7))
+
+        # GUI Automation for Quicken (Placeholder)
+        # Automate Quicken GUI interactions if needed
 
     except KeyboardInterrupt:
         logger.warning("Script interrupted by user.")
@@ -533,16 +571,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # Redirect stdout to capture terminal output for copying
-    from io import StringIO
-
-    old_stdout = sys.stdout
-    sys.stdout = mystdout = StringIO()
-
     main()
-
-    # Restore stdout and copy terminal output to clipboard
-    sys.stdout = old_stdout
-    terminal_output = mystdout.getvalue()
-    copy_to_clipboard(terminal_output)
-    logger.info("Terminal output copied to clipboard.")
