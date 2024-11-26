@@ -20,7 +20,7 @@ MIT Licence
 # -----------------------------------------------------------------------------------
 #
 try:
-    # Standard Library Imports
+    # Standard Python Library Imports
     import ctypes  # Provides low-level operating system interfaces
     import sys  # Provides access to system-specific parameters and functions
     import subprocess  # Enables spawning new processes
@@ -33,6 +33,9 @@ try:
     from queue import Queue  # Implements multi-producer, multi-consumer queues
     from datetime import datetime, timedelta  # Classes for working with dates and times
     from pathlib import Path  # Object-oriented interface to filesystem paths
+    from collections import (
+        namedtuple,
+    )  # Create custom data structures with named fields.
 
     # Third-Party Library Imports
     import yaml  # YAML parser and emitter
@@ -171,26 +174,6 @@ def load_configuration(config_file: str = "config.yaml") -> Dict[str, Any]:
             "max_bytes": 5242880,
             "backup_count": 5,
         },
-        # Currency pairs available from Yahoo Finance
-        "currency_pairs": {
-            "EURGBP=X": "Euro to British Pound",
-            "GBP=X": "US Dollar to British Pound",
-            "JPYGBP=X": "Japanese Yen to British Pound",
-            "AUDGBP=X": "Australian Dollar to British Pound",
-            "CADGBP=X": "Canadian Dollar to British Pound",
-            "NZDGBP=X": "New Zealand Dollar to British Pound",
-            "CHFGBP=X": "Swiss Franc to British Pound",
-            "CNYGBP=X": "Chinese Yuan to British Pound",
-            "HKDGBP=X": "Hong Kong Dollar to British Pound",
-            "SGDGBP=X": "Singapore Dollar to British Pound",
-            "INRGBP=X": "Indian Rupee to British Pound",
-            "MXNGBP=X": "Mexican Peso to British Pound",
-            "PHPGBP=X": "Philippine Peso to British Pound",
-            "MYRGBP=X": "Malaysian Ringgit to British Pound",
-            "ZARGBP=X": "South African Rand to British Pound",
-            "RUBGBP=X": "Russian Ruble to British Pound",
-            "TRYGBP=X": "Turkish Lira to British Pound",
-        },
     }
 
     for key, value in default_settings.items():
@@ -198,6 +181,8 @@ def load_configuration(config_file: str = "config.yaml") -> Dict[str, Any]:
         config[key] = config.get(key, value)
 
     return config
+
+# Other Global Variables
 
 
 # Invoke the load_configuration function and assign settings to config
@@ -315,13 +300,13 @@ def log_function(func):
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        logger.debug(f"Entering function: {func.__name__}")
+        logger.debug(f"Start {func.__name__}")
         try:
             result = func(*args, **kwargs)
-            logger.debug(f"Succeeded, exiting function: {func.__name__}")
+            logger.debug(f"{func.__name__} OK")
             return result
         except Exception as e:
-            logger.error(f"Failed, error: {e}\nexiting function {func.__name__}")
+            logger.error(f"{func.__name__} failed! Error: {e}")
             logger.error(traceback.format_exc())
             raise
 
@@ -366,6 +351,21 @@ def copy_to_clipboard(text: str):
     """
     pyperclip.copy(text)
 
+def get_date_range():
+    """ Get period from config dictionary and calculate date range.
+    """
+    logger.info("Getting date range...")
+    start_date = None
+    end_date = None
+    period_year= config["collection"]["period_years"]
+    period_days = period_year *365
+    end_date = datetime.date.today()
+    start_date = end_date - datetime.timedelta(days=int(period_days))
+    logger.info(
+        f"Obtained date range, {start_date.strftime("%d/%m/%Y")} to {end_date.strftime("%d/%m/%Y")}"
+    )
+    return start_date, end_date
+
 
 #
 # -----------------------------------------------------------------------------------
@@ -374,13 +374,20 @@ def copy_to_clipboard(text: str):
 # Manage and validate tickers, ensuring that only valid and correctly formatted tickers are processed as well as any necessary FX rate tickers.
 #
 @log_function  # Decorator to log entry and exit of functions.
-def get_tickers(config: Dict[str, Any]) -> List[str]:
+def get_tickers(
+    config: Dict[str, Any], set_maximum_tickers=5
+) -> List[str]:
     """
     Get the list of tickers from the configuration, including currency pairs.
     """
     # Get tickers from config
     logger.info("Getting tickers...")
-    stock_tickers = config["tickers"].keys()
+    stock_tickers = list(config["tickers"].keys())
+
+    logger.debug(
+        f"Received {len(stock_tickers)} stock tickers, {f'first {set_maximum_tickers}' if set_maximum_tickers<len(stock_tickers) else ''}: {list(stock_tickers)[:set_maximum_tickers]}{f'...' if len(stock_tickers)>set_maximum_tickers else ''}"
+    )
+
     if not stock_tickers:
         logger.error("No tickers defined in YAML file. Exiting.")
         sys.exit(1)
@@ -394,69 +401,55 @@ def get_tickers(config: Dict[str, Any]) -> List[str]:
     if not valid_tickers:
         logger.error("No valid tickers in YAML file. Exiting.")
         sys.exit(1)
-    else:
-        num_valid_tickers = len(valid_tickers)
-        num_invalid_tickers = len(invalid_tickers)
-        valid_ticker_list = ", ".join(str(ticker) for ticker in valid_tickers) if num_valid_tickers > 0 else "none"
-        invalid_ticker_list = ", ".join(str(ticker) for ticker in invalid_tickers) if num_invalid_tickers > 0 else "none"    
 
-        valid_plural = "" if num_valid_tickers == 1 else "s"
-        invalid_plural = "" if num_invalid_tickers == 1 else "s"
+    # iterate through the currencies to extract unique currencies, excluding GBP and GBp
+    currencies = { currency for _, _, currency in valid_tickers if currency not in ["GBP", "GBp"]}
 
-        logger.info(f"{num_valid_tickers} valid stock ticker{valid_plural} {valid_ticker_list}, and {num_invalid_tickers} invalid stock ticker{invalid_plural} {invalid_ticker_list}.")
-
-    # Extract unique currencies, excluding GBP and GBp
-    currencies = {
-        currency for _, _, currency in valid_tickers if currency not in ["GBP", "GBp"]
-    }
     logger.info(
         f"Obtaining {len(currencies)} FX tickers for these currencies, {currencies}"
     )
-    # Map currencies to their corresponding FX tickers
-    fx_tickers = {}
+
+    # Get list of FX tickers for those currencies we have
+    fx_tickers = []  # create empty list
     for currency in currencies:
         if currency == "USD":
-            fx_tickers[currency] = "GBP=X"
+            fx_tickers.append("GBP=X")
         else:
-            fx_tickers[currency] = f"{currency}GBP=X"
+            fx_tickers.append(f"{currency}GBP=X")
+
+    # join the elements of the list using a list comprehension:
+    fx_tickers_list = ", ".join(str(ticker) for ticker in fx_tickers)
+    logger.info(f"Got {len(fx_tickers)} FX tickers: {fx_tickers_list}")
 
     # Validate FX tickers
     logger.info("Validating FX tickers...")
-    valid_FX_tickers, invalid_FX_tickers = validate_tickers(fx_tickers[currency])
-    # Extract ticker only
-    valid_FX_tickers = [ticker for ticker, _, _ in valid_FX_tickers]
+    valid_FX_tickers, invalid_FX_tickers = validate_tickers(fx_tickers)
+
+    # # Extract ticker only
+    # valid_FX_tickers = [ticker for ticker, _, _ in valid_FX_tickers]
 
     if not valid_FX_tickers:
         logger.error("No valid FX tickers. Can only process GBP stock")
         return
-    else:
-        num_valid_FX_tickers = len(valid_FX_tickers)
-        num_invalid_FX_tickers = len(invalid_FX_tickers)
-        valid_FX_ticker_list = ", ".join(str(ticker) for ticker in valid_FX_tickers) if num_valid_FX_tickers > 0 else "none"
-        invalid_FX_ticker_list = (
-            ", ".join(str(ticker) for ticker in invalid_FX_tickers)
-            if num_invalid_FX_tickers > 0
-            else "none"
-        )
-
-        valid_FX_plural = "" if num_valid_FX_tickers == 1 else "s"
-        invalid_FX_plural = "" if num_invalid_FX_tickers == 1 else "s"
-
-        logger.info(
-            f"{num_valid_FX_tickers} valid stock ticker{valid_FX_plural} {valid_FX_ticker_list}, and {num_invalid_FX_tickers} invalid stock ticker{invalid_FX_plural} {invalid_FX_ticker_list}."
-        )
 
     # Combine stock and FX ticker lists
     all_tickers = valid_tickers + valid_FX_tickers
-    # Remove duplicates and ensure tickers are uppercase
+    # Remove duplicates
     all_tickers = set(ticker for ticker in all_tickers)
+
+    logger.debug(
+        f"{len(all_tickers)} combined tickers{f', first {set_maximum_tickers}' if len(all_tickers)>set_maximum_tickers else ''}: {list(all_tickers)[:set_maximum_tickers]}{f'...' if len(all_tickers)>set_maximum_tickers else ''}"
+    )
+
     return all_tickers
 
+
+@log_function
 def validate_tickers(
-    tickers: list[str],
+    tickers: list[str], set_maximum_tickers=5
 ) -> tuple[list[tuple[str, str, str]], list[str]]:
     """
-    Validates a list of ticker symbols and returns valid and invalid tickers.
+    Validates a list of ticker symbols and returns list of valid ticker tuples and list of invalid tickers strings.
 
     Args:
         tickers: A list of ticker symbols to validate.
@@ -469,30 +462,84 @@ def validate_tickers(
     valid_tickers = []
     invalid_tickers = []
 
+    # Create namedtuple class
+    valid_ticker = namedtuple("valid_ticker", ["ticker", "quote_type", "currency"])
+
     for ticker_symbol in tickers:
         try:
-            ticker = get_ticker(ticker_symbol)  # see Data Fetching and Caching
-            info = ticker.info
+            dat = get_ticker(ticker_symbol)  # Get yFinance object
+            info = dat.info  # Get info from yf object
 
+            # Retrieve data with default values for missing keys
             quote_type = info.get("quoteType", None)
             currency = info.get("currency", None)
-            ticker = info.get("symbol", None)
             # Make all tickers uppercase whist we have it as a string
-            ticker = ticker.upper()
+            ticker = info.get("symbol", None)
+            if ticker:
+                ticker = ticker.upper()
 
-            if quote_type and currency:
-                valid_tickers.append((ticker, quote_type, currency))
+            # Only append to valid_tickers list if all values are present
+            if ticker and quote_type and currency:
+                new_valid_ticker = valid_ticker(ticker, quote_type, currency)
+                valid_tickers.append(new_valid_ticker)
             else:
-                invalid_tickers.append(ticker)
-                if not quote_type:
-                    logger.warning(f"Ticker {ticker} is missing quote type.")
-                if not currency:
-                    logger.warning(f"Ticker {ticker} is missing currency.")
-                logger.warning(f"Ticker {ticker} is invalid.")
+                # Only append to invalid_tickers list if there is a ticker
+                if ticker:
+                    invalid_tickers.append(ticker)
+                    warn = "missing quote type" if not quote_type else ""
+                    warn2 = "missing currency" if not currency else ""
+                    logger.warning(
+                        f"Ticker {ticker} is invalid due to {warn}{' and ' if warn and warn2 else ""}{warn2}."
+                    )
 
         except Exception as e:
-            logger.warning(f"Ticker {ticker} is invalid: {e}")
-            invalid_tickers.append(ticker)
+            if ticker:
+                logger.warning(f"Ticker {ticker} is invalid: {e}")
+                invalid_tickers.append(ticker)
+
+    # Get a string of all valid ticker names for reporting
+    if not valid_tickers:
+        logger.error("No valid tickers found.")
+        valid_plural = "s"
+    else:
+        # Extract names of valid tickers
+        valid_ticker_names = [
+            vt.ticker for vt in valid_tickers
+        ]  # List comprehension for names
+        num_valid_tickers = len(valid_ticker_names)
+        # Prepare grammar and restrict length of ticker output
+        short_valid_ticker_list = f"{f', first {set_maximum_tickers}' if set_maximum_tickers<num_valid_tickers else ''}: {list(valid_ticker_names)[:set_maximum_tickers]}{f'...' if num_valid_tickers>set_maximum_tickers else ''}"
+        valid_plural = (
+            "s"
+            if num_valid_tickers < 1
+            else (
+                f"s {short_valid_ticker_list})"
+                if num_valid_tickers > 1
+                else f"({valid_ticker_names})"
+            )
+        )
+
+    # Get a string of all invalid ticker names
+    num_invalid_tickers = len(invalid_tickers)
+    if num_invalid_tickers > 0:
+        # Prepare grammar and restrict length of ticker output
+        short_invalid_ticker_list = f"{f', first {set_maximum_tickers}' if set_maximum_tickers<num_invalid_tickers else ''}: {list(invalid_tickers)[:set_maximum_tickers]}{f'...' if num_invalid_tickers>set_maximum_tickers else ''}"
+        invalid_plural = (
+            "s"
+            if num_invalid_tickers < 1
+            else (
+                f"s (eg {short_invalid_ticker_list})"
+                if num_invalid_tickers > 1
+                else f"({invalid_tickers})"
+            )
+        )
+    else:
+        invalid_plural ="s"
+
+    # Report outcome
+    logger.info(
+        f"Validation summary: {num_valid_tickers} valid ticker{valid_plural} and {num_invalid_tickers} invalid ticker{invalid_plural}."
+    )
 
     return valid_tickers, invalid_tickers
 
@@ -552,11 +599,11 @@ def get_ticker(ticker_symbol: str):
     Get ticker object from yfinance or simulator based on configuration.
     """
     if config.get("use_simulator", False):
-        return YFinanceSimulator(ticker_symbol)
+        dat = YFinanceSimulator(ticker_symbol)
     else:
         # Get ticker info dictionary from Yahoo
         dat = yf.Ticker(ticker_symbol)
-        return dat
+    return dat
 
 
 @retry(Exception, tries=3)
@@ -595,7 +642,7 @@ def fetch_ticker_history(
 
 
 @log_function
-def fetch_data(
+def fetch_historical_data(
     tickers: List[tuple], start_date: datetime, end_date: datetime
 ) -> pd.DataFrame:
     """
@@ -938,47 +985,19 @@ def main():
         # Get elevation
         # run_as_admin()
 
-        # Get tickers
-        tickers = get_tickers(config)
+        # Get tickers - returns a set of validated ticker namedtuples for defined stocks and any currencies required  eg valid_ticker(ticker='0P00013P6I.L', quote_type='MUTUALFUND', currency='GBp')
+        tickers = get_tickers(
+            config
+        )  # max number in debug prints
 
-        # Calculate date range
-        logger.info("Getting date range...")
-        start_date = None
-        end_date = None
-
-        fetch_config = config.get("fetch", {})
-        if "start_date" in fetch_config and "end_date" in fetch_config:
-            try:
-                start_date = datetime.datetime.strptime(
-                    fetch_config["start_date"], "%Y-%m-%d"
-                )
-                end_date = datetime.datetime.strptime(
-                    fetch_config["end_date"], "%Y-%m-%d"
-                )
-            except ValueError as ve:
-                logger.error(
-                    f"Check the YAML file. Invalid date format in configuration: {ve}"
-                )
-                return
-        else:
-            end_date = datetime.datetime.now()
-            start_date = end_date - datetime.timedelta(
-                days=fetch_config.get("days", 30)
-            )
-        logger.info("Got date range")
-
-        # Fetch exchange rates
-        logger.info(
-            f"Fetching FX data from {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}..."
-        )
-        exchange_rates = get_exchange_rates([t[0] for t in valid_tickers])
-        logger.info("Got FX data")
+        # Get date range
+        start_date, end_date = get_date_range()
 
         # Fetch Ticker Data
         logger.info(
             f"Fetching price data from {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}"
         )
-        raw_data = fetch_data(valid_tickers, start_date, end_date)
+        raw_data = fetch_historical_data(valid_tickers, start_date, end_date)
         if raw_data.empty:
             logger.error("No data fetched for any tickers. Exiting.")
             return
