@@ -1,85 +1,45 @@
 # QuickenPrices Configuration: config.yaml
 
-use_simulator: true # Set to 'false' to use the real API
+use_simulator: false # Set to 'false' to use the real API
 
 # Tickers to track
   
-prices:
-  - ticker: 002256.SZ
-    description: stock in Shenzhen Exchange (CNY currency)
-  - ticker: 0P00013P6I.L 
-    description: HSBC FTSE All-World Index C Acc (GBP)
-  - ticker: 0P00018XAP.L 
-    description: Vanguard FTSE 100 Idx Unit Tr £ Acc (GBP)
-  - ticker: ADH2.BE 
-    description: (EUR)
-  - ticker: AMGN 
-    description: Amgen Inc. (USD)
-  - ticker: APS.TO 
-    description: (CAD)
-  - ticker: BKMT.V 
-    description:  (CAD)
-  - ticker: BZ=F 
-    description: Brent Crude Oil Last Day Finance (USD)
-  - ticker: CUKX.L 
-    description: iShares VII PLC - iShares Core FTSE 100 ETF GBP Acc (GBP)
-  - ticker: CYSE.L 
-    description: WisdomTree Cybersecurity UCITS ETF USD Acc (GBP)
-  - ticker: ELIX.L 
-    description: Elixirr International plc (GBP)
-  - ticker: EURGBP=X 
-    description: EUR/GBP Fx
-  - ticker: fake
-  - ticker: ^FTAS 
-    description: FTSE All-share (GBP)    
-  - ticker: ^FTSE 
-    description: FTSE 100 (GBP)
-  - ticker: GBP=X 
-    description: USD/GBP Fx
-  - ticker: GL1S.MU 
-    description: Invesco Markets II Plc - Invesco UK Gilt UCITS ETF (EUR)
-  - ticker: GLTA.L 
-    description: Invesco UK Gilts UCITS ETF (GBP)
-  - ticker: GC=F 
-    description: Gold (USD)
-  - ticker: HMWO.L 
-    description: HSBC MSCI World UCITS ETF (GBP)
-  - ticker: IHCU.L 
-    description: iShares S&P 500 Health Care Sector UCITS ETF USD (Acc) (GBP)
-  - ticker: IIND.L 
-    description: iShares MSCI India UCITS ETF USD Acc (GBP)
-  - ticker: IUIT.L 
-    description: iShares S&P 500 Information Technology Sector UCITS ETF USD (Acc) (USD)
-  - ticker: LAU.AX 
-    description: (AUD)
-  - ticker: SEE.L 
-    description: Seeing Machines Limited (GBP)
-  - ticker: ^OEX 
-    description: S&P 100 INDEX (USD)
-  - ticker: ^GSPC 
-    description: S&P 500 INDEX (USD)
-  - ticker: SQX.CN 
-    description: (CAD)
-  - ticker: VHVG.L 
-    description: Vanguard FTSE Developed World UCITS ETF USD Accumulation (GBP)
-  - ticker: VNRX 
-    description: VolitionRX Limited (USD)
-  - ticker: VUKG.L   
-    description: Vanguard FTSE 100 UCITS ETF GBP Accumulation (GBP)
+tickers:
+  0P00013P6I.L:  "HSBC FTSE All-World Index C Acc (GBP)"
+  0P00018XAP.L:  "Vanguard FTSE 100 Idx Unit Tr £ Acc (GBP)"
+  AMGN:          "Amgen Inc. (USD)"
+  BZ=F:          "Brent Crude Oil Last Day Finance (USD)"
+  CUKX.L:        "iShares VII PLC - iShares Core FTSE 100 ETF GBP Acc (GBP)"
+  CYSE.L:        "WisdomTree Cybersecurity UCITS ETF USD Acc (GBP)"
+  ELIX.L:        "Elixirr International plc (GBP)"
+  EURGBP=X:      "EUR/GBP Fx"
+  fake:          "fake"
+  ^FTAS:         "FTSE All-share (GBP)"
+  ^FTSE:         "FTSE 100 (GBP)"
+  GBP=X:         "USD/GBP Fx"
+  GL1S.MU:       "Invesco Markets II Plc - Invesco UK Gilt UCITS ETF (EUR)"
+  GLTA.L:        "Invesco UK Gilts UCITS ETF (GBP)"
+  GC=F:          "Gold (USD)"
+  HMWO.L:        "HSBC MSCI World UCITS ETF (GBP)"
+  IHCU.L:        "iShares S&P 500 Health Care Sector UCITS ETF USD (Acc) (GBP)"
+  IIND.L:        "iShares MSCI India UCITS ETF USD Acc (GBP)"
+  IUIT.L:        "iShares S&P 500 Information Technology Sector UCITS ETF USD (Acc) (USD)"
+  LAU.AX:        "(AUD)"
+  SEE.L:         "Seeing Machines Limited (GBP)"
+  ^OEX:          "S&P 100 INDEX (USD)"
+  ^GSPC:         "S&P 500 INDEX (USD)"
+  SQX.CN:        "(CAD)"
+  VHVG.L:        "Vanguard FTSE Developed World UCITS ETF USD Accumulation (GBP)"
+  VNRX:          "VolitionRX Limited (USD)"
+  VUKG.L:        "Vanguard FTSE 100 UCITS ETF GBP Accumulation (GBP)"
 
 # Debug Configuration -  populated for testing specific tickers
 debug:
-  tickers:
-    - ticker: VHVG.L
-      description: Vanguard FTSE Developed World UCITS ETF USD Accumulation (GBP)
-    - ticker: ELIX.L
-      description: Elixirr International plc (GBP)
-    - ticker: VNRX
-      description: VolitionRX Limited (USD)
-    - ticker: EURGBP=X
-      description: EUR/GBP Fx
-    - ticker: GC=F
-      description: Gold (USD)
+  - VHVG.L
+  - ELIX.L
+  - VNRX
+  - EURGBP=X
+  - GC=F
 
 # Application Paths - data files, logs, cache and quicken executable
 paths:
@@ -143,16 +103,16 @@ logging:
   message_formats:
 
     file:
-        error: '%(asctime)s %(levelname)s: %(status)s - %(filename)s:%(lineno)d - %(message)s - %(exc_info)s'
-        warning: '%(asctime)s %(levelname)s: %(status)s - %(filename)s:%(lineno)d - %(message)s'
-        info: '%(asctime)s %(levelname)s: %(status)s - %(message)s'
-        debug: '%(asctime)s %(levelname)s: %(status)s - %(filename)s:%(lineno)d - %(message)s - %(funcName)s - %(module)s - %(process)d - %(thread)d - %(relativeCreated)d - %(threadName)s'
+        error: '%(asctime)s %(levelname)s: %(filename)s:%(lineno)d - %(message)s - %(exc_info)s'
+        warning: '%(asctime)s %(levelname)s: %(filename)s:%(lineno)d - %(message)s'
+        info: '%(asctime)s %(levelname)s: %(message)s'
+        debug: '%(asctime)s %(levelname)s: %(filename)s:%(lineno)d - %(message)s - %(funcName)s - %(module)s - %(process)d - %(thread)d - %(relativeCreated)d - %(threadName)s'
       
     terminal:
-        error: '%(levelname)s: %(status)s - %(filename)s:%(lineno)d - %(message)s - %(exc_info)s'
-        warning: '%(levelname)s: %(status)s - %(filename)s:%(lineno)d - %(message)s'
-        info: '%(levelname)s: %(status)s - %(message)s'
-        debug: '%(levelname)s: %(status)s - %(filename)s:%(lineno)d - %(message)s'
+        error: '%(levelname)s: %(filename)s:%(lineno)d - %(message)s - %(exc_info)s'
+        warning: '%(levelname)s: %(filename)s:%(lineno)d - %(message)s'
+        info: '%(levelname)s: %(message)s'
+        debug: '%(levelname)s: %(filename)s:%(lineno)d - %(message)s'
 
   colors:
     error: red
@@ -162,40 +122,3 @@ logging:
 
   max_bytes: 5242880
   backup_count: 5
-
-# Currency pairs available from Yahoo Finance
-currency_pairs:
-  - ticker: EURGBP=X
-    description: Euro to British Pound
-  - ticker: GBP=X
-    description: US Dollar to British Pound
-  - ticker: JPYGBP=X
-    description: Japanese Yen to British Pound
-  - ticker: AUDGBP=X
-    description: Australian Dollar to British Pound
-  - ticker: CADGBP=X
-    description: Canadian Dollar to British Pound
-  - ticker: NZDGBP=X
-    description: New Zealand Dollar to British Pound
-  - ticker: CHFGBP=X
-    description: Swiss Franc to British Pound
-  - ticker: CNYGBP=X
-    description: Chinese Yuan to British Pound
-  - ticker: HKDGBP=X
-    description: Hong Kong Dollar to British Pound
-  - ticker: SGDGBP=X
-    description: Singapore Dollar to British Pound
-  - ticker: INRGBP=X
-    description: Indian Rupee to British Pound
-  - ticker: MXNGBP=X
-    description: Mexican Peso to British Pound
-  - ticker: PHPGBP=X
-    description: Philippine Peso to British Pound
-  - ticker: MYRGBP=X
-    description: Malaysian Ringgit to British Pound
-  - ticker: ZARGBP=X
-    description: South African Rand to British Pound
-  - ticker: RUBGBP=X
-    description: Russian Ruble to British Pound
-  - ticker: TRYGBP=X
-    description: Turkish Lira to British Pound

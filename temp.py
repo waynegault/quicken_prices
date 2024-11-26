@@ -268,7 +268,7 @@ def get_ticker(ticker_symbol: str):
 @retry(Exception, tries=3)
 @log_function
 def fetch_ticker_data(
-    ticker_symbol: str, start_date: datetime.datetime, end_date: datetime.datetime
+    ticker_symbol: str, start_date: datetime, end_date: datetime
 ) -> pd.DataFrame:
     """
     Fetch historical data for a single ticker.
