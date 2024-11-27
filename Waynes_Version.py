@@ -35,6 +35,7 @@ try:
     from datetime import datetime, timedelta, date  # Classes for working with dates and times
     from pathlib import Path  # Object-oriented interface to filesystem paths
     from collections import namedtuple   # Create custom data structures with named fields.
+    from dateutil import parser
 
     # Third-Party Library Imports
     import numpy as np
@@ -358,26 +359,22 @@ def copy_to_clipboard(text: str):
 def get_date_range():
     """ Get period from config dictionary and calculate date range.
     """
-    logger.info("Getting date range...")
     start_date = None
     end_date = None
     period_year= config["collection"]["period_years"]
     period_days = period_year *365
     end_date = date.today()
     start_date = end_date - timedelta(days=int(period_days))
-    logger.info(f"Obtained date range {start_date.strftime("%d/%m/%Y")} to {end_date.strftime("%d/%m/%Y")}"
-    )
-    return start_date, end_date
-
-def get_business_days():
-    start_date, end_date = get_date_range()
     # Convert dates to numpy datetime64[D] format
     start_date_np = np.datetime64(start_date)
     end_date_np = np.datetime64(end_date)
     # Calculate business days using np.busday_count
     business_days = np.busday_count(start_date_np, end_date_np)
-    return business_days
 
+    logger.info(
+        f"Obtained date range {start_date.strftime("%d/%m/%Y")} to {end_date.strftime("%d/%m/%Y")} ({business_days} business days)"
+    )
+    return start_date, end_date, business_days
 
 def format_path(full_path):
     """Format a file path to show the last parent directory and filename."""
@@ -386,6 +383,80 @@ def format_path(full_path):
         return "\\" + "\\".join(path_parts[-2:])  # Show parent dir and filename
     return "\\" + full_path  # Just in case there's no parent directory
 
+
+def normalise_dates(df, date_column="Date"):
+    """
+    Normalises the specified date column in the DataFrame by performing the following steps:
+
+    1. **Check Column Existence**: Verifies that the specified date column exists in the DataFrame.
+    2. **Trim Spaces**: Removes any leading or trailing spaces from the date strings.
+    3. **Parse and Convert to UTC**: Converts all date strings to UTC, handling both timezone-aware and timezone-naive dates.
+    4. **Extract Date Component**: Removes time and timezone information, retaining only the date in 'YYYY-MM-DD' format.
+    5. **Remove Invalid Dates**: Drops rows where the date parsing failed.
+    6. **Sort DataFrame**: Sorts the DataFrame by the normalized date in descending order.
+    7. **Clean Up**: Replaces the original date column with the normalized dates and removes any auxiliary columns.
+
+    Parameters:
+    ----------
+    df : pd.DataFrame
+        The input DataFrame containing the date column to normalise.
+
+    date_column : str, default 'Date'
+        The name of the column containing date strings to be normalised.
+
+    Returns:
+    -------
+    pd.DataFrame
+        The DataFrame with the normalised date column and invalid date rows removed.
+    """
+
+    # Step 1: Check that the specified date column exists
+    if date_column not in df.columns:
+        raise ValueError(f"The DataFrame does not contain a '{date_column}' column.")
+
+    # Step 2: Remove any leading or trailing spaces
+    df[date_column] = df[date_column].astype(str).str.strip()
+
+    # Step 3: Parse dates using dateutil.parser.parse and convert to UTC
+    parsed_dates = []
+    for idx, date_str in df[date_column].items():
+        if pd.isna(date_str) or date_str == "":
+            # Handle NaN and empty strings
+            parsed_dates.append(pd.NaT)
+            continue
+        try:
+            # Parse the date string with fuzzy parsing to handle various formats
+            dt = parser.parse(date_str, fuzzy=True)
+            if dt.tzinfo is None:
+                # If no timezone info, assume UTC
+                dt = dt.replace(tzinfo=pytz.UTC)
+            else:
+                # Convert to UTC
+                dt = dt.astimezone(pytz.UTC)
+            parsed_dates.append(dt)
+        except (ValueError, TypeError):
+            # If parsing fails, append NaT
+            parsed_dates.append(pd.NaT)
+
+    df["Date_Parsed"] = parsed_dates
+
+    # Step 4: Extract the date component and remove timezone and time information
+    df["Date_Normalised"] = df["Date_Parsed"].dt.date.astype(str)
+
+    # Step 5: Remove rows with invalid dates (NaT)
+    df_cleaned = df.dropna(subset=["Date_Parsed"]).copy()
+
+    # Step 6: Sort the DataFrame by the normalized date in descending order
+    df_cleaned = df_cleaned.sort_values(
+        by="Date_Normalised", ascending=False
+    ).reset_index(drop=True)
+
+    # Step 7: Replace the original date column with the normalized dates
+    df_cleaned[date_column] = df_cleaned["Date_Normalised"]
+    # Drop auxiliary columns
+    df_final = df_cleaned.drop(columns=["Date_Parsed", "Date_Normalised"])
+
+    return df_final
 
 #
 # -----------------------------------------------------------------------------------
@@ -399,18 +470,15 @@ def get_tickers(config: Dict[str, Any], set_maximum_tickers=3) -> Set[valid_tick
     Get the list of tickers from the configuration, including currency pairs.
     """
     # Get tickers from config
-    logger.info("Getting tickers...")
     stock_tickers = list(config["tickers"].keys())
-
-    logger.debug(
-        f"Received {len(stock_tickers)} stock tickers:\n{f'First {set_maximum_tickers}' if set_maximum_tickers<len(stock_tickers) else ''}: {list(stock_tickers)[:set_maximum_tickers]}{f'...' if len(stock_tickers)>set_maximum_tickers else ''}"
-    )
 
     if not stock_tickers:
         logger.error("No tickers defined in YAML file. Exiting.")
         sys.exit(1)
     else:
-        logger.info("Got tickers")
+        logger.info(
+            f"Received {len(stock_tickers)} unvalidated stock tickers:\n{f'First {set_maximum_tickers}' if set_maximum_tickers<len(stock_tickers) else ''}: {list(stock_tickers)[:set_maximum_tickers]}{f'...' if len(stock_tickers)>set_maximum_tickers else ''}"
+        )
 
     # Validate stock tickers
     logger.info("Validating stock tickers...")
@@ -419,12 +487,16 @@ def get_tickers(config: Dict[str, Any], set_maximum_tickers=3) -> Set[valid_tick
     if not valid_tickers:
         logger.error("No valid tickers in YAML file. Exiting.")
         sys.exit(1)
+    else:
+        logger.info(
+            f"Received {len(valid_tickers)} validated stock tickers:\n{f'First {set_maximum_tickers}' if set_maximum_tickers<len(valid_tickers) else ''}: {list(valid_tickers)[:set_maximum_tickers]}{f'...' if len(valid_tickers)>set_maximum_tickers else ''}"
+        )
 
     # iterate through the currencies to extract unique currencies, excluding GBP and GBp
     currencies = { currency for _, _, currency in valid_tickers if currency not in ["GBP", "GBp"]}
 
     logger.info(
-        f"Obtaining {len(currencies)} FX tickers for currencies:\n{currencies}"
+        f"Obtaining {len(currencies)} FX tickers for currencies: {currencies}"
     )
 
     # Get list of FX tickers for those currencies we have
@@ -437,7 +509,7 @@ def get_tickers(config: Dict[str, Any], set_maximum_tickers=3) -> Set[valid_tick
 
     # join the elements of the list using a list comprehension:
     fx_tickers_list = ", ".join(str(ticker) for ticker in fx_tickers)
-    logger.info(f"Got {len(fx_tickers)} FX tickers:\n{fx_tickers_list}")
+    logger.info(f"Got {len(fx_tickers)} FX tickers: {fx_tickers_list}")
 
     # Validate FX tickers
     logger.info("Validating FX tickers...")
@@ -453,13 +525,12 @@ def get_tickers(config: Dict[str, Any], set_maximum_tickers=3) -> Set[valid_tick
     all_tickers = set(ticker for ticker in all_tickers)
 
     logger.debug(
-        f"{len(all_tickers)} combined tickers{f' - First {set_maximum_tickers}' if len(all_tickers)>set_maximum_tickers else ''}:\n       {list(all_tickers)[:set_maximum_tickers]}{f'...' if len(all_tickers)>set_maximum_tickers else ''}"
+        f"Received {len(all_tickers)} stock and FX tickers{f' - First {set_maximum_tickers}' if len(all_tickers)>set_maximum_tickers else ''}: {list(all_tickers)[:set_maximum_tickers]}{f'...' if len(all_tickers)>set_maximum_tickers else ''}"
     )
 
     return all_tickers
 
 
-@log_function
 def validate_tickers(
     tickers: list[str], set_maximum_tickers=5
 ) -> tuple[list[tuple[str, str, str]], list[str]]:
@@ -486,7 +557,7 @@ def validate_tickers(
             quote_type = info.get("quoteType", None)
             currency = info.get("currency", None)
             # Make all tickers uppercase whist we have it as a string
-            ticker = info.get("symbol", None)
+            ticker = info.get("symbol", ticker_symbol)
             if ticker:
                 ticker = ticker.upper()
 
@@ -501,7 +572,7 @@ def validate_tickers(
                     warn = "missing quote type" if not quote_type else ""
                     warn2 = "missing currency" if not currency else ""
                     logger.warning(
-                        f"Ticker {ticker} is invalid due to {warn}{' and ' if warn and warn2 else ""}{warn2}."
+                        f"Ticker {ticker} is invalid due to {warn if warn else ''}{' and ' if warn and warn2 else ''}{warn2 if warn2 else ''}."
                     )
 
         except Exception as e:
@@ -512,46 +583,29 @@ def validate_tickers(
     # Get a string of all valid ticker names for reporting
     if not valid_tickers:
         logger.error("No valid tickers found.")
-        valid_plural = "s"
+        short_valid_ticker_list = ""
     else:
         # Extract names of valid tickers
         valid_ticker_names = [
             vt.ticker for vt in valid_tickers
         ]  # List comprehension for names
         num_valid_tickers = len(valid_ticker_names)
-        # Prepare grammar and restrict length of ticker output
-        short_valid_ticker_list = f"{f'- first {set_maximum_tickers}' if set_maximum_tickers<num_valid_tickers else ''}:\n      {list(valid_ticker_names)[:set_maximum_tickers]}{f'...' if num_valid_tickers>set_maximum_tickers else ''}"
-        valid_plural = (
-            "s"
-            if num_valid_tickers < 1
-            else (
-                f"s {short_valid_ticker_list})"
-                if num_valid_tickers > 1
-                else f"({valid_ticker_names})"
-            )
-        )
+        # Restrict length of ticker output
+        short_valid_ticker_list = f"{f'First {set_maximum_tickers} valid' if set_maximum_tickers<num_valid_tickers else 'Valid'}: {list(valid_ticker_names)[:set_maximum_tickers]}{f'...' if num_valid_tickers>set_maximum_tickers else ''}"
 
     # Get a string of all invalid ticker names
     num_invalid_tickers = len(invalid_tickers)
     if num_invalid_tickers > 0:
-        # Prepare grammar and restrict length of ticker output
-        short_invalid_ticker_list = f"{f'- first {set_maximum_tickers}' if set_maximum_tickers<num_invalid_tickers else ''}:\n      {list(invalid_tickers)[:set_maximum_tickers]}{f'...' if num_invalid_tickers>set_maximum_tickers else ''}"
-        invalid_plural = (
-            "s"
-            if num_invalid_tickers < 1
-            else (
-                f"s (eg {short_invalid_ticker_list})"
-                if num_invalid_tickers > 1
-                else f"({invalid_tickers})"
-            )
-        )
+        # Restrict length of ticker output
+        short_invalid_ticker_list = f"{f'\nFirst {set_maximum_tickers} invalid' if set_maximum_tickers<num_invalid_tickers else '\nInvalid'}: {list(invalid_tickers)[:set_maximum_tickers]}{f'...' if num_invalid_tickers>set_maximum_tickers else ''}"
     else:
-        invalid_plural ="s"
+        short_invalid_ticker_list =""
 
     # Report outcome
     logger.info(
-        f"Validation summary:\n      {num_valid_tickers} valid ticker{valid_plural}\n      {num_invalid_tickers} invalid ticker{invalid_plural}."
+        f"Validation summary - Valid: {num_valid_tickers}, Invalid: {num_invalid_tickers}"
     )
+    logger.debug(f"{short_valid_ticker_list}{short_invalid_ticker_list}")
 
     return valid_tickers, invalid_tickers
 
@@ -605,7 +659,6 @@ class YFinanceSimulator:
 
 
 @retry(Exception, tries=3)
-@log_function
 def get_ticker(ticker_symbol: str) -> Optional[yf.Ticker]:
     """
     Fetches ticker data from Yahoo Finance or a simulator based on configuration.
@@ -632,7 +685,6 @@ def get_ticker(ticker_symbol: str) -> Optional[yf.Ticker]:
         return None
 
 @retry(Exception, tries=3)
-@log_function
 def fetch_ticker_history(
     ticker_symbol: str, start_date: datetime, end_date: datetime
 ) -> pd.DataFrame:
@@ -649,7 +701,6 @@ def fetch_ticker_history(
         f"{ticker_symbol}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.pkl",
     )
     if os.path.exists(cache_file):
-        logger.debug(f"Loading cached data for {ticker_symbol}")
         with open(cache_file, "rb") as f:
             df = pickle.load(f)
         logger.debug(f"Using cache file {format_path(cache_file)}")
@@ -665,26 +716,28 @@ def fetch_ticker_history(
             logger.warning(f"No data found online for {ticker_symbol}")
             return pd.DataFrame()
         else:
-            logger.debug(f"Got historical data for {ticker_symbol}")
+            logger.debug(f"Downloaded historical data for {ticker_symbol}")
 
         with open(cache_file, "wb") as f:# With automatically closes file
             pickle.dump(df, f)
-            logger.debug(f"{ticker_symbol} cache saved to {format_path(cache_file)}")
+            logger.debug(f"Save cache to {format_path(cache_file)}")
 
     # Drop superfluous columns
     df = df.reset_index()  # make the index a regular column named "Date"
     tidy_df = df[['Date','Price']]
 
-    logger.info(
-        f"Got dataframe for {ticker_symbol} of {tidy_df.shape[0]} rows and {tidy_df.shape[1]} columns ({list(tidy_df.columns)})"
+    logger.debug(
+        f" Got dataframe for {ticker_symbol} of {tidy_df.shape[0]} rows and {tidy_df.shape[1]} columns ({list(tidy_df.columns)})"
     )
-
     return tidy_df  # returns a pandas df
 
 
 @log_function
 def fetch_historical_data(
-    tickers: Set[valid_ticker], start_date: datetime, end_date: datetime
+    tickers: Set[valid_ticker],
+    start_date: datetime,
+    end_date: datetime,
+    business_days: int,
 ) -> pd.DataFrame:
     """
     Iterates over the list of valid tickers, fetching their data using fetch_ticker_history,
@@ -701,103 +754,142 @@ def fetch_historical_data(
             df["QuoteType"] = quote_type
             df["Currency"] = currency
             records.append(df)
-            logger.info(f"Fetched data for ticker {ticker_symbol}")
         except Exception as e:
             logger.warning(f"Failed to fetch data for ticker {ticker_symbol}: {e}")
+
     if records:
         # combine multiple DataFrames into a single DataFrame.
         combined_df = pd.concat(
             records, ignore_index=True
         )  
+        # Normalise dates
+        combined_df = normalise_dates(combined_df, date_column="Date")
+
+        # Reorder columns
+        combined_df = combined_df[["Ticker", "Price", "Date", "QuoteType", "Currency"]]
+
         logger.info(
-                f"Got dataframe of all data for {get_business_days()} business days between {start_date.strftime("%d/%m/%Y")} and {end_date.strftime("%d/%m/%Y")}\n      {combined_df.shape[0]} rows and {combined_df.shape[1]} columns ({list(combined_df.columns)})"
+                f"Got dataframe for {business_days} business days between {start_date.strftime("%d/%m/%Y")} and {end_date.strftime("%d/%m/%Y")}\n      {combined_df.shape[0]} rows and {combined_df.shape[1]} columns ({list(combined_df.columns)})"
             )
         return combined_df
     else:
         logger.error(
-            f"Did not obtain data for the {get_business_days()} business days between {start_date.strftime("%d/%m/%Y")} and {end_date.strftime("%d/%m/%Y")}!"
+            f"Did not obtain data for the {business_days} business days between {start_date.strftime("%d/%m/%Y")} and {end_date.strftime("%d/%m/%Y")}!"
         )
-        return pd.DataFrame()  # return an empty DataFrame
+    return pd.DataFrame()  # return an empty DataFrame
 
 
 #
 # -----------------------------------------------------------------------------------
 # Data Processing                                                                    |
 # -----------------------------------------------------------------------------------
-# Purpose: Process the raw fetched data by performing currency conversions,
-# formatting dates, and organizing the data for output.
+# Purpose: Process the raw fetched data by performing currency conversions and organizing the data for output.
 #
 @log_function
-def process_data(df: pd.DataFrame, currency_rates: Dict[str, float]) -> pd.DataFrame:
+def convert_prices(ticker_dataframe: pd.DataFrame) -> pd.DataFrame:
     """
-    Process the data to have columns: 'Ticker', 'Price', 'Date', "QuoteType", "Currency" ordered by descending date.
-    """
-    if df.empty:
-        return df
-    # Filter and reorder columns
-    df = df[["Ticker", "Close", "Date", "QuoteType", "Currency"]]
-    df.rename(columns={"Close": "Price"}, inplace=True)
-    # Ensure 'Date' column is datetime without timezone
-    df["Date"] = pd.to_datetime(df["Date"], utc=True).dt.tz_convert(None)
-    # Reorder by iso date (dont order by non-iso date!)
-    df.sort_values(by="Date", ascending=False, inplace=True)
+    Converts the Price column to GBP based on the Currency and QuoteType columns.
+    Rows with QuoteType 'CURRENCY' or 'INDEX' are included in the final dataframe unchanged.
 
-    # Convert prices to GBP where applicable
-    for index, row in df.iterrows():
-        ticker = row["Ticker"]
-        price = row["Price"]
-        quote_type = row["QuoteType"]
+    Parameters:
+    - ticker_dataframe (pd.DataFrame): The input dataframe containing ticker information.
+
+    Returns:
+    - pd.DataFrame: A new dataframe with prices converted to GBP and including all original rows.
+    """
+    # Step 1: Separate exchange rates from the main dataframe
+    exchange_rates_df = ticker_dataframe[ticker_dataframe["QuoteType"] == "CURRENCY"]
+
+    # Step 2: Create a mapping for exchange rates
+    # Key: (Date, Ticker), Value: Price (exchange rate)
+    exchange_rate_map = exchange_rates_df.set_index(["Date", "Ticker"])[
+        "Price"
+    ].to_dict()
+
+    # Step 3: Identify rows that require conversion and those that don't
+    # Rows to convert: QuoteType not in ['CURRENCY', 'INDEX']
+    rows_to_convert = ticker_dataframe[
+        # note: The ~ operator negates the boolean Series!
+        ~ticker_dataframe["QuoteType"].isin(["CURRENCY", "INDEX"])
+    ].copy()
+
+    # Rows to keep as-is: QuoteType in ['CURRENCY', 'INDEX']
+    rows_to_keep = ticker_dataframe[
+        ticker_dataframe["QuoteType"].isin(["CURRENCY", "INDEX"])
+    ].copy()
+
+    # Initialize a list to store converted rows
+    converted_rows = []
+
+    # Step 4: Iterate over each row to perform conversion
+    for idx, row in rows_to_convert.iterrows():
         currency = row["Currency"]
+        date = row["Date"]
+        price = row["Price"]
+        ticker = row["Ticker"]
 
-        # For quote_type 'CURRENCY', keep in original denomination
-        if quote_type == "CURRENCY":
-            pass
-
-        if currency == "GBp":
-            # Convert GBp to GBP by dividing by 100
-            df.at[index, "Price"] = price / 100
-        elif currency != "GBP":
-            # Convert price to GBP using exchange rates
-            if currency == "USD":
-                rate_ticker = "GBP=X"  # Ticker for USD to GBP
-            else:
-                rate_ticker = currency + "GBP=X"  # Correct format for other currencies
-            rate = currency_rates.get(rate_ticker, None)
-            if rate:
-                df.at[index, "Price"] = price * rate
-            else:
-                logger.warning(f"Missing exchange rate for {currency} to GBP")
-
-
-@log_function
-def get_exchange_rates(tickers: List[str]) -> Dict[str, float]:
-    """
-    Get exchange rates for the required currencies.
-    """
-    currencies = set()
-    for ticker_symbol in tickers:
-        currency = get_currency_for_ticker(ticker_symbol)
-        if currency not in ["GBP", "GBp"]:
-            if currency == "USD":
-                currencies.add("GBP=X")  # Ticker for USD to GBP
-            else:
-                currencies.add(
-                    currency + "GBP=X"
-                )  # Correct format for other currencies
-    exchange_rates = {}
-    for currency_pair in currencies:
         try:
-            ticker = get_ticker(currency_pair)
-            time.sleep(0.3)  # Rate limiting
-            df = ticker.history(period="1d")
-            if not df.empty:
-                rate = df["Close"].iloc[-1]
-                exchange_rates[currency_pair] = rate
+            if pd.isna(price):
+                logger.error(
+                    f"Missing price for Ticker '{ticker}' on {date.date()}. Skipping this row."
+                )
+                continue  # Skip this row and continue processing
+
+            if currency == "GBP":
+                # No conversion needed
+                price_gbp = price
+            elif currency == "GBp":
+                # Convert GBp to GBP by dividing by 100
+                price_gbp = price / 100
             else:
-                logger.warning(f"No data available for {currency_pair}")
+                # Determine the exchange rate ticker based on Currency
+                if currency == "USD":
+                    exchange_ticker = "GBP=X"
+                else:
+                    exchange_ticker = f"{currency}GBP=X"
+
+                # Retrieve the exchange rate using (Date, exchange_ticker)
+                exchange_rate_key = (date, exchange_ticker)
+                exchange_rate = exchange_rate_map.get(exchange_rate_key)
+
+                if exchange_rate is not None:
+                    price_gbp = price * exchange_rate
+                else:
+                    # Exchange rate not found for the given date and ticker
+                    logger.warning(
+                        f"Exchange rate for ticker '{exchange_ticker}' on {date.date()} not found. "
+                        f"Skipping row with Ticker '{ticker}'."
+                    )
+                    continue  # Skip this row
+
+            # Create a new row with the converted price
+            new_row = row.copy()
+            new_row["Price"] = price_gbp
+            new_row["Currency"] = "GBP"
+
+            # Append the converted row to the list
+            converted_rows.append(new_row)
+
         except Exception as e:
-            logger.warning(f"Failed to fetch data for {currency_pair}: {e}")
-    return exchange_rates
+            # Log the error and skip the row
+            logger.error(
+                f"Error converting price for Ticker '{ticker}' on {date}: {e}"
+            )
+            continue  # Skip this row and continue processing
+
+    # Step 5: Create a dataframe from converted rows
+    if converted_rows:
+        converted_df = pd.DataFrame(converted_rows)
+    else:
+        converted_df = pd.DataFrame(columns=rows_to_convert.columns)
+        logger.warning("No rows were converted.")
+
+    # Step 6: Combine converted rows with rows to keep as-is
+    final_dataframe = pd.concat([converted_df, rows_to_keep], ignore_index=True)
+
+    # Optional: Reset index if necessary (already handled by ignore_index=True)
+
+    return final_dataframe
 
 
 #
@@ -1034,36 +1126,56 @@ def main():
         # Get elevation
         # run_as_admin()
 
-        # Get date range
-        start_date, end_date = get_date_range()
+        # Clear screen for clean output
+        os.system("cls" if os.name == "nt" else "clear")
+        logger.debug("Starting program...")
 
-        # Get tickers - returns a set of validated ticker namedtuples for defined stocks and any currencies required
-        # eg {valid_ticker(ticker='CUKX.L', quote_type='ETF', currency='GBp'), valid_ticker(ticker='EURGBP=X', quote_type='CURRENCY', currency='GBP'),
+        # Get date range
+        start_date, end_date, business_days = get_date_range()
+
+        # Get tickers - returns a set of validated ticker namedtuples for defined stocks and currency FX rates required
         tickers = get_tickers(config) 
         if not tickers:  # checks for Falsy values eg empty set.
             logger.error("A serious error has occurred with no data being returned!")
             exit(1)
-        else:
-            logger.info(
-                f"valid_ticker set of {len(tickers)} namedtuples received in main()"
-            )
 
         # Fetch Ticker Dataframe
-        ticker_dataframe = fetch_historical_data(tickers, start_date, end_date)
+        ticker_dataframe = fetch_historical_data(
+            tickers, start_date, end_date, business_days
+        )
         if ticker_dataframe.empty: # checks for empty Pandas DataFrame
-            logger.error("No data fetched for any tickers. Exiting.")
+            logger.error(
+                "No data fetched from fetch_historical_data for any tickers. Exiting."
+            )
             exit(1)
             return
-        else:
-            logger.info("Main: Got price data for the tickers")
 
-        # # Process data
-        # logger.info("Converting prices...")
-        # processed_data = process_data(ticker_dataframe, exchange_rates)
+        print(f"ticker_dataframe: {ticker_dataframe}")
+        
+        # Check data types of all columns
+        print(ticker_dataframe.dtypes)
+
+        # Specifically check the 'Date' column
+        print(ticker_dataframe['Date'].dtype)
+        
+        # Identify rows where 'Date' is not a datetime object
+    problematic_rows = ticker_dataframe[
+        ticker_dataframe['QuoteType'].isin(['ETF', 'EQUITY']) &  # Assuming these require conversion
+        ticker_dataframe['Ticker'].isin(['GL1S.MU', 'LAU.AX']) &  # Specific tickers causing issues
+        ticker_dataframe['Date'].apply(lambda x: isinstance(x, str))  # 'Date' is string
+    ]
+
+    print(problematic_rows)
+
+        # Convert prices to GBP except INDEX and CURRENCY
+        ticker_dataframe = convert_prices(ticker_dataframe)
+
+        # processed_data = convert_prices(ticker_dataframe, exchange_rates)
         # if processed_data.empty:
         #     logger.error(
-        #         "Something went wrong when converting prices.No data returned!"
+        #         "Something went wrong when converting prices.No data returned! Exiting."
         #     )
+        #     exit(1)
         #     return
         # else:
         #     logger.info("Prices converted")

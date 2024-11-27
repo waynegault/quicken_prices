@@ -13,7 +13,6 @@ tickers:
   CYSE.L:        "WisdomTree Cybersecurity UCITS ETF USD Acc (GBP)"
   ELIX.L:        "Elixirr International plc (GBP)"
   EURGBP=X:      "EUR/GBP Fx"
-  fake:          "fake"
   ^FTAS:         "FTSE All-share (GBP)"
   ^FTSE:         "FTSE 100 (GBP)"
   GBP=X:         "USD/GBP Fx"
