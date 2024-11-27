@@ -15,6 +15,7 @@ Wayne Gault
 
 MIT Licence
 """
+#
 # -----------------------------------------------------------------------------------
 # Imports                                                                           |
 # -----------------------------------------------------------------------------------
@@ -31,13 +32,12 @@ try:
     import gc  # Garbage Collector interface
     import threading  # Provides high-level threading interface
     from queue import Queue  # Implements multi-producer, multi-consumer queues
-    from datetime import datetime, timedelta  # Classes for working with dates and times
+    from datetime import datetime, timedelta, date  # Classes for working with dates and times
     from pathlib import Path  # Object-oriented interface to filesystem paths
-    from collections import (
-        namedtuple,
-    )  # Create custom data structures with named fields.
+    from collections import namedtuple   # Create custom data structures with named fields.
 
     # Third-Party Library Imports
+    import numpy as np
     import yaml  # YAML parser and emitter
     import json  # JSON encoder and decoder
     import functools  # Higher-order functions and operations
@@ -54,7 +54,7 @@ try:
         ThreadPoolExecutor,
         as_completed,
     )  # Asynchronous task execution
-    from typing import List, Iterator, Optional, Dict, Any  # Type hints
+    from typing import List, Iterator, Optional, Dict, Any, Set # Type hints
     from dataclasses import dataclass  # Data class decorator
     from enum import Enum  # Enum class definition
     from contextlib import contextmanager  # Context manager utilities
@@ -182,16 +182,20 @@ def load_configuration(config_file: str = "config.yaml") -> Dict[str, Any]:
 
     return config
 
-# Other Global Variables
-
-
 # Invoke the load_configuration function and assign settings to config
 config = load_configuration()
 
 # Initialize colorama to enable cross-platform colored terminal output
 init(autoreset=True)
 
-# Ensure the base directory exists
+# Create namedtuple classes
+valid_ticker = namedtuple("valid_ticker", ["ticker", "quote_type", "currency"])
+ticker_data = namedtuple("ticker_data", ["ticker", "quote_type", "currency", "price", "date"])
+
+# turn on yFinance debug mode
+# yf.enable_debug_mode()
+
+# Global Variables
 base_directory = config.get("paths", {}).get("base", ".")
 if not os.path.exists(base_directory):
     os.makedirs(base_directory)
@@ -303,7 +307,7 @@ def log_function(func):
         logger.debug(f"Start {func.__name__}")
         try:
             result = func(*args, **kwargs)
-            logger.debug(f"{func.__name__} OK")
+            logger.debug(f"End {func.__name__}")
             return result
         except Exception as e:
             logger.error(f"{func.__name__} failed! Error: {e}")
@@ -359,12 +363,28 @@ def get_date_range():
     end_date = None
     period_year= config["collection"]["period_years"]
     period_days = period_year *365
-    end_date = datetime.date.today()
-    start_date = end_date - datetime.timedelta(days=int(period_days))
-    logger.info(
-        f"Obtained date range, {start_date.strftime("%d/%m/%Y")} to {end_date.strftime("%d/%m/%Y")}"
+    end_date = date.today()
+    start_date = end_date - timedelta(days=int(period_days))
+    logger.info(f"Obtained date range {start_date.strftime("%d/%m/%Y")} to {end_date.strftime("%d/%m/%Y")}"
     )
     return start_date, end_date
+
+def get_business_days():
+    start_date, end_date = get_date_range()
+    # Convert dates to numpy datetime64[D] format
+    start_date_np = np.datetime64(start_date)
+    end_date_np = np.datetime64(end_date)
+    # Calculate business days using np.busday_count
+    business_days = np.busday_count(start_date_np, end_date_np)
+    return business_days
+
+
+def format_path(full_path):
+    """Format a file path to show the last parent directory and filename."""
+    path_parts = full_path.split("\\")
+    if len(path_parts) > 1:
+        return "\\" + "\\".join(path_parts[-2:])  # Show parent dir and filename
+    return "\\" + full_path  # Just in case there's no parent directory
 
 
 #
@@ -374,9 +394,7 @@ def get_date_range():
 # Manage and validate tickers, ensuring that only valid and correctly formatted tickers are processed as well as any necessary FX rate tickers.
 #
 @log_function  # Decorator to log entry and exit of functions.
-def get_tickers(
-    config: Dict[str, Any], set_maximum_tickers=5
-) -> List[str]:
+def get_tickers(config: Dict[str, Any], set_maximum_tickers=3) -> Set[valid_ticker]:
     """
     Get the list of tickers from the configuration, including currency pairs.
     """
@@ -385,7 +403,7 @@ def get_tickers(
     stock_tickers = list(config["tickers"].keys())
 
     logger.debug(
-        f"Received {len(stock_tickers)} stock tickers, {f'first {set_maximum_tickers}' if set_maximum_tickers<len(stock_tickers) else ''}: {list(stock_tickers)[:set_maximum_tickers]}{f'...' if len(stock_tickers)>set_maximum_tickers else ''}"
+        f"Received {len(stock_tickers)} stock tickers:\n{f'First {set_maximum_tickers}' if set_maximum_tickers<len(stock_tickers) else ''}: {list(stock_tickers)[:set_maximum_tickers]}{f'...' if len(stock_tickers)>set_maximum_tickers else ''}"
     )
 
     if not stock_tickers:
@@ -406,7 +424,7 @@ def get_tickers(
     currencies = { currency for _, _, currency in valid_tickers if currency not in ["GBP", "GBp"]}
 
     logger.info(
-        f"Obtaining {len(currencies)} FX tickers for these currencies, {currencies}"
+        f"Obtaining {len(currencies)} FX tickers for currencies:\n{currencies}"
     )
 
     # Get list of FX tickers for those currencies we have
@@ -419,14 +437,11 @@ def get_tickers(
 
     # join the elements of the list using a list comprehension:
     fx_tickers_list = ", ".join(str(ticker) for ticker in fx_tickers)
-    logger.info(f"Got {len(fx_tickers)} FX tickers: {fx_tickers_list}")
+    logger.info(f"Got {len(fx_tickers)} FX tickers:\n{fx_tickers_list}")
 
     # Validate FX tickers
     logger.info("Validating FX tickers...")
     valid_FX_tickers, invalid_FX_tickers = validate_tickers(fx_tickers)
-
-    # # Extract ticker only
-    # valid_FX_tickers = [ticker for ticker, _, _ in valid_FX_tickers]
 
     if not valid_FX_tickers:
         logger.error("No valid FX tickers. Can only process GBP stock")
@@ -438,7 +453,7 @@ def get_tickers(
     all_tickers = set(ticker for ticker in all_tickers)
 
     logger.debug(
-        f"{len(all_tickers)} combined tickers{f', first {set_maximum_tickers}' if len(all_tickers)>set_maximum_tickers else ''}: {list(all_tickers)[:set_maximum_tickers]}{f'...' if len(all_tickers)>set_maximum_tickers else ''}"
+        f"{len(all_tickers)} combined tickers{f' - First {set_maximum_tickers}' if len(all_tickers)>set_maximum_tickers else ''}:\n       {list(all_tickers)[:set_maximum_tickers]}{f'...' if len(all_tickers)>set_maximum_tickers else ''}"
     )
 
     return all_tickers
@@ -461,9 +476,6 @@ def validate_tickers(
     """
     valid_tickers = []
     invalid_tickers = []
-
-    # Create namedtuple class
-    valid_ticker = namedtuple("valid_ticker", ["ticker", "quote_type", "currency"])
 
     for ticker_symbol in tickers:
         try:
@@ -508,7 +520,7 @@ def validate_tickers(
         ]  # List comprehension for names
         num_valid_tickers = len(valid_ticker_names)
         # Prepare grammar and restrict length of ticker output
-        short_valid_ticker_list = f"{f', first {set_maximum_tickers}' if set_maximum_tickers<num_valid_tickers else ''}: {list(valid_ticker_names)[:set_maximum_tickers]}{f'...' if num_valid_tickers>set_maximum_tickers else ''}"
+        short_valid_ticker_list = f"{f'- first {set_maximum_tickers}' if set_maximum_tickers<num_valid_tickers else ''}:\n      {list(valid_ticker_names)[:set_maximum_tickers]}{f'...' if num_valid_tickers>set_maximum_tickers else ''}"
         valid_plural = (
             "s"
             if num_valid_tickers < 1
@@ -523,7 +535,7 @@ def validate_tickers(
     num_invalid_tickers = len(invalid_tickers)
     if num_invalid_tickers > 0:
         # Prepare grammar and restrict length of ticker output
-        short_invalid_ticker_list = f"{f', first {set_maximum_tickers}' if set_maximum_tickers<num_invalid_tickers else ''}: {list(invalid_tickers)[:set_maximum_tickers]}{f'...' if num_invalid_tickers>set_maximum_tickers else ''}"
+        short_invalid_ticker_list = f"{f'- first {set_maximum_tickers}' if set_maximum_tickers<num_invalid_tickers else ''}:\n      {list(invalid_tickers)[:set_maximum_tickers]}{f'...' if num_invalid_tickers>set_maximum_tickers else ''}"
         invalid_plural = (
             "s"
             if num_invalid_tickers < 1
@@ -538,7 +550,7 @@ def validate_tickers(
 
     # Report outcome
     logger.info(
-        f"Validation summary: {num_valid_tickers} valid ticker{valid_plural} and {num_invalid_tickers} invalid ticker{invalid_plural}."
+        f"Validation summary:\n      {num_valid_tickers} valid ticker{valid_plural}\n      {num_invalid_tickers} invalid ticker{invalid_plural}."
     )
 
     return valid_tickers, invalid_tickers
@@ -594,17 +606,30 @@ class YFinanceSimulator:
 
 @retry(Exception, tries=3)
 @log_function
-def get_ticker(ticker_symbol: str):
+def get_ticker(ticker_symbol: str) -> Optional[yf.Ticker]:
     """
-    Get ticker object from yfinance or simulator based on configuration.
-    """
-    if config.get("use_simulator", False):
-        dat = YFinanceSimulator(ticker_symbol)
-    else:
-        # Get ticker info dictionary from Yahoo
-        dat = yf.Ticker(ticker_symbol)
-    return dat
+    Fetches ticker data from Yahoo Finance or a simulator based on configuration.
 
+    Args:
+        ticker_symbol: The ticker symbol to fetch data for.
+
+    Returns:
+        A yfinance Ticker object if successful, None otherwise.
+    """
+    try:
+        if config.get("use_simulator", False):
+            ticker = YFinanceSimulator(ticker_symbol)
+        else:
+            ticker = yf.Ticker(ticker_symbol)
+
+        return ticker
+    except Exception as e:
+        if "404" in str(e) or "Client" in str(e):
+            logger.error(f"Invalid ticker symbol: {ticker_symbol}")
+        else:
+            logger.error(f"Error fetching ticker data for {ticker_symbol}: {e}")
+
+        return None
 
 @retry(Exception, tries=3)
 @log_function
@@ -612,9 +637,9 @@ def fetch_ticker_history(
     ticker_symbol: str, start_date: datetime, end_date: datetime
 ) -> pd.DataFrame:
     """
-    Fetches metadata for a single ticker.
-    It first checks if the data is cached; if not,
-    it fetches the data using the appropriate ticker object and caches it.
+    Fetches price/ rate data for a single ticker.
+    First checks if the data is cached; if not,
+    fetches the data using the appropriate ticker object and caches it.
     """
     cache_dir = os.path.join(base_directory, "cache")
     if not os.path.exists(cache_dir):
@@ -627,23 +652,39 @@ def fetch_ticker_history(
         logger.debug(f"Loading cached data for {ticker_symbol}")
         with open(cache_file, "rb") as f:
             df = pickle.load(f)
+        logger.debug(f"Using cache file {format_path(cache_file)}")
     else:
         ticker = get_ticker(ticker_symbol)
         time.sleep(0.2)  # Rate limiting
         df = ticker.history(
-            start=start_date.strftime("%Y-%m-%d"), end=end_date.strftime("%Y-%m-%d")
-        )
+            start=start_date.strftime("%Y-%m-%d"),
+            end=end_date.strftime("%Y-%m-%d"),
+            interval="1d",
+        ).rename(columns={"Close": "Price"})
         if df.empty:
             logger.warning(f"No data found online for {ticker_symbol}")
             return pd.DataFrame()
-        with open(cache_file, "wb") as f:
+        else:
+            logger.debug(f"Got historical data for {ticker_symbol}")
+
+        with open(cache_file, "wb") as f:# With automatically closes file
             pickle.dump(df, f)
-    return df
+            logger.debug(f"{ticker_symbol} cache saved to {format_path(cache_file)}")
+
+    # Drop superfluous columns
+    df = df.reset_index()  # make the index a regular column named "Date"
+    tidy_df = df[['Date','Price']]
+
+    logger.info(
+        f"Got dataframe for {ticker_symbol} of {tidy_df.shape[0]} rows and {tidy_df.shape[1]} columns ({list(tidy_df.columns)})"
+    )
+
+    return tidy_df  # returns a pandas df
 
 
 @log_function
 def fetch_historical_data(
-    tickers: List[tuple], start_date: datetime, end_date: datetime
+    tickers: Set[valid_ticker], start_date: datetime, end_date: datetime
 ) -> pd.DataFrame:
     """
     Iterates over the list of valid tickers, fetching their data using fetch_ticker_history,
@@ -652,11 +693,10 @@ def fetch_historical_data(
     records = []
     for ticker_symbol, quote_type, currency in tickers:
         try:
+            # Get pandas df of historical data
             df = fetch_ticker_history(ticker_symbol, start_date, end_date)
             if df.empty:
                 continue
-            df = df[["Close"]].copy()
-            df.reset_index(inplace=True)
             df["Ticker"] = ticker_symbol
             df["QuoteType"] = quote_type
             df["Currency"] = currency
@@ -665,10 +705,19 @@ def fetch_historical_data(
         except Exception as e:
             logger.warning(f"Failed to fetch data for ticker {ticker_symbol}: {e}")
     if records:
-        combined_df = pd.concat(records, ignore_index=True)
+        # combine multiple DataFrames into a single DataFrame.
+        combined_df = pd.concat(
+            records, ignore_index=True
+        )  
+        logger.info(
+                f"Got dataframe of all data for {get_business_days()} business days between {start_date.strftime("%d/%m/%Y")} and {end_date.strftime("%d/%m/%Y")}\n      {combined_df.shape[0]} rows and {combined_df.shape[1]} columns ({list(combined_df.columns)})"
+            )
         return combined_df
     else:
-        return pd.DataFrame()
+        logger.error(
+            f"Did not obtain data for the {get_business_days()} business days between {start_date.strftime("%d/%m/%Y")} and {end_date.strftime("%d/%m/%Y")}!"
+        )
+        return pd.DataFrame()  # return an empty DataFrame
 
 
 #
@@ -985,84 +1034,88 @@ def main():
         # Get elevation
         # run_as_admin()
 
-        # Get tickers - returns a set of validated ticker namedtuples for defined stocks and any currencies required  eg valid_ticker(ticker='0P00013P6I.L', quote_type='MUTUALFUND', currency='GBp')
-        tickers = get_tickers(
-            config
-        )  # max number in debug prints
-
         # Get date range
         start_date, end_date = get_date_range()
 
-        # Fetch Ticker Data
-        logger.info(
-            f"Fetching price data from {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}"
-        )
-        raw_data = fetch_historical_data(valid_tickers, start_date, end_date)
-        if raw_data.empty:
-            logger.error("No data fetched for any tickers. Exiting.")
-            return
+        # Get tickers - returns a set of validated ticker namedtuples for defined stocks and any currencies required
+        # eg {valid_ticker(ticker='CUKX.L', quote_type='ETF', currency='GBp'), valid_ticker(ticker='EURGBP=X', quote_type='CURRENCY', currency='GBP'),
+        tickers = get_tickers(config) 
+        if not tickers:  # checks for Falsy values eg empty set.
+            logger.error("A serious error has occurred with no data being returned!")
+            exit(1)
         else:
-            logger.info("Got price data")
-
-        # Process data
-        logger.info("Converting prices...")
-        processed_data = process_data(raw_data, exchange_rates)
-        if processed_data.empty:
-            logger.error(
-                "Something went wrong when converting prices.No data returned!"
+            logger.info(
+                f"valid_ticker set of {len(tickers)} namedtuples received in main()"
             )
+
+        # Fetch Ticker Dataframe
+        ticker_dataframe = fetch_historical_data(tickers, start_date, end_date)
+        if ticker_dataframe.empty: # checks for empty Pandas DataFrame
+            logger.error("No data fetched for any tickers. Exiting.")
+            exit(1)
             return
         else:
-            logger.info("Prices converted")
+            logger.info("Main: Got price data for the tickers")
 
-        # Save data to CSV
-        output_file = os.path.join(
-            base_directory, config.get("paths", {}).get("output_file", "data.csv")
-        )
-        logger.info(f"Saving to {output_file}")
-        save = save_to_csv(processed_data, output_file)
-        if save == True:
-            logger.info("File saved")
-        else:
-            logger.error(f"Something went wrong. {output_file} not saved!")
+        # # Process data
+        # logger.info("Converting prices...")
+        # processed_data = process_data(ticker_dataframe, exchange_rates)
+        # if processed_data.empty:
+        #     logger.error(
+        #         "Something went wrong when converting prices.No data returned!"
+        #     )
+        #     return
+        # else:
+        #     logger.info("Prices converted")
 
-        # Clean up cache
-        logger.info(f"Cleaning out cache")
-        cache_dir = os.path.join(base_directory, "cache")
-        clean = clean_cache(
-            cache_dir, max_age_days=fetch_config.get("cache_max_age_days", 7)
-        )
-        if clean == True:
-            logger.info("Cache cleaned")
-        else:
-            logger.error(f"Something went wrong cleaning cache")
+        # # Save data to CSV
+        # output_file = os.path.join(
+        #     base_directory, config.get("paths", {}).get("output_file", "data.csv")
+        # )
+        # logger.info(f"Saving to {output_file}")
+        # save = save_to_csv(processed_data, output_file)
+        # if save == True:
+        #     logger.info("File saved")
+        # else:
+        #     logger.error(f"Something went wrong. {output_file} not saved!")
 
-        # Open Quicken
-        logger.info(f"Opening Quicken")
-        quicken_process = subprocess.Popen(["notepad.exe"], shell=True)
+        # # Clean up cache
+        # logger.info(f"Cleaning out cache")
+        # cache_dir = os.path.join(base_directory, "cache")
+        # clean = clean_cache(
+        #     cache_dir, max_age_days=fetch_config.get("cache_max_age_days", 7)
+        # )
+        # if clean == True:
+        #     logger.info("Cache cleaned")
+        # else:
+        #     logger.error(f"Something went wrong cleaning cache")
 
-        # Temporarily disable Ctrl+Alt+Del to prevent accidental interruption
-        pyautogui.hotkey("ctrl", "alt", "del")
-        # quicken does stuff
+        # # Open Quicken
+        # logger.info(f"Opening Quicken")
+        # quicken_process = subprocess.Popen(["notepad.exe"], shell=True)
 
-        # Give Quicken some time to open
-        time.sleep(100)
+        # # Temporarily disable Ctrl+Alt+Del to prevent accidental interruption
+        # pyautogui.hotkey("ctrl", "alt", "del")
+        # # quicken does stuff
+
+        # # Give Quicken some time to open
+        # time.sleep(100)
 
         # navigate in quicken
         #
         #
 
-        logging.info("Waiting for user to close Quicken...")
-        # Renable Ctrl+Alt+Del
-        pyautogui.hotkey("ctrl", "alt", "del")
-        pyautogui.write("Hello")
-        pyautogui.hotkey("ctrl", "alt", "del")
-        # Wait for quicken to close
-        quicken_process.wait()
+        # logging.info("Waiting for user to close Quicken...")
+        # # Renable Ctrl+Alt+Del
+        # pyautogui.hotkey("ctrl", "alt", "del")
+        # pyautogui.write("Hello")
+        # pyautogui.hotkey("ctrl", "alt", "del")
+        # # Wait for quicken to close
+        # quicken_process.wait()
 
-        logging.info("Quicken closed by user.")
-        logging.info("Keeping terminal open for 10 seconds...")
-        time.sleep(10)
+        # logging.info("Quicken closed by user.")
+        # logging.info("Keeping terminal open for 10 seconds...")
+        # time.sleep(10)
 
     except KeyboardInterrupt:
         logger.warning("Script interrupted by user.")
