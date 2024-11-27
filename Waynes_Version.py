@@ -32,9 +32,15 @@ try:
     import gc  # Garbage Collector interface
     import threading  # Provides high-level threading interface
     from queue import Queue  # Implements multi-producer, multi-consumer queues
-    from datetime import datetime, timedelta, date  # Classes for working with dates and times
+    from datetime import (
+        datetime,
+        timedelta,
+        date,
+    )  # Classes for working with dates and times
     from pathlib import Path  # Object-oriented interface to filesystem paths
-    from collections import namedtuple   # Create custom data structures with named fields.
+    from collections import (
+        namedtuple,
+    )  # Create custom data structures with named fields.
     from dateutil import parser
 
     # Third-Party Library Imports
@@ -55,7 +61,7 @@ try:
         ThreadPoolExecutor,
         as_completed,
     )  # Asynchronous task execution
-    from typing import List, Iterator, Optional, Dict, Any, Set # Type hints
+    from typing import List, Iterator, Optional, Dict, Any, Set, Tuple # Type hints
     from dataclasses import dataclass  # Data class decorator
     from enum import Enum  # Enum class definition
     from contextlib import contextmanager  # Context manager utilities
@@ -146,7 +152,7 @@ def load_configuration(config_file: str = "config.yaml") -> Dict[str, Any]:
         # INFO - Useful for understanding the program's behavior and for auditing purposes
         # DEBUG - For detailed information to trace the execution flow of a program
         # These are hierarchial levels. Python scores them as ERROR=40, WARNING=30, INFO=20, DEBUG=10. So selecting a lower level includes all higher levels too.
-        "cache": {"max_age_hours": 168, "cleanup_threshold": 200},
+        "cache": {"max_age_days": 30, "cleanup_threshold": 200},
         "api": {"rate_limit": {"max_requests": 30, "time_window": 60}},
         "memory": {"max_memory_percent": 75, "chunk_size": 1000},
         "validation": {"required_columns": ["Ticker", "Close", "Date"]},
@@ -183,6 +189,7 @@ def load_configuration(config_file: str = "config.yaml") -> Dict[str, Any]:
 
     return config
 
+
 # Invoke the load_configuration function and assign settings to config
 config = load_configuration()
 
@@ -191,7 +198,9 @@ init(autoreset=True)
 
 # Create namedtuple classes
 valid_ticker = namedtuple("valid_ticker", ["ticker", "quote_type", "currency"])
-ticker_data = namedtuple("ticker_data", ["ticker", "quote_type", "currency", "price", "date"])
+ticker_data = namedtuple(
+    "ticker_data", ["ticker", "quote_type", "currency", "price", "date"]
+)
 
 # turn on yFinance debug mode
 # yf.enable_debug_mode()
@@ -356,13 +365,13 @@ def copy_to_clipboard(text: str):
     """
     pyperclip.copy(text)
 
+
 def get_date_range():
-    """ Get period from config dictionary and calculate date range.
-    """
+    """Get period from config dictionary and calculate date range."""
     start_date = None
     end_date = None
-    period_year= config["collection"]["period_years"]
-    period_days = period_year *365
+    period_year = config["collection"]["period_years"]
+    period_days = period_year * 365
     end_date = date.today()
     start_date = end_date - timedelta(days=int(period_days))
     # Convert dates to numpy datetime64[D] format
@@ -376,87 +385,75 @@ def get_date_range():
     )
     return start_date, end_date, business_days
 
-def format_path(full_path):
-    """Format a file path to show the last parent directory and filename."""
-    path_parts = full_path.split("\\")
-    if len(path_parts) > 1:
-        return "\\" + "\\".join(path_parts[-2:])  # Show parent dir and filename
-    return "\\" + full_path  # Just in case there's no parent directory
 
+def normalise_dates(df: pd.DataFrame, date_column: str = "Date") -> pd.DataFrame:
 
-def normalise_dates(df, date_column="Date"):
     """
-    Normalises the specified date column in the DataFrame by performing the following steps:
-
-    1. **Check Column Existence**: Verifies that the specified date column exists in the DataFrame.
-    2. **Trim Spaces**: Removes any leading or trailing spaces from the date strings.
-    3. **Parse and Convert to UTC**: Converts all date strings to UTC, handling both timezone-aware and timezone-naive dates.
-    4. **Extract Date Component**: Removes time and timezone information, retaining only the date in 'YYYY-MM-DD' format.
-    5. **Remove Invalid Dates**: Drops rows where the date parsing failed.
-    6. **Sort DataFrame**: Sorts the DataFrame by the normalized date in descending order.
-    7. **Clean Up**: Replaces the original date column with the normalized dates and removes any auxiliary columns.
+    Normalizes all date values in the specified column of the DataFrame to UTC and returns
+    them in 'yyyy-mm-dd' format. Invalid dates are handled gracefully and returned as a separate DataFrame.
 
     Parameters:
-    ----------
-    df : pd.DataFrame
-        The input DataFrame containing the date column to normalise.
-
-    date_column : str, default 'Date'
-        The name of the column containing date strings to be normalised.
+    - df: pandas DataFrame containing the date column.
+    - date_column: The name of the date column. Defaults to 'Date'.
 
     Returns:
-    -------
-    pd.DataFrame
-        The DataFrame with the normalised date column and invalid date rows removed.
+    - normalized_df: DataFrame with normalized dates in 'yyyy-mm-dd' format.
     """
 
-    # Step 1: Check that the specified date column exists
-    if date_column not in df.columns:
-        raise ValueError(f"The DataFrame does not contain a '{date_column}' column.")
+    normalized_dates = []
+    invalid_rows = []
 
-    # Step 2: Remove any leading or trailing spaces
-    df[date_column] = df[date_column].astype(str).str.strip()
+    for index, row in df.iterrows():
+        date_value = row[date_column]
 
-    # Step 3: Parse dates using dateutil.parser.parse and convert to UTC
-    parsed_dates = []
-    for idx, date_str in df[date_column].items():
-        if pd.isna(date_str) or date_str == "":
-            # Handle NaN and empty strings
-            parsed_dates.append(pd.NaT)
-            continue
         try:
-            # Parse the date string with fuzzy parsing to handle various formats
-            dt = parser.parse(date_str, fuzzy=True)
-            if dt.tzinfo is None:
-                # If no timezone info, assume UTC
-                dt = dt.replace(tzinfo=pytz.UTC)
+            # Parse date, coercing invalid formats to NaT
+            parsed_date = pd.to_datetime(date_value, errors="coerce")
+
+            if pd.isna(parsed_date):
+                # If parsing fails, log the invalid date
+                invalid_rows.append(row)
+                normalized_dates.append(None)
             else:
-                # Convert to UTC
-                dt = dt.astimezone(pytz.UTC)
-            parsed_dates.append(dt)
-        except (ValueError, TypeError):
-            # If parsing fails, append NaT
-            parsed_dates.append(pd.NaT)
+                # If timezone-naive, assume it's in UTC and localize it
+                if parsed_date.tzinfo is None or parsed_date.tz is None:
+                    localized_date = parsed_date.tz_localize(
+                        "UTC", ambiguous="NaT", nonexistent="NaT"
+                    )
+                else:
+                    # If timezone-aware, convert it to UTC
+                    localized_date = parsed_date.tz_convert("UTC")
 
-    df["Date_Parsed"] = parsed_dates
+                # Append the date in 'yyyy-mm-dd' format
+                normalized_dates.append(localized_date.strftime("%Y-%m-%d"))
 
-    # Step 4: Extract the date component and remove timezone and time information
-    df["Date_Normalised"] = df["Date_Parsed"].dt.date.astype(str)
+        except Exception as e:
+            # If any unexpected error occurs, log the invalid date
+            invalid_rows.append(row)
+            normalized_dates.append(None)
 
-    # Step 5: Remove rows with invalid dates (NaT)
-    df_cleaned = df.dropna(subset=["Date_Parsed"]).copy()
+    # Add the normalized dates to the DataFrame
+    df[date_column] = normalized_dates
 
-    # Step 6: Sort the DataFrame by the normalized date in descending order
-    df_cleaned = df_cleaned.sort_values(
-        by="Date_Normalised", ascending=False
-    ).reset_index(drop=True)
+    # Convert the 'Date' column explicitly to datetime (in case some values are still objects)
+    df[date_column] = pd.to_datetime(
+        df[date_column], errors="coerce", format="%Y-%m-%d"
+    )
 
-    # Step 7: Replace the original date column with the normalized dates
-    df_cleaned[date_column] = df_cleaned["Date_Normalised"]
-    # Drop auxiliary columns
-    df_final = df_cleaned.drop(columns=["Date_Parsed", "Date_Normalised"])
+    # Create a DataFrame of invalid rows
+    invalid_dates_df = pd.DataFrame(invalid_rows, columns=df.columns)
 
-    return df_final
+    # Print column types after transformation
+    logger.info(f"Date Column Type After Transformation: {df[date_column].dtype}")
+
+    # Print rows that were not successfully transformed
+    if not invalid_dates_df.empty:
+        logger.debug("Rows with Invalid or Untransformed Dates:")
+        logger.debug(invalid_dates_df)
+    else:
+        logger.info("All rows have been successfully transformed.")
+
+    return df
 
 #
 # -----------------------------------------------------------------------------------
@@ -493,11 +490,11 @@ def get_tickers(config: Dict[str, Any], set_maximum_tickers=3) -> Set[valid_tick
         )
 
     # iterate through the currencies to extract unique currencies, excluding GBP and GBp
-    currencies = { currency for _, _, currency in valid_tickers if currency not in ["GBP", "GBp"]}
+    currencies = {
+        currency for _, _, currency in valid_tickers if currency not in ["GBP", "GBp"]
+    }
 
-    logger.info(
-        f"Obtaining {len(currencies)} FX tickers for currencies: {currencies}"
-    )
+    logger.info(f"Obtaining {len(currencies)} FX tickers for currencies: {currencies}")
 
     # Get list of FX tickers for those currencies we have
     fx_tickers = []  # create empty list
@@ -599,7 +596,7 @@ def validate_tickers(
         # Restrict length of ticker output
         short_invalid_ticker_list = f"{f'\nFirst {set_maximum_tickers} invalid' if set_maximum_tickers<num_invalid_tickers else '\nInvalid'}: {list(invalid_tickers)[:set_maximum_tickers]}{f'...' if num_invalid_tickers>set_maximum_tickers else ''}"
     else:
-        short_invalid_ticker_list =""
+        short_invalid_ticker_list = ""
 
     # Report outcome
     logger.info(
@@ -684,6 +681,7 @@ def get_ticker(ticker_symbol: str) -> Optional[yf.Ticker]:
 
         return None
 
+
 @retry(Exception, tries=3)
 def fetch_ticker_history(
     ticker_symbol: str, start_date: datetime, end_date: datetime
@@ -693,7 +691,7 @@ def fetch_ticker_history(
     First checks if the data is cached; if not,
     fetches the data using the appropriate ticker object and caches it.
     """
-    cache_dir = os.path.join(base_directory, "cache")
+    cache_dir = os.path.join(base_directory, config.get("paths", {}).get("cache", "cache"))
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir)
     cache_file = os.path.join(
@@ -718,16 +716,16 @@ def fetch_ticker_history(
         else:
             logger.debug(f"Downloaded historical data for {ticker_symbol}")
 
-        with open(cache_file, "wb") as f:# With automatically closes file
+        with open(cache_file, "wb") as f:  # With automatically closes file
             pickle.dump(df, f)
             logger.debug(f"Save cache to {format_path(cache_file)}")
 
     # Drop superfluous columns
     df = df.reset_index()  # make the index a regular column named "Date"
-    tidy_df = df[['Date','Price']]
+    tidy_df = df[["Date", "Price"]]
 
     logger.debug(
-        f" Got dataframe for {ticker_symbol} of {tidy_df.shape[0]} rows and {tidy_df.shape[1]} columns ({list(tidy_df.columns)})"
+        f"Got dataframe for {ticker_symbol} of {tidy_df.shape[0]} rows and {tidy_df.shape[1]} columns ({list(tidy_df.columns)})"
     )
     return tidy_df  # returns a pandas df
 
@@ -759,9 +757,7 @@ def fetch_historical_data(
 
     if records:
         # combine multiple DataFrames into a single DataFrame.
-        combined_df = pd.concat(
-            records, ignore_index=True
-        )  
+        combined_df = pd.concat(records, ignore_index=True)
         # Normalise dates
         combined_df = normalise_dates(combined_df, date_column="Date")
 
@@ -769,14 +765,20 @@ def fetch_historical_data(
         combined_df = combined_df[["Ticker", "Price", "Date", "QuoteType", "Currency"]]
 
         logger.info(
-                f"Got dataframe for {business_days} business days between {start_date.strftime("%d/%m/%Y")} and {end_date.strftime("%d/%m/%Y")}\n      {combined_df.shape[0]} rows and {combined_df.shape[1]} columns ({list(combined_df.columns)})"
-            )
+            f"Got dataframe for {business_days} business days between {start_date.strftime("%d/%m/%Y")} and {end_date.strftime("%d/%m/%Y")}\n      {combined_df.shape[0]} rows and {combined_df.shape[1]} columns ({list(combined_df.columns)})"
+        )
         return combined_df
     else:
         logger.error(
             f"Did not obtain data for the {business_days} business days between {start_date.strftime("%d/%m/%Y")} and {end_date.strftime("%d/%m/%Y")}!"
         )
-    return pd.DataFrame()  # return an empty DataFrame
+    if combined_df.empty:  # checks for empty Pandas DataFrame
+        logger.error(
+            "No data fetched from fetch_historical_data for any tickers. Exiting."
+        )
+        exit(1)
+    else:
+        return pd.DataFrame()  # return an empty DataFrame
 
 
 #
@@ -786,7 +788,7 @@ def fetch_historical_data(
 # Purpose: Process the raw fetched data by performing currency conversions and organizing the data for output.
 #
 @log_function
-def convert_prices(ticker_dataframe: pd.DataFrame) -> pd.DataFrame:
+def convert_prices(ticker_dataframe: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     """
     Converts the Price column to GBP based on the Currency and QuoteType columns.
     Rows with QuoteType 'CURRENCY' or 'INDEX' are included in the final dataframe unchanged.
@@ -820,6 +822,7 @@ def convert_prices(ticker_dataframe: pd.DataFrame) -> pd.DataFrame:
 
     # Initialize a list to store converted rows
     converted_rows = []
+    fail_counter = 0
 
     # Step 4: Iterate over each row to perform conversion
     for idx, row in rows_to_convert.iterrows():
@@ -856,10 +859,8 @@ def convert_prices(ticker_dataframe: pd.DataFrame) -> pd.DataFrame:
                     price_gbp = price * exchange_rate
                 else:
                     # Exchange rate not found for the given date and ticker
-                    logger.warning(
-                        f"Exchange rate for ticker '{exchange_ticker}' on {date.date()} not found. "
-                        f"Skipping row with Ticker '{ticker}'."
-                    )
+                    logger.warning(f"{exchange_ticker} FX rate not found for {date.date()}. Skipping '{ticker}' on this date.")
+                    fail_counter += 1
                     continue  # Skip this row
 
             # Create a new row with the converted price
@@ -872,9 +873,7 @@ def convert_prices(ticker_dataframe: pd.DataFrame) -> pd.DataFrame:
 
         except Exception as e:
             # Log the error and skip the row
-            logger.error(
-                f"Error converting price for Ticker '{ticker}' on {date}: {e}"
-            )
+            logger.error(f"Error converting price for Ticker '{ticker}' on {date}: {e}")
             continue  # Skip this row and continue processing
 
     # Step 5: Create a dataframe from converted rows
@@ -887,9 +886,74 @@ def convert_prices(ticker_dataframe: pd.DataFrame) -> pd.DataFrame:
     # Step 6: Combine converted rows with rows to keep as-is
     final_dataframe = pd.concat([converted_df, rows_to_keep], ignore_index=True)
 
-    # Optional: Reset index if necessary (already handled by ignore_index=True)
+    if final_dataframe.empty:
+        logger.error(
+                "Something went wrong when converting prices.No data returned! Exiting."
+            )
+        exit(1)
+        return
+    else:
+        logger.info(f"Prices converted with {fail_counter} missing rows.")
 
     return final_dataframe
+#
+# -----------------------------------------------------------------------------------
+# Formatting                                                                |
+# -----------------------------------------------------------------------------------
+#
+def format_path(full_path):
+    """Format a file path to show the last parent directory and filename."""
+    path_parts = full_path.split("\\")
+    if len(path_parts) > 1:
+        return "\\" + "\\".join(path_parts[-2:])  # Show parent dir and filename
+    return "\\" + full_path  # Just in case there's no parent directory
+
+
+def format_status(status):
+    """Format status indicators with colors."""
+    status_map = {
+        "new data": f"{Fore.GREEN}✓{Style.RESET_ALL}",
+        "using cache": f"{Fore.BLUE}#{Style.RESET_ALL}",
+        "failed": f"{Fore.RED}✗{Style.RESET_ALL}",
+    }
+    return status_map.get(status, f"{Fore.RED}?{Style.RESET_ALL}")
+
+
+def format_ticker_status(ticker, status, currency=None, width=30):
+    """Format ticker status with currency information."""
+    status_symbol = format_status(status)
+    ticker_with_currency = f"{ticker} ({currency})" if currency else ticker
+    return f"{status_symbol} {ticker_with_currency:<{width}}"
+
+
+def print_section(title, major=False):
+    """Print a section header with optional emphasis."""
+    print(f"{Fore.WHITE}{Style.BRIGHT}{title}{Style.RESET_ALL}")
+    if major:
+        print(
+            f"{Fore.WHITE}{Style.BRIGHT}{'=' * len(title)}{Style.RESET_ALL}"
+        )
+    else:
+        print(
+            f"{Fore.WHITE}{Style.BRIGHT}{'-' * len(title)}{Style.RESET_ALL}"
+        )
+
+
+def _strip_ansi( text):
+    """Remove ANSI escape sequences from text."""
+    import re
+
+    ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+    return ansi_escape.sub("", text)
+
+
+def capture_print( *args, **kwargs):
+    """Print and store output in buffer."""
+    output = " ".join(str(arg) for arg in args)
+    # Store the raw output with ANSI codes for terminal display
+    print(output, **kwargs)
+    # Store the clean output without ANSI codes for clipboard
+    self.output_buffer.append(self._strip_ansi(output))
 
 
 #
@@ -898,23 +962,43 @@ def convert_prices(ticker_dataframe: pd.DataFrame) -> pd.DataFrame:
 # -----------------------------------------------------------------------------------
 # Purpose: Save the processed data to a CSV file without headers and log the file path.
 #
-
-
 @log_function
-def save_to_csv(df: pd.DataFrame, output_file: str):
+def save_to_csv(df: pd.DataFrame):
     """
     Save the DataFrame to a CSV file without headers.
+    3 Columns: Ticker, Price in GBP, Date (dd/mm/yyyy).
     """
-    df2 = df[["Ticker", "Price", "Date"]]
-    # Format date as 'dd/mm/yyyy'
-    df2["Date"] = df2["Date"].dt.strftime("%d/%m/%Y")
-    df2.to_csv(output_file, index=False, header=False)
-    parent_dir = os.path.basename(os.path.dirname(output_file))
-    filename = os.path.basename(output_file)
-    logger.info(f"Data saved to: {parent_dir}/{filename}")
-    return True
+    try:
+        # Build the output file path
+        output_file_name = config.get("paths", {}).get("output_file", "data.csv")
+        output_file = os.path.join(base_directory, output_file_name)
 
+        required_columns = ["Ticker", "Price", "Date"]
+        if not all(col in df.columns for col in required_columns):
+            logger.error(
+                f"Required columns are missing. Available columns are: {df.columns.tolist()}"
+            )
+            return False
 
+        # Select and sort the DataFrame
+        df2 = df[required_columns].sort_values(by="Date", ascending=False)
+
+        # Format 'Date' column as 'dd/mm/yyyy'
+        df2["Date"] = df2["Date"].dt.strftime("%d/%m/%Y")
+
+        # Save the DataFrame to CSV without headers
+        df2.to_csv(output_file, index=False, header=False)
+
+        # Log the save location
+        parent_dir = os.path.basename(os.path.dirname(output_file))
+        filename = os.path.basename(output_file)
+        logger.info(f"Data successfully saved to: {parent_dir}/{filename}")
+
+        return True
+
+    except Exception as e:
+        logger.exception("An error occurred while saving DataFrame to CSV")
+        return False
 #
 #
 # -----------------------------------------------------------------------------------
@@ -923,22 +1007,26 @@ def save_to_csv(df: pd.DataFrame, output_file: str):
 # Purpose: Manage the cache by deleting outdated cached files to conserve storage and maintain performance.
 #
 @log_function
-def clean_cache(cache_dir: str, max_age_days: int):
+def clean_cache():
     """
+
     Clean up cache files older than max_age_days.
     """
+    cache_dir = config.get("paths", {}).get("cache", "cache")
+    cache_dir_path = os.path.join(base_directory, cache_dir)
+    max_age_days = config.get("cache", {}).get("max_age_days", "30")
     now = time.time()
-    cutoff = now - (max_age_days * 86400)  # 86400 seconds in a day
+    cutoff = now - (max_age_days * 86400)  # in seconds
     try:
-        for filename in os.listdir(cache_dir):
-            file_path = os.path.join(cache_dir, filename)
-            if os.path.isfile(file_path) and os.stat(file_path).st_mtime < cutoff:
+        for filename in os.listdir(cache_dir_path):
+            file_path = os.path.join(cache_dir_path, filename)
+            file_stats = os.stat(file_path)
+            # mod_time = the number of seconds since January 1, 1970, 00:00:00 UTC that the file was last modified.
+            mod_time = file_stats.st_mtime
+            file_age_in_seconds = now - mod_time
+            if os.path.isfile(file_path) and file_age_in_seconds > cutoff:
                 os.remove(file_path)
-                parent_dir = os.path.basename(os.path.dirname(file_path))
-                file_name = os.path.basename(file_path)
-                logger.info(
-                    f"{parent_dir}/{file_name} older than {max_age_days} days, so deleted!"
-                )
+                logger.info(f"File {cache_dir}/{filename} older than {max_age_days} days, so deleted!")
     except Exception as e:
         logger.error(f"Error cleaning cache: {e}")
         logger.error(traceback.format_exc())
@@ -951,7 +1039,6 @@ def clean_cache(cache_dir: str, max_age_days: int):
 # Quicken UI                                                                        |
 # -----------------------------------------------------------------------------------
 # Seeks elevation of Quicken XG 2004 to have it import the csv file.
-
 
 def is_admin():
     """Checks if the script is run as admin"""
@@ -968,114 +1055,31 @@ def run_as_admin():
         ctypes.windll.shell32.ShellExecuteW(
             None, "runas", sys.executable, __file__, None, 1
         )
+        time.sleep(2)
         sys.exit(0)
 
 
-def _setup_pyautogui(self):
+def import_data_file():
     """
-    Configure PyAutoGUI safety settings for automated GUI interaction.
-    Sets fail-safe and timing parameters to ensure reliable automation.
-    """
-    pyautogui.FAILSAFE = True  # Move mouse to corner to abort
-    pyautogui.PAUSE = 0.5  # Delay between actions
-
-
-def _is_elevated(self):
-    """Check if script is running with admin privileges."""
-    try:
-        return ctypes.windll.shell32.IsUserAnAdmin()
-    except:
-        return False
-
-
-def handle_import(self):
-    """
-    Main entry point for handling Quicken import.
-    """
-    try:
-        self.formatter.print_section("\nImport to Quicken 2004")
-        if self._is_elevated():
-            return self._execute_import_sequence()
-        else:
-            return self._show_elevation_message()
-
-    except Exception as e:
-        self.logger.error(f"Error during Quicken import: {e}")
-        return False
-
-    finally:
-        pyautogui.FAILSAFE = True
-
-
-def _show_elevation_message(self):
-    """Display message when running without elevation."""
-    self.formatter.capture_print("Quicken cannot be opened from here.\n\nInstead:\n")
-    self.formatter.capture_print("1. Close this window.")
-    self.formatter.capture_print("2. Click the Quicken 'Update Prices' shortcut.\n")
-    self.formatter.print_section("END", major=True)
-    return True
-
-
-def _execute_import_sequence(self):
-    """
-    Execute the sequence of steps for importing data.
+    Import the data file through the import dialog.
 
     Returns:
-        bool: True if all steps completed successfully
-    """
-    steps = [
-        (self._open_quicken, "Opening Quicken..."),
-        (self._navigate_to_portfolio, "Navigating to Portfolio view..."),
-        (self._open_import_dialog, "Opening import dialog..."),
-        (self._import_data_file, "Importing data file..."),
-    ]
-
-    for step_function, message in steps:
-        self.logger.info(message)
-        if not step_function():
-            return False
-
-    # Log successful completion of entire sequence
-    self.logger.info(
-        f"Successfully imported {self.config.data_file_name} to Quicken at {datetime.now().strftime('%d-%m-%Y %H:%M')}"
-    )
-    self.formatter.capture_print("\nImport complete!")
-    return True
-
-
-def _open_quicken(self):
-    """
-    Launch Quicken application.
-
-    Returns:
-        bool: True if Quicken started successfully
+        bool: True if import successful
     """
     try:
-        subprocess.Popen([self.config.QUICKEN_PATH])
-        time.sleep(8)  # Allow time for Quicken to start
-        return True
-    except Exception as e:
-        self.logger.error(f"Failed to open Quicken: {e}")
-        return False
-
-
-def _navigate_to_portfolio(self):
-    """
-    Navigate to the portfolio view in Quicken.
-
-    Returns:
-        bool: True if navigation successful
-    """
-    try:
-        pyautogui.hotkey("ctrl", "u")
+        output_file_name = config.get("paths", {}).get("data_file", "data.csv")
+        filename = os.path.join(base_directory, output_file_name)
+        pyautogui.typewrite(filename, interval=0.03)
         time.sleep(1)
+        pyautogui.press("enter")
+        time.sleep(5)
         return True
     except Exception as e:
-        logging.error(f"Failed to navigate to portfolio: {e}")
+        logging.error(f"Failed to import data file: {e}")
         return False
 
 
-def _open_import_dialog(self):
+def open_import_dialog():
     """
     Open the import dialog window using keyboard shortcuts.
 
@@ -1092,24 +1096,105 @@ def _open_import_dialog(self):
         return False
 
 
-def _import_data_file(self):
+def navigate_to_portfolio():
     """
-    Import the data file through the import dialog.
+    Navigate to the portfolio view in Quicken.
 
     Returns:
-        bool: True if import successful
+        bool: True if navigation successful
     """
     try:
-        filename = f"{self.config.PATH}data.csv"
-        pyautogui.typewrite(filename, interval=0.03)
+        pyautogui.hotkey("ctrl", "u")
         time.sleep(1)
-        pyautogui.press("enter")
-        time.sleep(5)
         return True
     except Exception as e:
-        logging.error(f"Failed to import data file: {e}")
+        logging.error(f"Failed to navigate to portfolio: {e}")
         return False
 
+
+def open_quicken():
+    """
+    Launch Quicken application.
+
+    Returns:
+        bool: True if Quicken started successfully
+    """
+    quicken_path = config.get("paths", {}).get(
+        "quicken", "C:\\Program Files (x86)\\Quicken\\qw.exe"
+    )
+
+    try:
+        subprocess.Popen([quicken_path])
+        time.sleep(8)  # Allow time for Quicken to start
+        return True
+    except Exception as e:
+        logger.error(f"Failed to open Quicken: {e}")
+        return False
+
+
+def execute_import_sequence():
+    """
+    Execute the sequence of steps for importing data.
+
+    Returns:
+        bool: True if all steps completed successfully
+    """
+    steps = [
+        (open_quicken, "Opening Quicken..."),
+        (navigate_to_portfolio, "Navigating to Portfolio view..."),
+        (open_import_dialog, "Opening import dialog..."),
+        (import_data_file, "Importing data file..."),
+    ]
+
+    for step_function, message in steps:
+        logger.info(message)
+        if not step_function():
+            return False
+
+    # Log successful completion of entire sequence
+    logger.info(
+        f"Successfully imported {config.data_file_name} to Quicken at {datetime.now().strftime('%d-%m-%Y %H:%M')}"
+    )
+    print("\nImport complete!")
+    return True
+
+def _is_elevated(self):
+    """Check if script is running with admin privileges."""
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+def handle_import():
+    """
+    Main entry point for handling Quicken import.
+    """
+    try:
+        print_section("\nImport to Quicken 2004")
+        if is_elevated():
+            return execute_import_sequence()
+        else:
+            print(
+            "Quicken cannot be opened from here.\n\nInstead:\n"        )
+        print("1. Close this window.")
+        print("2. Click the Quicken 'Update Prices' shortcut.\n")
+        print_section("END", major=True)
+        return True
+    
+    except Exception as e:
+        logger.error(f"Error during Quicken import: {e}")
+        return False
+
+    finally:
+        pyautogui.FAILSAFE = True
+
+def setup_pyautogui():
+    """
+    Configure PyAutoGUI safety settings for automated GUI interaction.
+    Sets fail-safe and timing parameters to ensure reliable automation.
+    """
+    pyautogui.FAILSAFE = True  # Move mouse to corner to abort
+    pyautogui.PAUSE = 0.5  # Delay between actions
 
 #
 # -----------------------------------------------------------------------------------
@@ -1123,18 +1208,18 @@ def main():
     Main function to orchestrate data fetching and processing.
     """
     try:
-        # Get elevation
-        # run_as_admin()
-
         # Clear screen for clean output
         os.system("cls" if os.name == "nt" else "clear")
         logger.debug("Starting program...")
+
+        # Get elevation
+        run_as_admin()
 
         # Get date range
         start_date, end_date, business_days = get_date_range()
 
         # Get tickers - returns a set of validated ticker namedtuples for defined stocks and currency FX rates required
-        tickers = get_tickers(config) 
+        tickers = get_tickers(config)
         if not tickers:  # checks for Falsy values eg empty set.
             logger.error("A serious error has occurred with no data being returned!")
             exit(1)
@@ -1143,91 +1228,19 @@ def main():
         ticker_dataframe = fetch_historical_data(
             tickers, start_date, end_date, business_days
         )
-        if ticker_dataframe.empty: # checks for empty Pandas DataFrame
-            logger.error(
-                "No data fetched from fetch_historical_data for any tickers. Exiting."
-            )
-            exit(1)
-            return
-
-        print(f"ticker_dataframe: {ticker_dataframe}")
-        
-        # Check data types of all columns
-        print(ticker_dataframe.dtypes)
-
-        # Specifically check the 'Date' column
-        print(ticker_dataframe['Date'].dtype)
-        
-        # Identify rows where 'Date' is not a datetime object
-    problematic_rows = ticker_dataframe[
-        ticker_dataframe['QuoteType'].isin(['ETF', 'EQUITY']) &  # Assuming these require conversion
-        ticker_dataframe['Ticker'].isin(['GL1S.MU', 'LAU.AX']) &  # Specific tickers causing issues
-        ticker_dataframe['Date'].apply(lambda x: isinstance(x, str))  # 'Date' is string
-    ]
-
-    print(problematic_rows)
 
         # Convert prices to GBP except INDEX and CURRENCY
         ticker_dataframe = convert_prices(ticker_dataframe)
 
-        # processed_data = convert_prices(ticker_dataframe, exchange_rates)
-        # if processed_data.empty:
-        #     logger.error(
-        #         "Something went wrong when converting prices.No data returned! Exiting."
-        #     )
-        #     exit(1)
-        #     return
-        # else:
-        #     logger.info("Prices converted")
+        # Save data to CSV
+        save_to_csv(ticker_dataframe)
 
-        # # Save data to CSV
-        # output_file = os.path.join(
-        #     base_directory, config.get("paths", {}).get("output_file", "data.csv")
-        # )
-        # logger.info(f"Saving to {output_file}")
-        # save = save_to_csv(processed_data, output_file)
-        # if save == True:
-        #     logger.info("File saved")
-        # else:
-        #     logger.error(f"Something went wrong. {output_file} not saved!")
+        # Clean up cache
+        clean_cache()
 
-        # # Clean up cache
-        # logger.info(f"Cleaning out cache")
-        # cache_dir = os.path.join(base_directory, "cache")
-        # clean = clean_cache(
-        #     cache_dir, max_age_days=fetch_config.get("cache_max_age_days", 7)
-        # )
-        # if clean == True:
-        #     logger.info("Cache cleaned")
-        # else:
-        #     logger.error(f"Something went wrong cleaning cache")
-
-        # # Open Quicken
-        # logger.info(f"Opening Quicken")
-        # quicken_process = subprocess.Popen(["notepad.exe"], shell=True)
-
-        # # Temporarily disable Ctrl+Alt+Del to prevent accidental interruption
-        # pyautogui.hotkey("ctrl", "alt", "del")
-        # # quicken does stuff
-
-        # # Give Quicken some time to open
-        # time.sleep(100)
-
-        # navigate in quicken
-        #
-        #
-
-        # logging.info("Waiting for user to close Quicken...")
-        # # Renable Ctrl+Alt+Del
-        # pyautogui.hotkey("ctrl", "alt", "del")
-        # pyautogui.write("Hello")
-        # pyautogui.hotkey("ctrl", "alt", "del")
-        # # Wait for quicken to close
-        # quicken_process.wait()
-
-        # logging.info("Quicken closed by user.")
-        # logging.info("Keeping terminal open for 10 seconds...")
-        # time.sleep(10)
+        #  Open Quicken
+        setup_pyautogui()
+        handle_import()
 
     except KeyboardInterrupt:
         logger.warning("Script interrupted by user.")

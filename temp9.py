@@ -4,9 +4,9 @@ from typing import Any
 
 # -------------------- Logger Configuration --------------------
 
-# Configure the logger to display warnings and errors with timestamps
+# Configure the logger to display debug, info, warnings, and errors with timestamps
 logging.basicConfig(
-    level=logging.WARNING,  # Set to DEBUG for more detailed logs
+    level=logging.DEBUG,  # Set to DEBUG to capture all levels of logs
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler()],  # Logs will be output to the console
 )
@@ -26,53 +26,94 @@ def safe_get_date(date: Any) -> str:
     - str: The date in ISO format if it's a Timestamp, the original string if it's a string, or 'Unknown Date'.
     """
     if isinstance(date, pd.Timestamp):
+        logger.debug(f"Converting pd.Timestamp to ISO format: {date}")
         return date.date().isoformat()
     elif isinstance(date, str):
+        logger.debug(f"Date is a string: {date}")
         return date
     else:
+        logger.debug(f"Date type is unrecognized: {type(date)}")
         return "Unknown Date"
 
 
 # -------------------- Date Normalization Function --------------------
 
 
-def normalize_dates(ticker_dataframe: pd.DataFrame) -> pd.DataFrame:
+
+def normalise_dates(df, date_column="Date"):
     """
-    Normalizes the 'Date' column in the dataframe by converting it to datetime objects.
-    Rows with invalid or missing dates are excluded from the returned dataframe.
+    Normalizes all date values in the specified column of the DataFrame to UTC and returns
+    them in 'yyyy-mm-dd' format. Invalid dates are handled gracefully and returned as a separate DataFrame.
 
     Parameters:
-    - ticker_dataframe (pd.DataFrame): The input dataframe containing ticker information.
+    - df: pandas DataFrame containing the date column.
+    - date_column: The name of the date column. Defaults to 'Date'.
 
     Returns:
-    - pd.DataFrame: A new dataframe with the 'Date' column normalized and invalid rows excluded.
+    - normalized_df: DataFrame with normalized dates in 'yyyy-mm-dd' format.
+    - invalid_dates_df: DataFrame containing rows with invalid or unparseable dates.
     """
-    # Step 1: Ensure 'Date' column exists
-    if "Date" not in ticker_dataframe.columns:
-        logger.error("The dataframe does not contain a 'Date' column.")
-        return pd.DataFrame()  # Return empty dataframe
 
-    # Step 2: Convert 'Date' column to datetime, coercing errors to NaT
-    ticker_dataframe["Date"] = pd.to_datetime(ticker_dataframe["Date"], errors="coerce")
+    normalized_dates = []
+    invalid_rows = []
 
-    # Step 3: Identify rows with invalid dates (NaT)
-    invalid_dates = ticker_dataframe[ticker_dataframe["Date"].isna()]
-    if not invalid_dates.empty:
-        logger.error(
-            "Some dates could not be parsed and are set to NaT. These rows will be excluded from the final dataframe."
-        )
-        print("\n=== Invalid Dates ===")
-        print(invalid_dates)
+    for index, row in df.iterrows():
+        date_value = row[date_column]
 
-    # Step 4: Exclude rows with invalid dates
-    normalized_df = ticker_dataframe[ticker_dataframe["Date"].notna()].copy()
+        try:
+            # Parse date, coercing invalid formats to NaT
+            parsed_date = pd.to_datetime(date_value, errors="coerce")
 
-    # Optional: Reset index for cleanliness
-    normalized_df.reset_index(drop=True, inplace=True)
+            if pd.isna(parsed_date):
+                # If parsing fails, log the invalid date
+                invalid_rows.append(row)
+                normalized_dates.append(None)
+            else:
+                # If timezone-naive, assume it's in UTC and localize it
+                if parsed_date.tzinfo is None or parsed_date.tz is None:
+                    localized_date = parsed_date.tz_localize(
+                        "UTC", ambiguous="NaT", nonexistent="NaT"
+                    )
+                else:
+                    # If timezone-aware, convert it to UTC
+                    localized_date = parsed_date.tz_convert("UTC")
 
-    return normalized_df
+                # Append the date in 'yyyy-mm-dd' format
+                normalized_dates.append(localized_date.strftime("%Y-%m-%d"))
+
+        except Exception as e:
+            # If any unexpected error occurs, log the invalid date
+            invalid_rows.append(row)
+            normalized_dates.append(None)
+
+    # Add the normalized dates to the DataFrame
+    df[date_column] = normalized_dates
+
+    # Convert the 'Date' column explicitly to datetime (in case some values are still objects)
+    df[date_column] = pd.to_datetime(
+        df[date_column], errors="coerce", format="%Y-%m-%d"
+    )
+
+    # Create a DataFrame of invalid rows
+    invalid_dates_df = pd.DataFrame(invalid_rows, columns=df.columns)
+
+    # Print column types after transformation
+    print("\nColumn Types After Transformation:")
+    print(df.dtypes)
+
+    # Print rows that were not successfully transformed
+    if not invalid_dates_df.empty:
+        print("\nRows with Invalid or Untransformed Dates:")
+        print(invalid_dates_df)
+    else:
+        print("\nAll rows have been successfully transformed.")
+
+    return df
 
 
+# Usage example:
+# normalized_df, invalid_dates_df = normalize_dates_to_utc(df)
+# You can then inspect normalized_df for the transformed dates and invalid_dates_df for problematic entries.
 # -------------------- Test Data Creation --------------------
 
 
@@ -110,7 +151,7 @@ def create_test_data() -> pd.DataFrame:
         {
             "Ticker": "VUKG.L",
             "Price": 41.895000,
-            "Date": "2024-11-26",
+            "Date": "2024-11-27 20:24:50,880",
             "QuoteType": "ETF",
             "Currency": "GBP",
         },
@@ -408,6 +449,7 @@ def create_test_data() -> pd.DataFrame:
     # Create DataFrame
     test_df = pd.DataFrame(test_data)
 
+    logger.debug("Test data created with edge cases.")
     return test_df
 
 
@@ -418,46 +460,23 @@ def main():
     """
     Main function to execute the normalize_dates function with test data.
     """
+    logger.debug("Program started.")
+
     # Create test data
     ticker_dataframe: pd.DataFrame = create_test_data()
 
     # Display initial DataFrame dtypes
-    print("=== Initial DataFrame Dtypes ===")
-    print(ticker_dataframe.dtypes)
+    logger.info("=== Initial DataFrame Dtypes ===")
+    logger.info("\n" + str(ticker_dataframe.dtypes))
 
     # Display initial DataFrame (optional)
-    print("\n=== Initial DataFrame (First 10 Rows) ===")
-    print(ticker_dataframe.head(10))
+    logger.info("\n=== Initial DataFrame (First 10 Rows) ===")
+    logger.debug("\n" + str(ticker_dataframe.head(10)))
 
     # Normalize dates
-    normalized_df: pd.DataFrame = normalize_dates(ticker_dataframe)
+    normalized_df: pd.DataFrame = normalise_dates(ticker_dataframe, "Date")
 
-    # Display final DataFrame dtypes
-    print("\n=== Final DataFrame Dtypes ===")
-    print(normalized_df.dtypes)
-
-    # Display a summary of the normalization
-    print("\n=== Summary of Date Normalization ===")
-    total_rows = len(ticker_dataframe)
-    valid_rows = len(normalized_df)
-    invalid_rows = total_rows - valid_rows
-    print(f"Total Rows in Original DataFrame: {total_rows}")
-    print(f"Total Rows After Normalization: {valid_rows}")
-    print(f"Total Rows Excluded Due to Invalid Dates: {invalid_rows}")
-
-    # Display the first few rows of the normalized DataFrame
-    print("\n=== Normalized DataFrame (First 20 Rows) ===")
-    print(normalized_df.head(20))
-
-    # Display remaining issues (if any)
-    print("\n=== Remaining Issues (if any) ===")
-    # Check for any remaining 'NaN' dates
-    nan_dates = normalized_df[normalized_df["Date"].isna()]
-    if not nan_dates.empty:
-        print("Rows with NaN Dates:")
-        print(nan_dates)
-    else:
-        print("No rows with NaN Dates.")
+    logger.debug("Program completed.")
 
 
 if __name__ == "__main__":
