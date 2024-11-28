@@ -278,7 +278,7 @@ def load_configuration(config_file: str = "config.yaml") -> Dict[str, Any]:
         "memory": {"max_memory_percent": 75, "chunk_size": 1000},
         "validation": {"required_columns": ["Ticker", "Close", "Date"]},
         "logging": {
-            "levels": {"file": "DEBUG", "terminal": "DEBUG"},
+            "levels": {"file": "DEBUG", "terminal": "INFO"},
             "message_formats": {
                 "file": {
                     "error": "%(asctime)s %(levelname)s:\t %(filename)s:%(lineno)d - %(message)s - %(exc_info)s",
@@ -488,13 +488,7 @@ def log_function(func):
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        logger.text(
-                   
-            #     f"Start of function '{func.__name__}'\n\t {'-' * (len(func.__name__)+29)}"
-            # )(
-                header(f"Start of function {func.__name__}"
-            
-        )
+        logger.info((f"Start of function '{func.__name__}'..."))
         try:
             result = func(*args, **kwargs)
             logger.debug(f"End of function '{func.__name__}'.\n")
@@ -566,8 +560,9 @@ def get_date_range():
     # Calculate business days using np.busday_count
     business_days = np.busday_count(start_date_np, end_date_np)
 
-    logger.info(
-        f"Using date range {start_date.strftime("%d/%m/%Y")} to {end_date.strftime("%d/%m/%Y")} ({business_days} business days)\n"
+    header("Stock Price Update", major=True)
+    logger.text(
+        f"Range {start_date.strftime("%d/%m/%Y")} - {end_date.strftime("%d/%m/%Y")}\n\t {business_days} business days\n"
     )
     return start_date, end_date, business_days
 
@@ -1076,13 +1071,23 @@ def format_ticker_status(ticker, status, currency=None, width=30):
     return f"{status_symbol} {ticker_with_currency:<{width}}"
 
 
-def header(title, major=False):
-    """Print a section header with optional emphasis."""
-    print(f"{title}{Style.RESET_ALL}")
-    if major:
-        print(f"{Fore.WHITE}{Style.BRIGHT}{'=' * len(title)}{Style.RESET_ALL}")
+def header(title, logger=None, major=False):
+    """
+    Create a section header, either printed or logged.
+
+    Args:
+        title (str): Header text
+        logger (logging.Logger, optional): Logger to use instead of print
+        major (bool, optional): Use '=' for major headers, '-' for minor
+    """
+    header_line = "=" * len(title) if major else "-" * len(title)
+
+    if logger:
+        logger.text(title)
+        logger.text(header_line)
     else:
-        print(f"{Fore.WHITE}{Style.BRIGHT}{'-' * len(title)}{Style.RESET_ALL}")
+        print(f"\t {title}")
+        print(f"\t {header_line}")
 
 
 def _strip_ansi(text):
