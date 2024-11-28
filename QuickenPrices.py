@@ -31,10 +31,11 @@ os.system("cls" if os.name == "nt" else "clear")
 
 # Set up interim root logger only for import errors
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="Startup: %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
+logging.info("Beginning script\n=========================")
 
 # Standard Library Imports
 try:
@@ -90,7 +91,11 @@ third_party_libs = {
     "yfinance": {"install_name": "yfinance", "import_as": "yf"},  # Yahoo Finance API
     "pytz": {"install_name": "pytz"},  # Time zone handling
     "pyperclip": {"install_name": "pyperclip"},  # Clipboard operations
-    "colorama": {"install_name": "colorama"},  # Terminal text styling
+    "colorama": {
+        "install_name": "colorama",
+        "import_as": "colorama",  # Import full module for initialization purposes
+        "from": ["init", "Fore", "Style"],
+    },  # Terminal text styling
     "pyautogui": {"install_name": "pyautogui"},  # GUI automation
     "psutil": {"install_name": "psutil"},  # Process and system monitoring
     "requests": {"install_name": "requests"},  # HTTP requests library (test package)
@@ -139,28 +144,34 @@ def install_missing_packages(packages: list):
 # Step 1: Detect Missing Packages Without Accessing Specific Attributes
 for module_name, details in third_party_libs.items():
     try:
-        if "import_as" in details:
+        if "import_as" in details and "from" in details:
+            # Import the module to use by its alias
             globals()[details["import_as"]] = importlib.import_module(module_name)
-            logging.info(
-                f"Imported 3rd party lib '{module_name}' as '{details['import_as']}'."
-            )
-        elif "from" in details:
-            # Only import the module to check its existence
-            module = importlib.import_module(module_name)
+            module = globals()[details["import_as"]]
+            # Import specific items from the module
             for obj in details["from"]:
                 globals()[obj] = getattr(module, obj)
             logging.info(
-                f"Imported 3rd party lib '{module_name}' with specific imports."
+                f"Imported '{module_name}' as '{details['import_as']}' and from: {details['from']}"
             )
+        elif "import_as" in details:
+            # Import module and assign alias
+            globals()[details["import_as"]] = importlib.import_module(module_name)
+            logging.info(f"Imported '{module_name}' as '{details['import_as']}'")
+        elif "from" in details:
+            # Only import specific attributes
+            module = importlib.import_module(module_name)
+            for obj in details["from"]:
+                globals()[obj] = getattr(module, obj)
+            logging.info(f"Imported '{module_name}' with specific imports")
         else:
             globals()[module_name] = importlib.import_module(module_name)
-            logging.info(f"Imported 3rd party lib '{module_name}'.")
-    except ImportError:
+            logging.info(f"Imported '{module_name}'")
+    except ImportError as e:
         logging.warning(f"The required library '{module_name}' is missing.")
         missing_packages.append(details["install_name"])
     except AttributeError as e:
-        logging.warning(f"Failed to access attributes from '{module_name}': {e}.")
-        # Treat as missing package
+        logging.warning(f"Failed to access attributes from '{module_name}': {e}")
         missing_packages.append(details["install_name"])
 
 # Step 2: Install Missing Packages
@@ -212,6 +223,7 @@ if missing_packages:
 
 # Step 4 report success
 logging.info("All required libraries imported successfully.")
+
 
 #
 # -----------------------------------------------------------------------------------
@@ -273,12 +285,14 @@ def load_configuration(config_file: str = "config.yaml") -> Dict[str, Any]:
                     "warning": "%(asctime)s %(levelname)s:\t %(filename)s:%(lineno)d - %(message)s",
                     "info": "%(asctime)s %(levelname)s:\t %(message)s",
                     "debug": "%(asctime)s %(levelname)s:\t %(filename)s:%(lineno)d - %(message)s - %(funcName)s - %(module)s - %(process)d - %(thread)d - %(relativeCreated)d - %(threadName)s",
+                    "text": "\t %(message)s",
                 },
                 "terminal": {
                     "error": "%(levelname)s:\t Line %(lineno)d - %(message)s - %(exc_info)s",
                     "warning": "%(levelname)s:\t %(message)s",
                     "info": "%(levelname)s:\t %(message)s",
                     "debug": "%(levelname)s:\t %(message)s",
+                    "text": "%(message)s",
                 },
             },
             "colors": {
@@ -307,8 +321,7 @@ def load_configuration(config_file: str = "config.yaml") -> Dict[str, Any]:
             logging.error(
                 f"Error reading {config_file}: {e}. Falling back to defaults."
             )
-        logging.info(f"Setting from {config_file} applied.\n"
-        )
+        logging.info(f"Setting from {config_file} applied.\n")
     else:
         logging.warning(
             f"Configuration file {config_file} not found. Using default settings.\n"
@@ -327,6 +340,7 @@ def load_configuration(config_file: str = "config.yaml") -> Dict[str, Any]:
 
     final_config = apply_defaults(default_settings, config)
     return final_config
+
 
 # Invoke the load_configuration function and assign settings to config
 config = load_configuration()
@@ -352,6 +366,8 @@ ticker_data = namedtuple(
 base_directory = config.paths.base
 if not os.path.exists(base_directory):
     os.makedirs(base_directory)
+
+
 #
 # -----------------------------------------------------------------------------------
 # Centralised Logger                                                                |
@@ -362,17 +378,23 @@ def setup_logging():
     """
     Set up logging for the script with log and terminal handlers.
     """
+
+    # Explicitly clear all handlers from the root logger
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # Create custom level with empty name
+    logging.addLevelName(45, "")
+
     # Dict key:value pairs for log levels
     log_levels = {
         "DEBUG": logging.DEBUG,
         "INFO": logging.INFO,
         "WARNING": logging.WARNING,
         "ERROR": logging.ERROR,
+        "TEXT": 45,
     }
-    # Explicitly clear all handlers from the root logger
-    root_logger = logging.getLogger()
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
 
     # Create a logger instance named "QuickenPrices"
     logger = logging.getLogger("QuickenPrices")
@@ -381,30 +403,38 @@ def setup_logging():
     # Disable propagation to the root logger to prevent duplicate log messages
     logger.propagate = False
 
+    # Add custom text logging method
+    def text(self, message, *args, **kwargs):
+        return self.log(45, message, *args, **kwargs)
+
+    logging.Logger.text = text
+
     # Create terminal handler
     terminal_handler = logging.StreamHandler()
+
+    # Custom formatter to remove level name
+    class NoColonFormatter(logging.Formatter):
+        def format(self, record):
+            record.levelname = ""
+            return super().format(record)
+
     # Retrieve the desired log level from config dictionary
     terminal_level = config.logging.levels.terminal.upper()
     # Set the log level of the handler
     terminal_handler.setLevel(log_levels.get(terminal_level))
-    # Create a formatter based on the terminal level
+
+    # Create formatters based on the terminal level
     if terminal_level == "DEBUG":
-        terminal_formatter = logging.Formatter(
-            config.logging.message_formats.terminal.debug
-        )
+        terminal_formatter = logging.Formatter("%(levelname)s\t %(message)s")
     elif terminal_level == "INFO":
-        terminal_formatter = logging.Formatter(
-            config.logging.message_formats.terminal.info
-        )
+        terminal_formatter = logging.Formatter("%(levelname)s\t %(message)s")
     elif terminal_level == "WARNING":
-        terminal_formatter = logging.Formatter(
-            config.logging.message_formats.terminal.warning
-        )
+        terminal_formatter = logging.Formatter("%(levelname)s\t %(message)s")
+    elif terminal_level == "ERROR":
+        terminal_formatter = logging.Formatter("%(levelname)s\t %(message)s")
     else:
-        # Default terminal formatter is error
-        terminal_formatter = logging.Formatter(
-            config.logging.message_formats.terminal.error
-        )
+        # Default terminal formatter for TEXT
+        terminal_formatter = NoColonFormatter("%(message)s")
 
     # Assign the formatter to the handler
     terminal_handler.setFormatter(terminal_formatter)
@@ -415,36 +445,36 @@ def setup_logging():
     file_handler = logging.handlers.RotatingFileHandler(
         log_file_path,
         maxBytes=config.logging.max_bytes,
-        backupCount=config.logging.backup_count
+        backupCount=config.logging.backup_count,
     )
     file_level = config.logging.levels.file.upper()
     file_handler.setLevel(log_levels.get(file_level))
 
     # Create a formatter based on the file log level
     if file_level == "ERROR":
-        file_formatter = logging.Formatter(
-            config.logging.message_formats.file.error
+        file_formatter = logging.Formatter(config.logging.message_formats.file.error)
+    elif file_level == "TEXT":
+        file_formatter = logging.NoColonFormatter(
+            config.logging.message_formats.file.text
         )
     elif file_level == "INFO":
-        file_formatter = logging.Formatter(
-            config.logging.message_formats.file.info
-        )
+        file_formatter = logging.Formatter(config.logging.message_formats.file.info)
     elif file_level == "WARNING":
-        file_formatter = logging.Formatter(
-            config.logging.message_formats.file.warning
-        )
+        file_formatter = logging.Formatter(config.logging.message_formats.file.warning)
     else:
         # Default formatter is debug
-        file_formatter = logging.Formatter(
-            config.logging.message_formats.file.debug
-        )
+        file_formatter = logging.Formatter(config.logging.message_formats.file.debug)
 
     # Assign the formatter to the file handler
     file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
 
     return logger
+
+
 logger = setup_logging()
+
+
 #
 # -----------------------------------------------------------------------------------
 # Decorators                                                                        |
@@ -455,9 +485,16 @@ def log_function(func):
     """
     A decorator that logs when a function is entered and exited. It also logs any errors that occur within the function.
     """
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        logger.debug(f"Start of function '{func.__name__}'...")
+        logger.text(
+                   
+            #     f"Start of function '{func.__name__}'\n\t {'-' * (len(func.__name__)+29)}"
+            # )(
+                header(f"Start of function {func.__name__}"
+            
+        )
         try:
             result = func(*args, **kwargs)
             logger.debug(f"End of function '{func.__name__}'.\n")
@@ -465,31 +502,44 @@ def log_function(func):
         except Exception as e:
             logger.exception(f"Function '{func.__name__}' failed! Error: {e}\n")
             raise
+
     return wrapper
 
 
 def retry(exceptions, tries=3, delay=1, backoff=2):
     """
-    A decorator that retries a function upon encountering specified exceptions. It implements exponential backoff between retries.
+    A decorator that retries a function upon encountering specified exceptions.
+    It implements exponential backoff between retries and prints retry attempts.
     """
+
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             mtries, mdelay = tries, delay
-            while mtries > 0:
+            for attempt in range(1, tries + 1):
                 try:
                     return func(*args, **kwargs)
                 except exceptions as e:
-                    mtries -= 1
-                    if mtries == 0:
-                        logger.error(f"Function '{func.__name__}' failed after {tries} attempts")
+                    if attempt < tries:
+                        logger.warning(
+                            f"Attempt {attempt}/{tries}: {e}, Retrying in {mdelay} seconds..."
+                        )
+                    else:
+                        logger.error(
+                            f"Function '{func.__name__}' failed after {tries} attempts"
+                        )
                         raise
-                    logger.warning(f"{e}, Retrying in {mdelay} seconds...")
                     time.sleep(mdelay)
                     mdelay *= backoff
-            raise exceptions(f"Function '{func.__name__}' failed after {tries} attempts!")
+            raise exceptions(
+                f"Function '{func.__name__}' failed after {tries} attempts!"
+            )
+
         return wrapper
+
     return decorator
+
+
 #
 # -----------------------------------------------------------------------------------
 # Utilities                                                                         |
@@ -517,7 +567,7 @@ def get_date_range():
     business_days = np.busday_count(start_date_np, end_date_np)
 
     logger.info(
-        f"Using date range {start_date.strftime("%d/%m/%Y")} to {end_date.strftime("%d/%m/%Y")} ({business_days} business days)"
+        f"Using date range {start_date.strftime("%d/%m/%Y")} to {end_date.strftime("%d/%m/%Y")} ({business_days} business days)\n"
     )
     return start_date, end_date, business_days
 
@@ -589,6 +639,8 @@ def pluralise(title: str, quantity: int) -> str:
         return title
     else:
         return title + "s"
+
+
 #
 # -----------------------------------------------------------------------------------
 # Ticker Handling                                                                   |
@@ -634,7 +686,9 @@ def get_tickers(config: Dict[str, Any], set_maximum_tickers=5) -> Set[valid_tick
 
     # join the elements of the list using a list comprehension:
     fx_tickers_list = ", ".join(str(ticker) for ticker in fx_tickers)
-    logger.info(f"Obtained {len(fx_tickers)} unvalidated FX {pluralise('ticker',len(fx_tickers))}: {fx_tickers_list}")
+    logger.info(
+        f"Obtained {len(fx_tickers)} unvalidated FX {pluralise('ticker',len(fx_tickers))}: {fx_tickers_list}"
+    )
 
     # Validate FX tickers
     logger.info(f"Validating FX {pluralise('ticker', len(fx_tickers))}...")
@@ -643,7 +697,7 @@ def get_tickers(config: Dict[str, Any], set_maximum_tickers=5) -> Set[valid_tick
     if not valid_FX_tickers:
         logger.error("No valid FX tickers. Can only process GBP stock")
         return
-    
+
     # Combine stock and FX ticker lists
     all_tickers = valid_tickers + valid_FX_tickers
     # Remove duplicates
@@ -740,6 +794,8 @@ def validate_tickers(
     logger.debug(f"{short_valid_ticker_list}{short_invalid_ticker_list}")
 
     return valid_tickers, invalid_tickers
+
+
 #
 # -----------------------------------------------------------------------------------
 # Data Fetching and Caching                                                         |
@@ -853,7 +909,7 @@ def fetch_historical_data(
         combined_df = combined_df[["Ticker", "Price", "Date", "QuoteType", "Currency"]]
 
         logger.info(
-            f"The {business_days} business days between {start_date.strftime("%d/%m/%Y")} & {end_date.strftime("%d/%m/%Y")} resulted in a {combined_df.shape[0]} row & {combined_df.shape[1]} column dataframe."
+            f"The {business_days} business days between {start_date.strftime("%d/%m/%Y")} & {end_date.strftime("%d/%m/%Y")} gave a {combined_df.shape[0]} row dataframe."
         )
         return combined_df
     else:
@@ -867,6 +923,8 @@ def fetch_historical_data(
         exit(1)
     else:
         return pd.DataFrame()  # return an empty DataFrame
+
+
 #
 # -----------------------------------------------------------------------------------
 # Data Processing                                                                   |
@@ -961,7 +1019,9 @@ def convert_prices(ticker_dataframe: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 
         except Exception as e:
             # Log the error and skip the row
-            logger.error(f"Error converting price for Ticker '{ticker}' on {date.date().strftime("%m-%m-%Y")}: {e}.")
+            logger.error(
+                f"Error converting price for Ticker '{ticker}' on {date.date().strftime("%m-%m-%Y")}: {e}."
+            )
             continue  # Skip this row and continue processing
 
     # Step 5: Create a dataframe from converted rows
@@ -984,6 +1044,8 @@ def convert_prices(ticker_dataframe: pd.DataFrame) -> tuple[pd.DataFrame, int]:
         logger.info(f"Prices converted with {fail_counter} missing rows.")
 
     return final_dataframe
+
+
 #
 # -----------------------------------------------------------------------------------
 # Formatting                                                                        |
@@ -1014,9 +1076,9 @@ def format_ticker_status(ticker, status, currency=None, width=30):
     return f"{status_symbol} {ticker_with_currency:<{width}}"
 
 
-def print_section(title, major=False):
+def header(title, major=False):
     """Print a section header with optional emphasis."""
-    print(f"{Fore.WHITE}{Style.BRIGHT}{title}{Style.RESET_ALL}")
+    print(f"{title}{Style.RESET_ALL}")
     if major:
         print(f"{Fore.WHITE}{Style.BRIGHT}{'=' * len(title)}{Style.RESET_ALL}")
     else:
@@ -1084,6 +1146,8 @@ def save_to_csv(df: pd.DataFrame):
             f"An error occurred while saving the dataframe to a file called {CSV_file_name}"
         )
         return False
+
+
 #
 # -----------------------------------------------------------------------------------
 # Cache Cleanup                                                                     |
@@ -1100,7 +1164,7 @@ def clean_cache():
     max_age_days = config.cache.max_age_days
     now = time.time()
     cutoff = now - (max_age_days * 86400)  # in seconds
-    num_cleaned_files=0
+    num_cleaned_files = 0
     try:
         for filename in os.listdir(cache_dir_path):
             file_path = os.path.join(cache_dir_path, filename)
@@ -1126,10 +1190,18 @@ def clean_cache():
 
 #
 # -----------------------------------------------------------------------------------
-# Quicken UI                                                                        |
+# Seek elevation                                                                    |
 # -----------------------------------------------------------------------------------
-# Seeks elevation of Quicken XG 2004 to have it import the csv file.
+# Quicken 2004 requires elevation to work properly
 #
+def is_elevated():
+    """Check if script is running with admin privileges."""
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+
 def is_admin():
     """Checks if the script is run as admin"""
     try:
@@ -1142,11 +1214,21 @@ def run_as_admin():
     """Prompts the user for elevation"""
     if not is_admin():
         # Re-run the script as admin
+        print("")
+        logger.debug("Attempting to open new elevated script...")
         ctypes.windll.shell32.ShellExecuteW(
             None, "runas", sys.executable, __file__, None, 1
         )
-        time.sleep(5)
-        sys.exit(0)
+        logger.debug("Elevation request cancelled, continuing unelevated...")
+        return
+
+
+#
+# -----------------------------------------------------------------------------------
+# Quicken UI                                                                        |
+# -----------------------------------------------------------------------------------
+# Seeks elevation of Quicken XG 2004 to have it import the csv file.
+#
 
 
 def import_data_file():
@@ -1251,20 +1333,12 @@ def execute_import_sequence():
     return True
 
 
-def is_elevated():
-    """Check if script is running with admin privileges."""
-    try:
-        return ctypes.windll.shell32.IsUserAnAdmin()
-    except:
-        return False
-
-
 def handle_import():
     """
     Main entry point for handling Quicken import.
     """
     try:
-        print_section("\nImport to Quicken 2004")
+        header("\nImport to Quicken 2004")
         if is_elevated():
             logger.info("Confirmed 'is elevated'. Starting Quicken...")
             return execute_import_sequence()
@@ -1272,7 +1346,7 @@ def handle_import():
             print("Quicken cannot be opened from here.\n\nInstead:\n")
         print("1. Close this window.")
         print("2. Click the Quicken 'Update Prices' shortcut.\n")
-        print_section("END", major=True)
+        header("END", major=True)
         return True
 
     except Exception as e:
@@ -1304,9 +1378,8 @@ def main():
     Main function to orchestrate data fetching and processing.
     """
     try:
-        
         # Get elevation
-        # run_as_admin()
+        run_as_admin()
 
         # Get date range
         start_date, end_date, business_days = get_date_range()
@@ -1346,12 +1419,6 @@ if __name__ == "__main__":
     # Starting script
     main()
 
-    # Retrieve log messages from StringIO
-    # terminal_output = log_capture_string.getvalue()
-    # copy_to_clipboard(terminal_output)
-    # logger.info("Terminal output copied to clipboard.")
-
-    logger.info("Program finished")
 #
 # -----------------------------------------------------------------------------------
 # END                                                                               |
