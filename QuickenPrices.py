@@ -231,31 +231,30 @@ logging.info("All required libraries imported successfully.\n")
 # -----------------------------------------------------------------------------------
 # Purpose: Load and manage configuration settings from config.yaml.
 #
-def load_configuration(config_file: str = "config.yaml") -> Dict[str, Any]:
+# Definitions required before functions defined
+# Initialise Colorama for cross-platform terminal colours (defined in Global Scope)
+init(autoreset=True)
+# Define named tuples for application (defined in Global Scope)
+valid_ticker = namedtuple("valid_ticker", ["ticker", "quote_type", "currency"])
+ticker_data = namedtuple("ticker_data", ["ticker", "quote_type", "currency", "price", "date"])
+
+# Utility to recursively apply default settings
+def apply_defaults(
+    defaults: Dict[str, Any], settings: Dict[str, Any]
+) -> Dict[str, Any]:
+    for key, value in defaults.items():
+        if isinstance(value, dict):
+            settings[key] = apply_defaults(value, settings.get(key, {}))
+        else:
+            settings.setdefault(key, value)
+    return settings
+
+
+# Load configuration with defaults
+def load_configuration(config_file: str = "config.yaml") -> Box:
     """
-    Load configuration from the specified YAML file and apply defaults.
-
-    Args:
-        config_file (str): Path to the YAML configuration file. Defaults to 'config.yaml'.
-    
-        TICKERS (list): List of stock symbols to track and process
-                       - Prefixed with '^' are index symbols (e.g., ^GSPC for S&P 500)
-                       - Suffixed with '.L' are London Stock Exchange symbols
-                       - Others are regular stock symbols
-
-        PERIOD (float): Time period in years for historical data collection
-                       e.g., 0.08 represents approximately 1 month
-
-        PATH (str): Base directory path for the application
-                   Stores logs, cache, and output files
-
-        QUICKEN_PATH (str): File system path to the Quicken executable
-                           Used for automation of data import
-
-    Returns:
-        Dict[str, Any]: Final configuration dictionary, with defaults applied.
+    Load configuration from a YAML file and apply default values.
     """
-    # Default values dictionary in case of missing settings in YAML
     default_settings = {
         "tickers": {
             "^FTAS": "FTSE All-share (GBP)",
@@ -279,172 +278,88 @@ def load_configuration(config_file: str = "config.yaml") -> Dict[str, Any]:
             "CURRENCY": "5d",
             "INDEX": "5d",
         },
-        "cache": {
-            "max_age_days": 30,
-            "cleanup_threshold": 200,
-        },  # Number of entries before cleanup
+        "cache": {"max_age_days": 30, "cleanup_threshold": 200},
         "api": {"rate_limit": {"max_requests": 30, "time_window": 60}},
         "memory": {"max_memory_percent": 75, "chunk_size": 1000},
         "logging": {
             "levels": {"file": "DEBUG", "terminal": "DEBUG"},
-            "colors": {
-                "error": "red",
-                "warning": "yellow",
-                "info": "green",
-                "debug": "blue",
-            },
-            "max_bytes": 5242880,
+            "max_bytes": 5_242_880,
             "backup_count": 5,
         },
     }
 
-    # Load configuration from the file
+    # Load user configuration
     config = {}
     if os.path.exists(config_file):
         try:
             with open(config_file, "r") as f:
                 config = yaml.safe_load(f) or {}
             if not isinstance(config, dict):
-                logging.warning(
-                    f"Invalid configuration format in {config_file}. Falling back to defaults."
-                )
+                logging.warning(f"Invalid format in {config_file}. Using defaults.")
                 config = {}
         except Exception as e:
-            logging.error(
-                f"Error reading {config_file}: {e}. Falling back to defaults."
-            )
-        logging.info(f"Setting from {config_file} applied.\n")
-    else:
-        logging.warning(
-            f"Configuration file {config_file} not found. Using default settings."
-        )
+            logging.error(f"Error reading {config_file}: {e}. Using defaults.")
 
-    # Apply defaults recursively
-    def apply_defaults(
-        defaults: Dict[str, Any], settings: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        for key, value in defaults.items():
-            if isinstance(value, dict):
-                settings[key] = apply_defaults(value, settings.get(key, {}))
-            else:
-                settings.setdefault(key, value)
-        return settings
-
+    # Merge defaults with user config
     final_config = apply_defaults(default_settings, config)
-    return final_config
-
-
-# Invoke the load_configuration function and assign settings to config
-config = load_configuration()
-
-# Convert dictionary to dot notation
-config = Box(config)
-
-# Initialize colorama to enable cross-platform colored terminal output
-init(autoreset=True)
-
-# Create namedtuple classes
-valid_ticker = namedtuple("valid_ticker", ["ticker", "quote_type", "currency"])
-ticker_data = namedtuple(
-    "ticker_data", ["ticker", "quote_type", "currency", "price", "date"]
-)
-
-# turn on yFinance debug mode
-# yf.enable_debug_mode()
-
-# Global Variables
-# Format without box for dot notation: base_directory = config.get("paths", {}).get("base", ".")
-base_directory = config.paths.base
-if not os.path.exists(base_directory):
-    os.makedirs(base_directory)
-
+    return Box(final_config)
 
 #
 # -----------------------------------------------------------------------------------
-# Centralised Logger                                                                |
+# Logging                                                                           |
 # -----------------------------------------------------------------------------------
-# Purpose: Set up a centralized logging system to capture and record events, errors, and informational messages.
 #
-def setup_logging(config=config, base_directory=base_directory):
+def setup_logging(config: Box) -> logging.Logger:
     """
-    Set up logging with separate handlers for terminal and file, and a custom TEXT level.
+    Configure logging with terminal and file handlers, custom alignment.
     """
-    # Clear all handlers from the root logger
     root_logger = logging.getLogger()
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
+    root_logger.handlers.clear()  # Clear any pre-existing handlers
+    root_logger.setLevel(logging.DEBUG)
 
-    # Define custom log level for TEXT
+    logger = logging.getLogger("QuickenPrices")
+    logger.propagate = False  # Prevent messages bubbling up to root
+
+    # Define custom log levels and alignment for terminal output
     TEXT_LEVEL = 45
     logging.addLevelName(TEXT_LEVEL, "TEXT")
 
-    # Add a custom `text` method to the logger class
     def text(self, message, *args, **kwargs):
         self.log(TEXT_LEVEL, message, *args, **kwargs)
 
     logging.Logger.text = text
 
-    # Create logger
-    logger = logging.getLogger("QuickenPrices")
-    logger.setLevel(logging.DEBUG)  # Always capture all logs at this level
-    logger.propagate = False  # Prevent propagation to root logger
+    # Formatting for alignment
+    class AlignedFormatter(logging.Formatter):
+        def format(self, record):
+            prefix_width = 10
+            log_level = record.levelname + ":"
+            record.msg = f"{log_level:<{prefix_width}} {record.msg}"
+            return super().format(record)
 
-    # Define log level mapping
-    log_levels = {
-        "DEBUG": logging.DEBUG,
-        "INFO": logging.INFO,
-        "WARNING": logging.WARNING,
-        "ERROR": logging.ERROR,
-        "TEXT": TEXT_LEVEL,
-    }
+    log_path = os.path.join(config.paths.base, config.paths.log_file)
 
-    # Terminal Handler
+    # Terminal handler
     terminal_handler = logging.StreamHandler(sys.stdout)
     terminal_handler.setLevel(
-        log_levels.get(config.logging.levels.terminal.upper(), logging.INFO)
+        getattr(logging, config.logging.levels.terminal.upper(), "DEBUG")
     )
-    terminal_formats = {
-        "DEBUG": "%(levelname)s: %(message)s",
-        "INFO": "%(levelname)s: %(message)s",
-        "WARNING": "%(levelname)s: %(message)s",
-        "ERROR": "%(levelname)s: %(message)s",
-        "TEXT": "%(message)s",  # Bare output for TEXT
-    }
-    terminal_formatter = logging.Formatter(
-        terminal_formats.get(
-            config.logging.levels.terminal.upper(), "%(message)s"
-        )
-    )
-    terminal_handler.setFormatter(terminal_formatter)
+    terminal_handler.setFormatter(AlignedFormatter("%(message)s"))
     logger.addHandler(terminal_handler)
 
-    # File Handler
-    log_file_path = os.path.join(base_directory, config.paths.log_file)
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_file_path,
+    # File handler
+    file_handler = RotatingFileHandler(
+        log_path,
         maxBytes=config.logging.max_bytes,
         backupCount=config.logging.backup_count,
     )
-    file_handler.setLevel(
-        log_levels.get(config.logging.levels.file.upper(), logging.DEBUG)
-    )
-    file_formats = {
-        "DEBUG": "%(asctime)s %(levelname)s: %(filename)s:%(lineno)d - %(message)s",
-        "INFO": "%(asctime)s %(levelname)s: %(message)s",
-        "WARNING": "%(asctime)s %(levelname)s: %(message)s",
-        "ERROR": "%(asctime)s %(levelname)s: %(message)s",
-        "TEXT": "%(message)s",  # Bare output for TEXT
-    }
-    file_formatter = logging.Formatter(
-        file_formats.get(config.logging.levels.file.upper(), "%(message)s")
-    )
-    file_handler.setFormatter(file_formatter)
+    file_handler.setLevel(getattr(logging, config.logging.levels.file.upper(), "DEBUG"))
+    file_handler.setFormatter(AlignedFormatter("%(asctime)s %(message)s"))
     logger.addHandler(file_handler)
 
     return logger
 
 
-logger = setup_logging()
 #
 # -----------------------------------------------------------------------------------
 # Decorators                                                                        |
@@ -1751,6 +1666,15 @@ def main():
         # Get elevation
         run_as_admin()
 
+        
+
+        # Example usage of logger
+        logger.debug("Debug message aligned properly.")
+        logger.info("Information message aligned properly.")
+        logger.text("Plain text without header.")
+
+
+
         # Get date range
         start_date, end_date, business_days = get_date_range()
 
@@ -1794,7 +1718,17 @@ def main():
 
 
 if __name__ == "__main__":
-    # Starting script
+    
+    # Items requiring defined in global scope (ie out with main or other function)
+    config = load_configuration()
+    
+    # Ensure base directory exists
+    base_directory = config.paths.base
+    os.makedirs(base_directory, exist_ok=True)
+    
+    # Setup logging
+    logger = setup_logging(config)
+    
     main()
 
 #
