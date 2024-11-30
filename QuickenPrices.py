@@ -304,57 +304,125 @@ def load_configuration(config_file: str = "config.yaml") -> Box:
     final_config = apply_defaults(default_settings, config)
     return Box(final_config)
 
+
 #
 # -----------------------------------------------------------------------------------
 # Logging                                                                           |
 # -----------------------------------------------------------------------------------
 #
+class ColorizedFormatter(logging.Formatter):
+    """Custom formatter with colour-coded log levels for terminal output."""
+
+    LEVEL_COLOURS = {
+        "DEBUG": Fore.BLUE,
+        "INFO": Fore.GREEN,
+        "WARNING": Fore.YELLOW,
+        "ERROR": Fore.RED,
+        "TEXT": Fore.CYAN,  # Optional: Colour for the custom TEXT level
+    }
+
+    def format(self, record):
+        # Preserve the original levelname
+        original_levelname = record.levelname
+
+        # Add colour to the level name for terminal output
+        colour = self.LEVEL_COLOURS.get(original_levelname, "")
+        record.levelname = f"{colour}{original_levelname}{Style.RESET_ALL}:"
+
+        # Format the message
+        result = super().format(record)
+
+        # Restore the original levelname
+        record.levelname = original_levelname
+
+        return result
+
+
+
+class TabAlignedFormatter(logging.Formatter):
+    """Custom formatter for log messages with level-based formatting and alignment using tabs."""
+
+    def __init__(self, level_formats, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.level_formats = level_formats
+
+    def format(self, record):
+        # Preserve the original levelname
+        original_levelname = record.levelname
+
+        # Add a tab after the levelname for alignment
+        record.levelname = f"{original_levelname}:\t"
+
+        # Select the format for the current log level
+        log_fmt = self.level_formats.get(original_levelname.strip(":"), self._fmt)
+        self._style._fmt = log_fmt
+
+        # Format the message
+        result = super().format(record)
+
+        # Restore the original levelname
+        record.levelname = original_levelname
+
+        return result
+
+
 def setup_logging(config: Box) -> logging.Logger:
     """
-    Configure logging with terminal and file handlers, custom alignment.
+    Configure logging with tabs for alignment and custom formats for each level
+    in both terminal and file handlers.
     """
-    root_logger = logging.getLogger()
-    root_logger.handlers.clear()  # Clear any pre-existing handlers
-    root_logger.setLevel(logging.DEBUG)
+    # Clear existing handlers
+    logging.getLogger().handlers.clear()
 
     logger = logging.getLogger("QuickenPrices")
-    logger.propagate = False  # Prevent messages bubbling up to root
+    logger.setLevel(logging.DEBUG)
 
-    # Define custom log levels and alignment for terminal output
+    # Define the custom TEXT level
     TEXT_LEVEL = 45
     logging.addLevelName(TEXT_LEVEL, "TEXT")
 
+    # Add a method for plain text logging
     def text(self, message, *args, **kwargs):
+        """Custom method for plain text logging."""
         self.log(TEXT_LEVEL, message, *args, **kwargs)
 
-    logging.Logger.text = text
+    setattr(logging.Logger, "text", text)
 
-    # Formatting for alignment
-    class AlignedFormatter(logging.Formatter):
-        def format(self, record):
-            prefix_width = 10
-            log_level = record.levelname + ":"
-            record.msg = f"{log_level:<{prefix_width}} {record.msg}"
-            return super().format(record)
+    # Define level-specific formats for terminal
+    level_formats_terminal = {
+        "DEBUG": f"%(levelname)s%(message)s",
+        "INFO": f"%(levelname)s%(message)s",
+        "WARNING": f"%(levelname)s%(message)s",
+        "ERROR": f"%(levelname)s%(message)s",
+        "TEXT": f"\t%(message)s",  # Plain text aligned with a leading tab
+    }
 
-    log_path = os.path.join(config.paths.base, config.paths.log_file)
+    # Define level-specific formats for logfile
+    level_formats_file = {
+        "DEBUG": f"%(asctime)s\t%(levelname)s%(message)s",
+        "INFO": f"%(asctime)s\t%(levelname)s%(message)s",
+        "WARNING": f"%(asctime)s\t%(levelname)s%(message)s",
+        "ERROR": f"%(asctime)s\t%(levelname)s%(message)s",
+        "TEXT": f"\t%(message)s",  # Plain text aligned with a leading tab
+    }
 
-    # Terminal handler
+    # Terminal Handler
     terminal_handler = logging.StreamHandler(sys.stdout)
     terminal_handler.setLevel(
         getattr(logging, config.logging.levels.terminal.upper(), "DEBUG")
     )
-    terminal_handler.setFormatter(AlignedFormatter("%(message)s"))
+    terminal_handler.setFormatter(TabAlignedFormatter(level_formats_terminal))
     logger.addHandler(terminal_handler)
 
-    # File handler
-    file_handler = RotatingFileHandler(
-        log_path,
+    # File Handler
+    log_file_path = os.path.join(config.paths.base, config.paths.log_file)
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file_path,
         maxBytes=config.logging.max_bytes,
         backupCount=config.logging.backup_count,
     )
     file_handler.setLevel(getattr(logging, config.logging.levels.file.upper(), "DEBUG"))
-    file_handler.setFormatter(AlignedFormatter("%(asctime)s %(message)s"))
+    file_handler.setFormatter(TabAlignedFormatter(level_formats_file))
     logger.addHandler(file_handler)
 
     return logger
@@ -1150,8 +1218,8 @@ def header(title, logger=None, major=False):
         logger.text(title)
         logger.text(header_line)
     else:
-        print(f"\t {title}")
-        print(f"\t {header_line}")
+        print(f"\t{title}")
+        print(f"\t{header_line}")
 
 
 def _strip_ansi(text):
@@ -1378,10 +1446,10 @@ def prepare_tables(
     # Generate Outputs
     # --------------------
     print("")
-    header("Stock Price Update", major=True)
+    header("Stock Price Update", logger=logger,major=True)
     start_date, end_date, business_days = get_date_range()
     logger.text(
-        f"Range {start_date.strftime("%d/%m/%Y")} - {end_date.strftime("%d/%m/%Y")}\n\t {business_days} business days"
+        f" {start_date.strftime("%d/%m/%Y")} - {end_date.strftime("%d/%m/%Y")}\n\t {business_days} business days"
     )
 
     logger.text("\n\t" + calculate_summary().replace("\n", "\n\t"))
@@ -1632,7 +1700,7 @@ def quicken_import():
     Main entry point for handling Quicken import.
     """
     try:
-        header("\n\t Import to Quicken 2004")
+        header("Import to Quicken 2004", logger=logger, major=True)
         if is_elevated():
             logger.info("Confirmed 'is elevated'. Starting Quicken...")
             return execute_import_sequence()
@@ -1665,15 +1733,6 @@ def main():
     try:
         # Get elevation
         run_as_admin()
-
-        
-
-        # Example usage of logger
-        logger.debug("Debug message aligned properly.")
-        logger.info("Information message aligned properly.")
-        logger.text("Plain text without header.")
-
-
 
         # Get date range
         start_date, end_date, business_days = get_date_range()
@@ -1708,7 +1767,7 @@ def main():
         quicken_import()
 
         # Pause to allow reading of terminal
-        input("\n\t Press Enter to exit...")
+        input("\n\tPress Enter to exit...")
 
     except KeyboardInterrupt:
         logger.warning("Script interrupted by user.")
