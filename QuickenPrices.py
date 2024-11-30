@@ -310,51 +310,41 @@ def load_configuration(config_file: str = "config.yaml") -> Box:
 # Logging                                                                           |
 # -----------------------------------------------------------------------------------
 #
-class ColorizedFormatter(logging.Formatter):
-    """Custom formatter with colour-coded log levels for terminal output."""
+class UnifiedFormatter(logging.Formatter):
+    """A single formatter for terminal and file outputs with optional colour."""
 
     LEVEL_COLOURS = {
         "DEBUG": Fore.BLUE,
         "INFO": Fore.GREEN,
         "WARNING": Fore.YELLOW,
         "ERROR": Fore.RED,
-        "TEXT": Fore.CYAN,  # Optional: Colour for the custom TEXT level
+        "TEXT": Fore.CYAN,
     }
 
-    def format(self, record):
-        # Preserve the original levelname
-        original_levelname = record.levelname
-
-        # Add colour to the level name for terminal output
-        colour = self.LEVEL_COLOURS.get(original_levelname, "")
-        record.levelname = f"{colour}{original_levelname}{Style.RESET_ALL}:"
-
-        # Format the message
-        result = super().format(record)
-
-        # Restore the original levelname
-        record.levelname = original_levelname
-
-        return result
-
-
-
-class TabAlignedFormatter(logging.Formatter):
-    """Custom formatter for log messages with level-based formatting and alignment using tabs."""
-
-    def __init__(self, level_formats, *args, **kwargs):
+    def __init__(
+        self, level_formats, max_level_length, use_colour=False, *args, **kwargs
+    ):
         super().__init__(*args, **kwargs)
         self.level_formats = level_formats
+        self.max_level_length = max_level_length
+        self.use_colour = use_colour
 
     def format(self, record):
         # Preserve the original levelname
         original_levelname = record.levelname
 
-        # Add a tab after the levelname for alignment
-        record.levelname = f"{original_levelname}:\t"
+        # Pad the log level for alignment
+        padded_levelname = f"{original_levelname}:".ljust(self.max_level_length + 1)
+
+        # Add colour to the log level name if enabled
+        if self.use_colour and original_levelname in self.LEVEL_COLOURS:
+            colour = self.LEVEL_COLOURS[original_levelname]
+            record.levelname = f"{colour}{padded_levelname}{Style.RESET_ALL}"
+        else:
+            record.levelname = padded_levelname
 
         # Select the format for the current log level
-        log_fmt = self.level_formats.get(original_levelname.strip(":"), self._fmt)
+        log_fmt = self.level_formats.get(original_levelname, self._fmt)
         self._style._fmt = log_fmt
 
         # Format the message
@@ -368,8 +358,7 @@ class TabAlignedFormatter(logging.Formatter):
 
 def setup_logging(config: Box) -> logging.Logger:
     """
-    Configure logging with tabs for alignment and custom formats for each level
-    in both terminal and file handlers.
+    Configure logging with separate level-specific formats for terminal and logfile outputs.
     """
     # Clear existing handlers
     logging.getLogger().handlers.clear()
@@ -388,33 +377,39 @@ def setup_logging(config: Box) -> logging.Logger:
 
     setattr(logging.Logger, "text", text)
 
+    # Calculate maximum level length using raw log level names
+    raw_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "TEXT"]
+    max_level_length = max(len(level) for level in raw_levels)
+
     # Define level-specific formats for terminal
     level_formats_terminal = {
-        "DEBUG": f"%(levelname)s%(message)s",
-        "INFO": f"%(levelname)s%(message)s",
-        "WARNING": f"%(levelname)s%(message)s",
-        "ERROR": f"%(levelname)s%(message)s",
-        "TEXT": f"\t%(message)s",  # Plain text aligned with a leading tab
+        "DEBUG": f"%(levelname)s %(message)s",
+        "INFO": f"%(levelname)s %(message)s",
+        "WARNING": f"%(levelname)s %(message)s",
+        "ERROR": f"%(levelname)s %(message)s",
+        "TEXT": f"         %(message)s",  # Aligned plain text for TEXT level
     }
 
     # Define level-specific formats for logfile
     level_formats_file = {
-        "DEBUG": f"%(asctime)s\t%(levelname)s%(message)s",
-        "INFO": f"%(asctime)s\t%(levelname)s%(message)s",
-        "WARNING": f"%(asctime)s\t%(levelname)s%(message)s",
-        "ERROR": f"%(asctime)s\t%(levelname)s%(message)s",
-        "TEXT": f"\t%(message)s",  # Plain text aligned with a leading tab
+        "DEBUG": f"%(asctime)s [DEBUG]: %(message)s",
+        "INFO": f"%(asctime)s [INFO]: %(message)s",
+        "WARNING": f"%(asctime)s [WARNING]: %(message)s",
+        "ERROR": f"%(asctime)s [ERROR]: %(message)s",
+        "TEXT": f"%(message)s",  # Plain text for TEXT level
     }
 
-    # Terminal Handler
+    # Terminal Handler with UnifiedFormatter
     terminal_handler = logging.StreamHandler(sys.stdout)
     terminal_handler.setLevel(
         getattr(logging, config.logging.levels.terminal.upper(), "DEBUG")
     )
-    terminal_handler.setFormatter(TabAlignedFormatter(level_formats_terminal))
+    terminal_handler.setFormatter(
+        UnifiedFormatter(level_formats_terminal, max_level_length, use_colour=True)
+    )
     logger.addHandler(terminal_handler)
 
-    # File Handler
+    # File Handler with UnifiedFormatter (no colour)
     log_file_path = os.path.join(config.paths.base, config.paths.log_file)
     file_handler = logging.handlers.RotatingFileHandler(
         log_file_path,
@@ -422,7 +417,9 @@ def setup_logging(config: Box) -> logging.Logger:
         backupCount=config.logging.backup_count,
     )
     file_handler.setLevel(getattr(logging, config.logging.levels.file.upper(), "DEBUG"))
-    file_handler.setFormatter(TabAlignedFormatter(level_formats_file))
+    file_handler.setFormatter(
+        UnifiedFormatter(level_formats_file, max_level_length, use_colour=False)
+    )
     logger.addHandler(file_handler)
 
     return logger
@@ -1096,7 +1093,7 @@ def process_converted_prices(
             )
         else:
             logger.info(
-                f"Successfully processed {total_rows_input} items (total outputs {total_rows_output_csv} = successes {total_rows_success} + failures {total_rows_failure} + items not changed {total_rows_no_change} + Index and Currencies {total_rows_index_currency})."
+                f"Inputs {total_rows_input} = outputs {total_rows_output_csv} = successes {total_rows_success} + failures {total_rows_failure} + not changed {total_rows_no_change} + Index & FX {total_rows_index_currency}."
             )
 
         # Proceed to process success DataFrame
@@ -1359,11 +1356,10 @@ def prepare_tables(
 
         latest_prices["Original Price"] = (
             latest_prices["original_price"].round(3).astype(str)
-            + latest_prices["original_currency"]
+            + " " + latest_prices["original_currency"]
         )
         latest_prices["Price"] = (
-            latest_prices["new_price"].round(3).astype(str)
-            + latest_prices["new_currency"]
+            latest_prices["new_price"].round(3).astype(str) + " " + latest_prices["new_currency"]
         )
         latest_prices["Date"] = pd.to_datetime(latest_prices["Date"]).dt.strftime(
             "%d/%m/%Y"
@@ -1394,7 +1390,7 @@ def prepare_tables(
         index_currency_prices = index_currency_df.loc[idx]
         index_currency_prices["Price"] = (
             index_currency_prices["Price"].round(3).astype(str)
-            + index_currency_prices["Currency"]
+            + " " + index_currency_prices["Currency"]
         )
         index_currency_prices["Date"] = index_currency_prices["Date"].dt.strftime(
             "%d/%m/%Y"
@@ -1416,10 +1412,9 @@ def prepare_tables(
             return pd.DataFrame(), []
         failed_conversions["Original Price"] = (
             failed_conversions["original_price"].round(3).astype(str)
-            + " ("
-            + failed_conversions["original_currency"]
-            + ")"
-        )
+            + " "
+                     + failed_conversions["original_currency"]
+             )
         failed_conversions["Date"] = pd.to_datetime(
             failed_conversions["Date"]
         ).dt.strftime("%d/%m/%Y")
@@ -1449,7 +1444,7 @@ def prepare_tables(
     header("Stock Price Update", logger=logger,major=True)
     start_date, end_date, business_days = get_date_range()
     logger.text(
-        f" {start_date.strftime("%d/%m/%Y")} - {end_date.strftime("%d/%m/%Y")}\n\t {business_days} business days"
+        f"{start_date.strftime("%d/%m/%Y")} - {end_date.strftime("%d/%m/%Y")}\n\t {business_days} business days"
     )
 
     logger.text("\n\t" + calculate_summary().replace("\n", "\n\t"))
@@ -1705,10 +1700,11 @@ def quicken_import():
             logger.info("Confirmed 'is elevated'. Starting Quicken...")
             return execute_import_sequence()
         else:
-            logger.text("Quicken cannot be opened from here.\n\n\tInstead:\n")
+            logger.text("Quicken cannot be opened from here.\n\n")
+            logger.text("Instead:\n")
             logger.text("1. Close this window.")
             logger.text("2. Click the Quicken 'Update Prices' shortcut.\n")
-            logger.text(header("END", major=True))
+            logger.text(header("END", logger=logger,major=True))
         return True
 
     except Exception as e:
@@ -1767,7 +1763,7 @@ def main():
         quicken_import()
 
         # Pause to allow reading of terminal
-        input("\n\tPress Enter to exit...")
+        input("\n\t Press Enter to exit...\n\t")
 
     except KeyboardInterrupt:
         logger.warning("Script interrupted by user.")
