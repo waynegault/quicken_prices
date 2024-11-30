@@ -1,40 +1,29 @@
 # QuickenPrices Configuration: config.yaml
 
-use_simulator: false # Set to 'false' to use the real API
-
 # Tickers to track
   
 tickers:
-  "0P00013P6I.L": "HSBC FTSE All-World Index C Acc (GBP)"
-  "0P00018XAP.L": "Vanguard FTSE 100 Idx Unit Tr £ Acc (GBP)"
+  "0P00013P6I.L": "HSBC FTSE All-World Index C Acc (GBp)"
+  "0P00018XAP.L": "Vanguard FTSE 100 Idx Unit Tr £ Acc (GBp)"
   "AMGN":         "Amgen Inc. (USD)"
   "BZG25.NYM":    "Brent Crude Oil Last Day Finance (USD)"
-  "CUKX.L":       "iShares VII PLC - iShares Core FTSE 100 ETF GBP Acc (GBP)"
-  "CYSE.L":       "WisdomTree Cybersecurity UCITS ETF USD Acc (GBP)"
-  "ELIX.L":       "Elixirr International plc (GBP)"
-  "EURGBP=X":     "EUR/GBP Fx"
+  "CUKX.L":       "iShares VII PLC - iShares Core FTSE 100 ETF GBP Acc (GBp)"
+  "CYSE.L":       "WisdomTree Cybersecurity UCITS ETF USD Acc (GBp)"
+  "ELIX.L":       "Elixirr International plc (GBp)"
   "^FTAS":        "FTSE All-share (GBP)"
   "^FTSE":        "FTSE 100 (GBP)"
-  "GBP=X":        "USD/GBP Fx"
-  "GLTA.L":       "Invesco UK Gilts UCITS ETF (GBP)"
+  "GLTA.L":       "Invesco UK Gilts UCITS ETF (GBp)"
   "GCG25.CMX":    "Gold (USD)"
-  "HMWO.L":       "HSBC MSCI World UCITS ETF (GBP)"
-  "IHCU.L":       "iShares S&P 500 Health Sector UCITS ETF USD (Acc) (GBP)"
+  "HMWO.L":       "HSBC MSCI World UCITS ETF (GBp)"
+  "IHCU.L":       "iShares S&P 500 Health Sector UCITS ETF USD (Acc) (GBp)"
   "IIND.L":       "iShares MSCI India UCITS ETF USD Acc (GBP)"
   "IUIT.L":       "iShares S&P 500 IT Sector UCITS ETF USD (Acc) (USD)"
-  "SEE.L":        "Seeing Machines Limited (GBP)"
+  "SEE.L":        "Seeing Machines Limited (GBp)"
   "^OEX":         "S&P 100 INDEX (USD)"
   "^GSPC":        "S&P 500 INDEX (USD)"
   "VHVG.L":       "Vanguard FTSE Devel World UCITS ETF USD Acc (GBP)"
   "VNRX":         "VolitionRX Limited (USD)"
   "VUKG.L":       "Vanguard FTSE 100 UCITS ETF GBP Acc (GBP)"
-
-# Debug Configuration -  populated for testing specific tickers
-debug: 
-  - "VHVG.L"
-  - "ELIX.L"
-  - "VNRX"
-  - "EURGBP=X"
 
 # Application Paths - data files, logs, cache and quicken executable
 paths:
@@ -75,17 +64,7 @@ memory:
   max_memory_percent: 75
   chunk_size: 1000
 
-# Data Validation
-validation:
-  required_columns:
-    - Ticker
-    - Close
-    - Date
-
 logging:
-
-  # Levels reported in each place: ERROR, WARNING, INFO, DEBUG. Selecting a lower level includes all higher levels too.
-
   levels:
     file: DEBUG
     terminal: DEBUG
