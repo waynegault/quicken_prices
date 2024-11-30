@@ -98,7 +98,8 @@ third_party_libs = {
     },  # Terminal text styling
     "pyautogui": {"install_name": "pyautogui"},  # GUI automation
     "psutil": {"install_name": "psutil"},  # Process and system monitoring
-    "requests": {"install_name": "requests"},  # HTTP requests library (test package)
+    "tabulate": {"install_name": "tabulate",
+                 "from": ["tabulate"]}
 }
 
 # Track Missing Packages
@@ -224,7 +225,6 @@ if missing_packages:
 # Step 4 report success
 logging.info("All required libraries imported successfully.")
 
-
 #
 # -----------------------------------------------------------------------------------
 # Configuration Management                                                          |
@@ -245,7 +245,6 @@ def load_configuration(config_file: str = "config.yaml") -> Dict[str, Any]:
     default_settings = {
         "use_simulator": True,
         "tickers": {
-            "0P00013P6I.L": "HSBC FTSE All-World Index C Acc (GBP)",
             "EURGBP=X": "EUR/GBP Fx",
             "^FTAS": "FTSE All-share (GBP)",
             "^FTSE": "FTSE 100 (GBP)",
@@ -253,7 +252,6 @@ def load_configuration(config_file: str = "config.yaml") -> Dict[str, Any]:
             "^OEX": "S&P 100 INDEX (USD)",
             "^GSPC": "S&P 500 INDEX (USD)",
             "VHVG.L": "Vanguard FTSE Developed World UCITS ETF USD Accumulation (GBP)",
-            "VNRX": "VolitionRX Limited (USD)",
             "VUKG.L": "Vanguard FTSE 100 UCITS ETF GBP Accumulation (GBP)",
         },
         "debug": {"VHVG.L", "ELIX.L", "VNRX", "EURGBP=X"},
@@ -278,7 +276,7 @@ def load_configuration(config_file: str = "config.yaml") -> Dict[str, Any]:
         "memory": {"max_memory_percent": 75, "chunk_size": 1000},
         "validation": {"required_columns": ["Ticker", "Close", "Date"]},
         "logging": {
-            "levels": {"file": "DEBUG", "terminal": "INFO"},
+            "levels": {"file": "DEBUG", "terminal": "WARNING"},
             "message_formats": {
                 "file": {
                     "error": "%(asctime)s %(levelname)s:\t %(filename)s:%(lineno)d - %(message)s - %(exc_info)s",
@@ -324,7 +322,7 @@ def load_configuration(config_file: str = "config.yaml") -> Dict[str, Any]:
         logging.info(f"Setting from {config_file} applied.\n")
     else:
         logging.warning(
-            f"Configuration file {config_file} not found. Using default settings.\n"
+            f"Configuration file {config_file} not found. Using default settings."
         )
 
     # Apply defaults recursively
@@ -366,7 +364,6 @@ ticker_data = namedtuple(
 base_directory = config.paths.base
 if not os.path.exists(base_directory):
     os.makedirs(base_directory)
-
 
 #
 # -----------------------------------------------------------------------------------
@@ -438,6 +435,7 @@ def setup_logging():
 
     # Assign the formatter to the handler
     terminal_handler.setFormatter(terminal_formatter)
+    terminal_handler.stream = open(sys.stdout.fileno(), mode='w', encoding='utf8', buffering=1)
     logger.addHandler(terminal_handler)
 
     # Create file handler with rotating logs
@@ -471,10 +469,7 @@ def setup_logging():
 
     return logger
 
-
 logger = setup_logging()
-
-
 #
 # -----------------------------------------------------------------------------------
 # Decorators                                                                        |
@@ -532,7 +527,6 @@ def retry(exceptions, tries=3, delay=1, backoff=2):
         return wrapper
 
     return decorator
-
 
 #
 # -----------------------------------------------------------------------------------
@@ -634,7 +628,6 @@ def pluralise(title: str, quantity: int) -> str:
         return title
     else:
         return title + "s"
-
 
 #
 # -----------------------------------------------------------------------------------
@@ -790,7 +783,6 @@ def validate_tickers(
 
     return valid_tickers, invalid_tickers
 
-
 #
 # -----------------------------------------------------------------------------------
 # Data Fetching and Caching                                                         |
@@ -799,6 +791,7 @@ def validate_tickers(
 # API calls and implement rate limiting to adhere to API usage policies.
 #
 @retry(Exception, tries=3)
+@log_function
 def get_ticker(ticker_symbol: str) -> Optional[yf.Ticker]:
     """
     Fetches ticker data from Yahoo Finance
@@ -820,8 +813,8 @@ def get_ticker(ticker_symbol: str) -> Optional[yf.Ticker]:
 
         return None
 
-
 @retry(Exception, tries=3)
+@log_function
 def fetch_ticker_history(
     ticker_symbol: str, start_date: datetime, end_date: datetime
 ) -> pd.DataFrame:
@@ -869,6 +862,7 @@ def fetch_ticker_history(
     return tidy_df  # returns a pandas df
 
 
+@retry(Exception, tries=3)
 @log_function
 def fetch_historical_data(
     tickers: Set[valid_ticker],
@@ -919,7 +913,6 @@ def fetch_historical_data(
     else:
         return pd.DataFrame()  # return an empty DataFrame
 
-
 #
 # -----------------------------------------------------------------------------------
 # Data Processing                                                                   |
@@ -927,119 +920,279 @@ def fetch_historical_data(
 # Purpose: Process the raw fetched data by performing currency conversions and organizing the data for output.
 #
 @log_function
-def convert_prices(ticker_dataframe: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    """
-    Converts the Price column to GBP based on the Currency and QuoteType columns.
-    Rows with QuoteType 'CURRENCY' or 'INDEX' are included in the final dataframe unchanged.
+def convert_prices(df):
 
-    Parameters:
-    - ticker_dataframe (pd.DataFrame): The input dataframe containing ticker information.
+    # Create a copy of the dataframe to avoid modifying the original data
+    final_df = df.copy()
 
-    Returns:
-    - pd.DataFrame: A new dataframe with prices converted to GBP and including all original rows.
-    """
-    # Step 1: Separate exchange rates from the main dataframe
-    exchange_rates_df = ticker_dataframe[ticker_dataframe["QuoteType"] == "CURRENCY"]
+    # Ensure 'Date' is in datetime format
+    final_df['Date'] = pd.to_datetime(final_df['Date'])
 
-    # Step 2: Create a mapping for exchange rates
-    # Key: (Date, Ticker), Value: Price (exchange rate)
-    exchange_rate_map = exchange_rates_df.set_index(["Date", "Ticker"])[
-        "Price"
-    ].to_dict()
+    # Initialize new columns
+    final_df['original_price'] = final_df['Price']
+    final_df['original_currency'] = final_df['Currency']
+    final_df['FX_ticker'] = ''
+    final_df['Exchange_rate'] = pd.NA
+    final_df['new_price'] = pd.NA
+    final_df['new_currency'] = pd.NA
+    final_df['outcome'] = ''
 
-    # Step 3: Identify rows that require conversion and those that don't
-    # Rows to convert: QuoteType not in ['CURRENCY', 'INDEX']
-    rows_to_convert = ticker_dataframe[
-        # note: The ~ operator negates the boolean Series!
-        ~ticker_dataframe["QuoteType"].isin(["CURRENCY", "INDEX"])
-    ].copy()
+    # Create exchange rate map from rows where QuoteType is 'CURRENCY'
+    exchange_rate_df = final_df[final_df['QuoteType'] == 'CURRENCY'][['Ticker', 'Date', 'Price']]
+    exchange_rate_df = exchange_rate_df.rename(columns={'Price': 'Exchange_rate'})
+    exchange_rate_df.set_index(['Date', 'Ticker'], inplace=True)
 
-    # Rows to keep as-is: QuoteType in ['CURRENCY', 'INDEX']
-    rows_to_keep = ticker_dataframe[
-        ticker_dataframe["QuoteType"].isin(["CURRENCY", "INDEX"])
-    ].copy()
+    # Function to get exchange rate
+    def get_exchange_rate(row):
+        currency = row['original_currency']
+        date = row['Date']
 
-    # Initialize a list to store converted rows
-    converted_rows = []
-    fail_counter = 0
-
-    # Step 4: Iterate over each row to perform conversion
-    for idx, row in rows_to_convert.iterrows():
-        currency = row["Currency"]
-        date = row["Date"]
-        price = row["Price"]
-        ticker = row["Ticker"]
-
-        try:
-            if pd.isna(price):
-                logger.error(
-                    f"Missing price for Ticker '{ticker}' on {date.date().strftime("%m-%m-%Y")}. Skipping this date."
-                )
-                continue  # Skip this row and continue processing
-
-            if currency == "GBP":
-                # No conversion needed
-                price_gbp = price
-            elif currency == "GBp":
-                # Convert GBp to GBP by dividing by 100
-                price_gbp = price / 100
+        if currency == 'GBP':
+            # Exchange rate is 1
+            exchange_rate = 1.0
+            FX_ticker = ''
+        elif currency == 'GBp':
+            # Exchange rate is 0.01
+            exchange_rate = 0.01
+            FX_ticker = ''
+        else:
+            # Determine FX_ticker
+            if currency == 'USD':
+                FX_ticker = 'GBP=X'
             else:
-                # Determine the exchange rate ticker based on Currency
-                if currency == "USD":
-                    exchange_ticker = "GBP=X"
+                FX_ticker = f"{currency}GBP=X"
+
+            # Try to get exchange rate from exchange_rate_df
+            try:
+                exchange_rate = exchange_rate_df.loc[(date, FX_ticker), 'Exchange_rate']
+            except KeyError:
+                # Exchange rate not found
+                exchange_rate = pd.NA
+                logger.error(f"Row {row.name}: Exchange rate not found for currency {currency} on date {date} for Ticker {row['Ticker']}")
+        return exchange_rate, FX_ticker
+
+    # Ensure 'Price' is numeric before calculation
+    final_df['Price'] = pd.to_numeric(final_df['Price'], errors='coerce')
+
+    # Iterate over the dataframe rows
+    for index, row in final_df.iterrows():
+        # Initialize outcome
+        outcome = ''
+
+        # Determine if outcome should be 'no change'
+        if row['QuoteType'] in ['INDEX', 'CURRENCY'] or (row['original_currency'] == 'GBP' and row['QuoteType'] not in ['INDEX', 'CURRENCY']):
+            # Outcome is 'no change', prices remain the same
+            final_df.at[index, 'new_price'] = row['Price']
+            final_df.at[index, 'new_currency'] = row['Currency']
+            outcome = 'no change'
+        else:
+            # For other QuoteTypes, need to convert price
+            exchange_rate, FX_ticker = get_exchange_rate(row)
+            final_df.at[index, 'FX_ticker'] = FX_ticker
+            final_df.at[index, 'Exchange_rate'] = exchange_rate
+
+            # Ensure 'Exchange_rate' is numeric before calculation
+            exchange_rate = pd.to_numeric(exchange_rate, errors='coerce')
+
+            # Check for missing original price and exchange rate
+            price_missing = pd.isna(row['Price'])
+            exchange_rate_missing = pd.isna(exchange_rate)
+
+            if price_missing and exchange_rate_missing:
+                outcome = 'no price/ no FX rate'
+                logger.error(f"Row {index}: No original price and no exchange rate for Ticker {row['Ticker']} on Date {row['Date']}")
+            elif price_missing:
+                outcome = 'no price'
+                logger.error(f"Row {index}: No original price for Ticker {row['Ticker']} on Date {row['Date']}")
+            elif exchange_rate_missing:
+                outcome = 'no FX rate'
+                logger.error(f"Row {index}: No exchange rate for Ticker {row['Ticker']} on Date {row['Date']}")
+            else:
+                # Ensure 'Price' and 'Exchange_rate' are numeric before calculation
+                if pd.notna(row['Price']) and pd.notna(exchange_rate):
+                    try:
+                        new_price = row['Price'] * exchange_rate
+                        final_df.at[index, 'new_price'] = new_price
+                        final_df.at[index, 'new_currency'] = 'GBP'
+                        outcome = 'success'
+                    except Exception as e:
+                        outcome = 'conversion error'
+                        logger.error(f"Row {index}: Error during price conversion for Ticker {row['Ticker']} on Date {row['Date']} - {e}")
                 else:
-                    exchange_ticker = f"{currency}GBP=X"
+                    outcome = 'conversion error'
+                    logger.error(f"Row {index}: Non-numeric price or exchange rate for Ticker {row['Ticker']} on Date {row['Date']}")
 
-                # Retrieve the exchange rate using (Date, exchange_ticker)
-                exchange_rate_key = (date, exchange_ticker)
-                exchange_rate = exchange_rate_map.get(exchange_rate_key)
+        # Set the outcome
+        final_df.at[index, 'outcome'] = outcome
 
-                if exchange_rate is not None:
-                    price_gbp = price * exchange_rate
-                else:
-                    # Exchange rate not found for the given date and ticker
-                    logger.warning(
-                        f"{exchange_ticker} FX rate not found for {date.date().strftime("%m-%m-%Y")}. Skipping '{ticker}' on this date."
-                    )
-                    fail_counter += 1
-                    continue  # Skip this row
+    # Ensure 'Exchange_rate' and 'new_price' are numeric
+    final_df['Exchange_rate'] = pd.to_numeric(final_df['Exchange_rate'], errors='coerce')
+    final_df['new_price'] = pd.to_numeric(final_df['new_price'], errors='coerce')
 
-            # Create a new row with the converted price
-            new_row = row.copy()
-            new_row["Price"] = price_gbp
-            new_row["Currency"] = "GBP"
+    # Check that the length of the output df is the same as the input df
+    if len(final_df) != len(df):
+        logger.error("The length of the output DataFrame does not match the input DataFrame.")
 
-            # Append the converted row to the list
-            converted_rows.append(new_row)
+    # Select the required columns for the final dataframe
+    final_columns = [
+        'Ticker', 'Date', 'QuoteType', 'original_price', 'original_currency',
+        'FX_ticker', 'Exchange_rate', 'new_price', 'new_currency', 'outcome'
+    ]
+    return final_df[final_columns]
 
-        except Exception as e:
-            # Log the error and skip the row
-            logger.error(
-                f"Error converting price for Ticker '{ticker}' on {date.date().strftime("%m-%m-%Y")}: {e}."
-            )
-            continue  # Skip this row and continue processing
+@log_function
+def process_converted_prices(
+    converted_df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    try:
+        # Output CSV DataFrame
+        output_csv = converted_df.copy()
 
-    # Step 5: Create a dataframe from converted rows
-    if converted_rows:
-        converted_df = pd.DataFrame(converted_rows)
-    else:
-        converted_df = pd.DataFrame(columns=rows_to_convert.columns)
-        logger.warning("No prices were converted!")
-
-    # Step 6: Combine converted rows with rows to keep as-is
-    final_dataframe = pd.concat([converted_df, rows_to_keep], ignore_index=True)
-
-    if final_dataframe.empty:
-        logger.error(
-            "Something went wrong when converting prices.No data returned! Exiting."
+        # Price will be the new price or original if not changed
+        output_csv["Price"] = output_csv.apply(
+            lambda row: (
+                row["new_price"]
+                if pd.notna(row["new_price"])
+                else row["original_price"]
+            ),
+            axis=1,
         )
-        exit(1)
-        return
-    else:
-        logger.info(f"Prices converted with {fail_counter} missing rows.")
 
-    return final_dataframe
+        # Select required columns
+        output_csv = output_csv[["Ticker", "Price", "Date"]]
 
+        # Order by descending date before changing format
+        output_csv = output_csv.sort_values(by="Date", ascending=False)
+
+        # Reformat date into dd/mm/yyyy
+        output_csv["Date"] = pd.to_datetime(output_csv["Date"]).dt.strftime("%d/%m/%Y")
+
+        # Ensure the DataFrame has the same number of rows as the input DataFrame
+        if len(output_csv) != len(converted_df):
+            logger.error(
+                "Output CSV DataFrame row count does not match input DataFrame row count."
+            )
+
+        # Success DataFrame
+        success = converted_df[
+            (converted_df["outcome"] == "success")
+            & (~converted_df["QuoteType"].isin(["INDEX", "CURRENCY"]))
+        ].copy()
+
+        # Failure DataFrame
+        failure = converted_df[
+            (
+                converted_df["outcome"].isin(
+                    ["no price", "no FX rate", "no price/ no FX rate"]
+                )
+            )
+            & (~converted_df["QuoteType"].isin(["INDEX", "CURRENCY"]))
+        ].copy()
+
+        # No change DataFrame
+        no_change = converted_df[
+            (converted_df["outcome"] == "no change")
+            & (~converted_df["QuoteType"].isin(["INDEX", "CURRENCY"]))
+        ].copy()
+
+        # Index and Currency DataFrame
+        index_currency = converted_df[
+            converted_df["QuoteType"].isin(["INDEX", "CURRENCY"])
+        ].copy()
+
+        # Calculate totals before filtering
+        total_rows_input = len(converted_df)
+        total_rows_output_csv = len(output_csv)
+        total_rows_success = len(success)
+        total_rows_failure = len(failure)
+        total_rows_no_change = len(no_change)
+        total_rows_index_currency = len(index_currency)
+
+        total_rows_calculated = (
+            total_rows_success
+            + total_rows_failure
+            + total_rows_no_change
+            + total_rows_index_currency
+        )
+
+        if total_rows_calculated != total_rows_input:
+            logger.error(
+                "Total rows after processing do not match the original total rows."
+            )
+
+        # Proceed to process success DataFrame
+        success["original_price"] = (
+            success["original_price"].astype(str)
+            + " ("
+            + success["original_currency"]
+            + ")"
+        )
+        success["new_price"] = success["new_price"].astype(str) + " (GBP)"
+
+        # Select required columns
+        success = success[
+            [
+                "Ticker",
+                "Date",
+                "QuoteType",
+                "original_price",
+                "original_currency",
+                "FX_ticker",
+                "Exchange_rate",
+                "new_price",
+                "new_currency",
+                "outcome"
+            ]
+        ]
+
+        # Filter to include only the latest date for each ticker
+        if not pd.api.types.is_datetime64_any_dtype(success["Date"]):
+            success["Date"] = pd.to_datetime(success["Date"])
+        idx = success.groupby("Ticker")["Date"].idxmax()
+        success = success.loc[idx]
+
+        # Group by QuoteType then order alphabetically by Ticker
+        success = success.sort_values(by=["QuoteType", "Ticker"])
+
+        # Process failure DataFrame
+        failure = failure[
+            [
+                "Ticker",
+                "Date",
+                "QuoteType",
+                "original_price",
+                "original_currency",
+                "FX_ticker",
+                "Exchange_rate",
+                "outcome",
+            ]
+        ]
+        failure = failure.sort_values(by=["QuoteType", "Ticker"])
+
+        # Process index_currency DataFrame
+        # Ensure 'Date' is in datetime format if not already
+        if not pd.api.types.is_datetime64_any_dtype(index_currency["Date"]):
+            index_currency["Date"] = pd.to_datetime(index_currency["Date"])
+        idx = index_currency.groupby("Ticker")["Date"].idxmax()
+        index_currency = index_currency.loc[idx]
+
+        # Select required columns and rename appropriately
+        index_currency = index_currency[
+            ["Ticker", "Date", "QuoteType", "new_price", "new_currency"]
+        ]
+        index_currency = index_currency.rename(
+            columns={"new_price": "Price", "new_currency": "Currency"}
+        )
+
+        # Order by Ticker
+        index_currency = index_currency.sort_values(by="Ticker")
+
+        # Return the DataFrames directly
+        return output_csv, success, failure, index_currency
+
+    except Exception as e:
+        logger.error(f"An error occurred during processing: {e}")
+        raise
 
 #
 # -----------------------------------------------------------------------------------
@@ -1106,7 +1259,6 @@ def capture_print(*args, **kwargs):
     # Store the clean output without ANSI codes for clipboard
     self.output_buffer.append(self._strip_ansi(output))
 
-
 #
 # -----------------------------------------------------------------------------------
 # Output Generation                                                                 |
@@ -1114,7 +1266,224 @@ def capture_print(*args, **kwargs):
 # Purpose: Save the processed data to a CSV file without headers and log the file path.
 #
 @log_function
-def save_to_csv(df: pd.DataFrame):
+def prepare_tables(converted_df: pd.DataFrame, success_df: pd.DataFrame,
+                   index_currency_df: pd.DataFrame, failure_df: pd.DataFrame):
+    """
+    Prepares and logs summary and three tables:
+    1. Summary of currency conversions and success rate.
+    2. Table 1: Latest Prices.
+    3. Table 2: Index and Currency Prices.
+    4. Table 3: Failed Conversions.
+
+    Parameters:
+    - converted_df: DataFrame containing all converted data.
+    - success_df: DataFrame containing successful conversions.
+    - index_currency_df: DataFrame containing index and currency data.
+    - failure_df: DataFrame containing failed conversions.
+
+    The function uses logger.text() to output the tables.
+    """
+    # --------------------
+    # Summarize Currency Conversions and Success Rate
+    # --------------------
+    # Tickers processed
+    tickers_processed = len(config.tickers)
+
+    # Filter out exchange rate tickers from the original tickers
+    exchange_rate_tickers = set(converted_df['FX_ticker'].dropna().unique())
+    non_fx_tickers = [ticker for ticker in config.tickers if ticker not in exchange_rate_tickers]
+
+    # Tickers with 'success' or 'no change' outcome
+    success_no_change_df = converted_df[
+        converted_df['Ticker'].isin(non_fx_tickers) &
+        (converted_df['outcome'].isin(['success', 'no change']))
+    ]
+    success_rate = (success_no_change_df['Ticker'].nunique() / len(non_fx_tickers)) * 100
+
+    # Currency conversion counts
+    currency_conversions = (
+        success_df.groupby(["original_currency"])["Ticker"].nunique().reset_index()
+    )
+    currency_conversions["Conversion"] = (
+        currency_conversions["original_currency"] + " to GBP"
+    )
+    currency_conversions = currency_conversions[["Conversion", "Ticker"]]
+
+    # Prepare the summary string
+    summary_lines = [
+        f"\n\t Tickers Processed: {tickers_processed}",
+    ]
+    for _, row in currency_conversions.iterrows():
+        summary_lines.append(f"\t Tickers changed from {row['Conversion']}: {int(row['Ticker'])}")
+
+    summary_lines.append(f"\t Success Rate: {success_rate:.1f}%")
+
+    summary_str = '\n'.join(summary_lines)
+
+    # Log the summary
+    logger.text(summary_str)
+
+    # --------------------
+    # Table 1: Latest Prices
+    # --------------------
+    # Include all types except 'INDEX' and 'CURRENCY'
+    latest_prices_df = converted_df[
+        (~converted_df['QuoteType'].isin(['INDEX', 'CURRENCY'])) &
+        (converted_df['outcome'].isin(['success', 'no change']))
+    ].copy()
+
+    # Remove exchange rate tickers and ensure all tickers are from original_tickers
+    latest_prices_df = latest_prices_df[latest_prices_df['Ticker'].isin(non_fx_tickers)]
+
+    # Keep only the latest date per ticker
+    idx = latest_prices_df.groupby('Ticker')['Date'].idxmax()
+    latest_prices_df = latest_prices_df.loc[idx]
+
+    # Include Exchange_rate of 1 for GBP to GBP and 0.01 for GBp to GBP
+    latest_prices_df['Exchange_rate'] = latest_prices_df['Exchange_rate'].fillna(0)
+    latest_prices_df.loc[
+        (latest_prices_df['original_currency'] == 'GBP') & (latest_prices_df['new_currency'] == 'GBP'),
+        'Exchange_rate'
+    ] = 1.0
+
+    latest_prices_df.loc[
+        (latest_prices_df['original_currency'] == 'GBp') & (latest_prices_df['new_currency'] == 'GBP'),
+        'Exchange_rate'
+    ] = 0.01
+
+    # Ensure all cells have data
+    latest_prices_df['Exchange_rate'] = latest_prices_df['Exchange_rate'].replace(0, '-')
+    latest_prices_df['FX_ticker'] = latest_prices_df['FX_ticker'].fillna('-')
+
+    # Prepare the table
+    latest_prices_df['Original Price'] = latest_prices_df['original_price'].astype(str) + ' (' + latest_prices_df['original_currency'] + ')'
+    latest_prices_df['Revised Price'] = latest_prices_df['new_price'].astype(str) + ' (' + latest_prices_df['new_currency'] + ')'
+
+    # Format 'Date' column
+    latest_prices_df['Date'] = pd.to_datetime(latest_prices_df['Date']).dt.strftime('%d/%m/%Y')
+
+    # Add 'Days' (data days) to latest_prices_df
+    data_days_df = converted_df.groupby('Ticker')['Date'].agg(['min', 'max'])
+    data_days_df['Days'] = (data_days_df['max'] - data_days_df['min']).dt.days + 1
+    data_days_df = data_days_df['Days'].reset_index()
+    latest_prices_df = latest_prices_df.merge(data_days_df, on='Ticker', how='left')
+
+    # Columns as per specifications
+    latest_prices_df.rename(columns={
+        'QuoteType': 'Type',
+        'FX_ticker': 'FX Ticker',
+        'Exchange_rate': 'FX Rate',
+    }, inplace=True)
+
+    # Rearrange columns to have Date between Ticker and Type
+    table1 = latest_prices_df[['Ticker', 'Date', 'Type', 'Original Price', 'FX Ticker', 'FX Rate', 'Days', 'Revised Price']].copy()
+
+    # Add serial numbers without a title
+    table1.reset_index(drop=True, inplace=True)
+    table1.index += 1  # Start serial numbers from 1
+    table1.reset_index(inplace=True)
+    
+    # Rename the 'index' column
+    table1 = table1.rename(columns={'index': ''})
+
+    # Group by 'Type' and sort
+    table1 = table1.sort_values(by=['Type', 'Ticker'])
+
+    # Indent the table and heading
+    table1_str = '\n\t Latest Prices:\n' + '\t ' + tabulate(
+        table1, headers='keys', tablefmt='grid', showindex=False
+    ).replace('\n', '\n\t ')
+
+    # Log the table
+    logger.text(table1_str)
+
+    # --------------------
+    # Table 2: Index and Currency Prices
+    # --------------------
+    # Keep only the latest date per ticker
+    idx = index_currency_df.groupby('Ticker')['Date'].idxmax()
+    index_currency_df = index_currency_df.loc[idx]
+
+    # Group by 'Type' and sort
+    index_currency_df.rename(columns={'QuoteType': 'Type'}, inplace=True)
+    index_currency_df = index_currency_df.sort_values(by=['Type', 'Ticker'])
+
+    # Prepare the table
+    index_currency_df['Price (Currency)'] = index_currency_df['Price'].astype(str) + ' (' + index_currency_df['Currency'] + ')'
+    index_currency_df['Date'] = index_currency_df['Date'].dt.strftime('%d/%m/%Y')
+
+    table2 = index_currency_df[['Ticker', 'Date', 'Type', 'Price (Currency)']].copy()
+
+    # Add serial numbers without a title
+    table2.reset_index(drop=True, inplace=True)
+    table2.index += 1
+    table2.reset_index(inplace=True)
+    table2 = table2.rename(columns={'index': ''})
+
+
+    # Indent the table and heading
+    table2_str = '\n\t Index and Currency Prices:\n' + '\t ' + tabulate(
+        table2, headers='keys', tablefmt='grid', showindex=False
+    ).replace('\n', '\n\t ')
+
+    # Log the table
+    logger.text(table2_str)
+
+
+    # --------------------
+    # Table 3: Failed Conversions
+    # --------------------
+    # Include all cases where outcome is not 'success' or 'no change'
+    failure_df = converted_df[
+        (~converted_df['outcome'].isin(['success', 'no change'])) &
+        (~converted_df['QuoteType'].isin(['INDEX', 'CURRENCY']))
+    ].copy()
+
+    if not failure_df.empty:
+        # Ensure that 'original_price', 'FX_ticker', 'Exchange_rate' are filled
+        failure_df['original_price'] = failure_df['original_price'].fillna('-')
+        failure_df['FX_ticker'] = failure_df['FX_ticker'].fillna('-')
+        failure_df['Exchange_rate'] = failure_df['Exchange_rate'].fillna('-')
+
+        # Prepare the table
+        failure_df['Original Price'] = failure_df['original_price'].astype(str) + ' (' + failure_df['original_currency'] + ')'
+
+        # Format 'Date' column
+        failure_df['Date'] = failure_df['Date'].dt.strftime('%d/%m/%Y')
+
+        # Columns as per specifications
+        failure_df.rename(columns={
+            'QuoteType': 'Type',
+            'FX_ticker': 'FX Ticker',
+            'Exchange_rate': 'FX Rate',
+            'outcome': 'Reason'
+        }, inplace=True)
+
+        table3 = failure_df[['Ticker', 'Date', 'Type', 'Original Price', 'FX Ticker', 'FX Rate', 'Reason']]
+
+        # Add serial numbers without a title
+        table3.reset_index(drop=True, inplace=True)
+        table3.index += 1
+        table3.reset_index(inplace=True)
+        table3.rename(columns={'index': ''}, inplace=True)
+
+        # Group by 'Type' and sort
+        table3 = table3.sort_values(by=['Type', 'Ticker'])
+
+        # Indent the table and heading
+        table3_str = '\n\t Failed Conversions:\n' + '\t ' + tabulate(
+            table3, headers='keys', tablefmt='grid', showindex=False
+        ).replace('\n', '\n\t ')
+
+        # Log the table
+        logger.text(table3_str)
+    else:
+        logger.text("\n\t No failures to display.\n")
+
+
+@retry(Exception, tries=3)
+@log_function
+def save_to_csv(df: pd.DataFrame) -> bool:
     """
     Save the DataFrame to a CSV file without headers.
     3 Columns: Ticker, Price in GBP, Date (dd/mm/yyyy).
@@ -1132,14 +1501,15 @@ def save_to_csv(df: pd.DataFrame):
             )
             return False
 
-        # Select and sort the DataFrame
-        df2 = df[required_columns].sort_values(by="Date", ascending=False)
+        # This should have been done already.
+        # # Select and sort the DataFrame
+        # df2 = df[required_columns].sort_values(by="Date", ascending=False)
 
-        # Format 'Date' column as 'dd/mm/yyyy'
-        df2["Date"] = df2["Date"].dt.strftime("%d/%m/%Y")
+        # # Format 'Date' column as 'dd/mm/yyyy'
+        # df2["Date"] = df2["Date"].dt.strftime("%d/%m/%Y")
 
         # Save the DataFrame to CSV without headers
-        df2.to_csv(CSV_path, index=False, header=False)
+        df.to_csv(CSV_path, index=False, header=False)
 
         # Log the save location
         logger.info(f"Data successfully saved to: {short_CSV_path}")
@@ -1151,7 +1521,6 @@ def save_to_csv(df: pd.DataFrame):
             f"An error occurred while saving the dataframe to a file called {CSV_file_name}"
         )
         return False
-
 
 #
 # -----------------------------------------------------------------------------------
@@ -1191,14 +1560,10 @@ def clean_cache():
         logger.error(traceback.format_exc())
         return False
     return True
-
-
 #
-# -----------------------------------------------------------------------------------
-# Seek elevation                                                                    |
-# -----------------------------------------------------------------------------------
-# Quicken 2004 requires elevation to work properly
-#
+# ------------------------------------------------------------------------------------
+# Seek elevation
+# ------------------------------------------------------------------------------------
 def is_elevated():
     """Check if script is running with admin privileges."""
     try:
@@ -1225,17 +1590,15 @@ def run_as_admin():
             None, "runas", sys.executable, __file__, None, 1
         )
         logger.debug("Elevation request cancelled, continuing unelevated...")
+        # exit(0)
         return
-
 
 #
 # -----------------------------------------------------------------------------------
 # Quicken UI                                                                        |
 # -----------------------------------------------------------------------------------
-# Seeks elevation of Quicken XG 2004 to have it import the csv file.
+# Opens and navigates Quicken XG 2004 to import the csv file.
 #
-
-
 def import_data_file():
     """
     Import the data file through the import dialog.
@@ -1338,20 +1701,20 @@ def execute_import_sequence():
     return True
 
 
-def handle_import():
+def quicken_import():
     """
     Main entry point for handling Quicken import.
     """
     try:
-        header("\nImport to Quicken 2004")
+        header("\n\t Import to Quicken 2004")
         if is_elevated():
             logger.info("Confirmed 'is elevated'. Starting Quicken...")
             return execute_import_sequence()
         else:
-            print("Quicken cannot be opened from here.\n\nInstead:\n")
-        print("1. Close this window.")
-        print("2. Click the Quicken 'Update Prices' shortcut.\n")
-        header("END", major=True)
+            logger.text("Quicken cannot be opened from here.\n\n\tInstead:\n")
+            logger.text("1. Close this window.")
+            logger.text("2. Click the Quicken 'Update Prices' shortcut.\n")
+            logger.text(header("END", major=True))
         return True
 
     except Exception as e:
@@ -1369,7 +1732,6 @@ def setup_pyautogui():
     """
     pyautogui.FAILSAFE = True  # Move mouse to corner to abort
     pyautogui.PAUSE = 0.5  # Delay between actions
-
 
 #
 # -----------------------------------------------------------------------------------
@@ -1389,7 +1751,7 @@ def main():
         # Get date range
         start_date, end_date, business_days = get_date_range()
 
-        # Get tickers - returns a set of validated ticker namedtuples for defined stocks and currency FX rates required
+        # Get tickers
         tickers = get_tickers(config)
 
         # Fetch Ticker Dataframe
@@ -1398,20 +1760,28 @@ def main():
         )
 
         # Convert prices to GBP except INDEX and CURRENCY
-        ticker_dataframe = convert_prices(ticker_dataframe)
+        processed_data = convert_prices(ticker_dataframe)
+
+        # Process and create output dataframes
+        output_csv, success_df, failure_df, index_currency_df = (
+            process_converted_prices(processed_data)
+        )
+
+        # Produce tables using processed_data instead of output_csv
+        prepare_tables(processed_data, success_df, index_currency_df, failure_df)
 
         # Save data to CSV
-        save_to_csv(ticker_dataframe)
+        save_to_csv(output_csv)
 
         # Clean up cache
         clean_cache()
 
         #  Open Quicken
         setup_pyautogui()
-        handle_import()
+        quicken_import()
 
         # Pause to allow reading of terminal
-        time.sleep(10)
+        input("\n\t Press Enter to exit...")
 
     except KeyboardInterrupt:
         logger.warning("Script interrupted by user.")
