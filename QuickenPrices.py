@@ -385,7 +385,7 @@ def setup_logging(config: Box) -> logging.Logger:
         "INFO": f"%(levelname)s %(message)s",
         "WARNING": f"%(levelname)s %(message)s",
         "ERROR": f"%(levelname)s %(message)s",
-        "TEXT": f"         %(message)s",  # Aligned plain text for TEXT level
+        "TEXT": f"%(message)s", 
     }
 
     # Define level-specific formats for logfile
@@ -872,11 +872,24 @@ def convert_prices(df):
 
     # Create exchange rate map from rows where QuoteType is 'CURRENCY'
     exchange_rate_df = df[df['QuoteType'] == 'CURRENCY'][['Ticker', 'Date', 'Price']]
-    exchange_rate_df = exchange_rate_df.rename(columns={'Price': 'Exchange_rate'})
+    exchange_rate_df = exchange_rate_df.rename(columns={'Price': 'Exchange Rate'})
     exchange_rate_df.set_index(['Date', 'Ticker'], inplace=True)
 
+    # TEst
+    test_date = pd.to_datetime("2010-08-14")
+    # Check for data existence
+    if df[
+        (df["Date"] == test_date)
+        & (df["Ticker"] == "AMGN")
+    ].empty:
+        print(f"No data found for AMGN on {test_date}")
+    else:
+        filtered_df = exchange_rate_df.loc[(test_date, "AMGN")]
+        print(filtered_df)
+    sys.exit()
+
     # Log exchange tickers in the map
-    unique_FX_names = exchange_rate_df.index.get_level_values('Ticker').unique()
+    unique_FX_names = exchange_rate_df.index.get_level_values("Ticker").unique()
     unique_FX_names_str = ", ".join(unique_FX_names)
     logger.info(
         f"A {len(exchange_rate_df)} item FX rate map created for {unique_FX_names_str}."
@@ -1313,15 +1326,15 @@ def prepare_tables(
     if not latest_prices.empty:
         log_table("Latest Prices", latest_prices, latest_prices_columns)
     else:
-        logger.text("\nThere were no converted prices.")
+        logger.text("\n\tThere were no converted prices.")
     if not index_currency.empty:
         log_table("Index and Currency Prices", index_currency, index_currency_columns)
     else:
-        logger.text("\nThere were no index or currency prices.")
+        logger.text("\n\tThere were no index or currency prices.")
     if not failure.empty:
         log_table("Failed Conversions", failure, failure_columns)
     else:
-        logger.text("\nThere were no failed conversions.")
+        logger.text("\n\tThere were no failed conversions.")
     print("")
 
 @retry(Exception, tries=3)
@@ -1559,13 +1572,14 @@ def quicken_import():
     Main entry point for handling Quicken import.
     """
     try:
+        logger.text("")
         header("Import to Quicken 2004", logger=logger, major=True)
         if is_elevated():
             logger.info("Confirmed 'is elevated'. Starting Quicken...")
             return execute_import_sequence()
         else:
-            logger.warning("Quicken cannot be opened when unelevated.")
-            logger.text("\nInstead:\n")
+            logger.warning("Quicken cannot be opened when unelevated.\n")
+            logger.text("Instead:\n")
             logger.text("1. Close this window.")
             logger.text("2. Click the Quicken 'Update Prices' shortcut.\n")
             header("END", logger=logger,major=True)
@@ -1592,7 +1606,7 @@ def main():
     """
     try:
         
-        # COnditional clear screen at beginning for clean output
+        # Conditional clear screen at beginning for clean output
         if config.clear_startup == True:
             os.system("cls" if os.name == "nt" else "clear")
         
@@ -1653,6 +1667,7 @@ if __name__ == "__main__":
     # Setup logging
     logger = setup_logging(config)
     
+    # Run main sequence
     main()
 
 #
