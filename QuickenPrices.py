@@ -1331,6 +1331,8 @@ def prepare_tables(
             & (converted_df["outcome"].isin(["success", "no change"]))
         ].copy()
 
+        data_days = latest_prices.groupby("Ticker")["Date"].agg(["min", "max"])
+
         idx = latest_prices.groupby("Ticker")["Date"].idxmax()
         latest_prices = latest_prices.loc[idx]
         latest_prices["Exchange_rate"] = latest_prices["Exchange_rate"].fillna(0)
@@ -1345,7 +1347,6 @@ def prepare_tables(
             "Exchange_rate",
         ] = 0.01
 
-        data_days = converted_df.groupby("Ticker")["Date"].agg(["min", "max"])
         latest_prices = latest_prices.merge(
             (data_days["max"] - data_days["min"])
             .dt.days.add(1)
@@ -1386,6 +1387,7 @@ def prepare_tables(
         ]
 
     def prepare_index_currency_prices():
+        data_days = converted_df.groupby("Ticker")["Date"].agg(["min", "max"])
         idx = index_currency_df.groupby("Ticker")["Date"].idxmax()
         index_currency_prices = index_currency_df.loc[idx]
         index_currency_prices["Price"] = (
@@ -1395,11 +1397,19 @@ def prepare_tables(
         index_currency_prices["Date"] = index_currency_prices["Date"].dt.strftime(
             "%d/%m/%Y"
         )
+        index_currency_prices = index_currency_prices.merge(
+            (data_days["max"] - data_days["min"])
+            .dt.days.add(1)
+            .reset_index(name="Days"),
+            on="Ticker",
+            how="left",
+        )
         index_currency_prices.rename(columns={"QuoteType": "Type"}, inplace=True)
         return index_currency_prices.sort_values(by=["Type", "Ticker"]), [
             "Ticker",
             "Date",
             "Type",
+            "Days",
             "Price",
         ]
 
