@@ -26,9 +26,6 @@ import logging  # Additional logging handlers (e.g., RotatingFileHandler)
 import os  # Operating system interfaces
 import sys  # System-specific parameters and functions
 
-# Clear screen at beginning for clean output
-os.system("cls" if os.name == "nt" else "clear")
-
 # Set up interim python root logger, 'logging' only for import errors prior to setting up our custom 'logger'
 logging.basicConfig(
     level=logging.DEBUG,
@@ -286,6 +283,7 @@ def load_configuration(config_file: str = "config.yaml") -> Box:
             "max_bytes": 5_242_880,
             "backup_count": 5,
         },
+        "clear_startup": False,
     }
 
     # Load user configuration
@@ -602,7 +600,7 @@ def get_tickers(config: Dict[str, Any], set_maximum_tickers=5) -> Set[valid_tick
         )
 
     # Validate stock tickers
-    logger.debug(f"Validating stock {pluralise('ticker', len(stock_tickers))}...\n")
+    logger.info(f"Validating stock {pluralise('ticker', len(stock_tickers))}...\n")
     valid_tickers, invalid_tickers = validate_tickers(stock_tickers)
 
     if not valid_tickers:
@@ -629,7 +627,7 @@ def get_tickers(config: Dict[str, Any], set_maximum_tickers=5) -> Set[valid_tick
     )
 
     # Validate FX tickers
-    logger.debug(f"Validating FX {pluralise('ticker', len(fx_tickers))}...\n")
+    logger.info(f"Validating FX {pluralise('ticker', len(fx_tickers))}...\n")
     valid_FX_tickers, invalid_FX_tickers = validate_tickers(fx_tickers)
 
     if not valid_FX_tickers:
@@ -754,7 +752,7 @@ def get_ticker(ticker_symbol: str) -> Optional[yf.Ticker]:
     """
     try:
         ticker = yf.Ticker(ticker_symbol)
-        logger.info(f"Validated {ticker_symbol}.")
+        logger.debug(f"Validated {ticker_symbol}.")
         return ticker
     except Exception as e:
         if "404" in str(e) or "Client" in str(e):
@@ -880,7 +878,7 @@ def convert_prices(df):
     # Log exchange tickers in the map
     unique_FX_names = exchange_rate_df.index.get_level_values('Ticker').unique()
     unique_FX_names_str = ", ".join(unique_FX_names)
-    logger.debug(
+    logger.info(
         f"A {len(exchange_rate_df)} item FX rate map created for {unique_FX_names_str}."
     )
 
@@ -896,6 +894,7 @@ def convert_prices(df):
             "Exchange Rate": np.nan,
             "Price": np.nan,
             "Currency": "",
+            "Conversion": "",
             "Outcome": "",
         }
     )
@@ -905,7 +904,7 @@ def convert_prices(df):
     )
 
     # Populate final_df 'FX Ticker' and 'Exchange Rate' columns
-    error_occurred = False
+    error_occurred = False # a counter to see if this look runs completely ok
     for index, row in final_df.iterrows():
         currency = row['Original Currency']
         date = row['Date']
@@ -917,21 +916,26 @@ def convert_prices(df):
             final_df.loc[index, 'Exchange Rate'] = 1
             final_df.loc[index, "Price"] = old_price
             final_df.loc[index, "Currency"] = currency
+            final_df.loc[index, "Conversion"] = "No change"
             final_df.loc[index, "Outcome"] = "No change"
             continue  # Skip to the next iteration
 
         if currency == 'GBP':
             exchange_rate = 1.0
             FX_ticker = '-'
+            conversion = "No change"
         elif currency == 'GBp':
             exchange_rate = 0.01
             FX_ticker = '-'
+            conversion = "GBp to GBP"
         else:
             # Determine FX_ticker
             if currency == 'USD':
                 FX_ticker = 'GBP=X'
+                conversion = "USD to GBP"
             else:
                 FX_ticker = f"{currency}GBP=X"
+                conversion = f"{currency} to GBP"
 
             # Get exchange rates from exchange_rate_df
             try:
@@ -968,6 +972,7 @@ def convert_prices(df):
         final_df.loc[index, 'Exchange Rate'] = exchange_rate
         final_df.loc[index, 'Price'] = new_price
         final_df.loc[index, 'Currency'] = new_currency
+        final_df.loc[index, "Conversion"] = conversion
         final_df.loc[index, "Outcome"] = outcome
 
     # report on whether anything problematic happened during the for loop or not
@@ -980,9 +985,8 @@ def convert_prices(df):
             "The length of the output DataFrame does not match the input DataFrame."
         )
     else:
-        logger.debug(f"{len(final_df)} records successfully processed from {len(df)} inputs.")
+        logger.info(f"{len(final_df)} records successfully processed from {len(df)} inputs.")
 
-    
     return final_df
 
 
@@ -1009,13 +1013,31 @@ def process_converted_prices(
                 "Output CSV DataFrame row count does not match input DataFrame row count."
             )
         else:
-            logger.debug(f"{len(output_csv)} item 'output_csv' dataframe created successfully.")
+            logger.info(f"{len(output_csv)} item 'output_csv' dataframe created successfully.")
 
-        print(converted_df.dtypes)
         # Round all prices for the remaining df's
         converted_df[["Original Price", "Exchange Rate", "Price"]] = converted_df[
             ["Original Price", "Exchange Rate", "Price"]
-        ].round(3)
+            ].round(3)
+
+        # Combine the price and currency columns
+        converted_df["Original Price"] = (
+            converted_df["Original Price"].astype(str)
+            + " "
+            + converted_df["Original Currency"]
+        )
+        converted_df["Price"] = (
+            converted_df["Price"].astype(str) + " " + converted_df["Currency"]
+        )
+
+        # Calculate how many days of data were collected per ticker (not the diffrence between last date and first date)
+        # Calculate the number of distinct days for each ticker
+        grouped_data = (
+            converted_df.groupby("Ticker")["Date"]
+            .nunique()
+            .reset_index(name="Days of Data")
+        )
+        converted_df = converted_df.merge(grouped_data, on="Ticker", how="left")
 
         # Make Success DataFrame ##########################################################
         success = converted_df[
@@ -1069,10 +1091,6 @@ def process_converted_prices(
                 f"Inputs {total_rows_input} = outputs {total_rows_output_csv} = successes {total_rows_success} + failures {total_rows_failure} + not changed {total_rows_no_change} + Index & FX {total_rows_index_currency}."
             )
 
-        print(f"success {success}")
-        print(f"no_change {no_change}")
-        print(f"index_currency {index_currency}")
-        sys.exit()
         # Return the DataFrames directly
         return output_csv, success, failure, no_change, index_currency
 
@@ -1154,30 +1172,89 @@ def capture_print(*args, **kwargs):
 #
 @log_function
 def prepare_tables(
-    converted_df: pd.DataFrame,
-    success_df: pd.DataFrame,
-    index_currency_df: pd.DataFrame,
-    failure_df: pd.DataFrame,
+    success: pd.DataFrame= pd.DataFrame(),
+    failure: pd.DataFrame =pd.DataFrame(),
+    no_change: pd.DataFrame =pd.DataFrame(),
+    index_currency: pd.DataFrame= pd.DataFrame(),
 ):
     """
-    Prepares and logs summary and three tables:
-    1. Summary of currency conversions and success rate.
-    2. Table 1: Latest Prices.
-    3. Table 2: Index and Currency Prices.
-    4. Table 3: Failed Conversions.
+    Prepares and logs summary and 4 tables:
+    success, failure, no_change, index_currency
+    Summary of currency conversions and success rate.
+    Table 1: Latest Prices.
+    Table 2. No changes
+    Table 3: Index and Currency Prices.
+    Table 4: Failed Conversions.
     """
+    # Conversion success rate
+    success_rate = len(success) / (len(success) + len(failure)) * 100
 
-    # --------------------
-    # Helper Functions
-    # --------------------
-    def log_table(table_title, table_data, columns):
+    # Create latest_prices
+    dfs_to_concat = []
+    if not success.empty:
+        # Get the latest date for each ticker in success
+        success['latest_date'] = success.groupby('Ticker')['Date'].transform('max')
+        # Filter for rows with the latest date for each ticker
+        success = success[success['Date'] == success['latest_date']]
+        dfs_to_concat.append(success)
+    if not no_change.empty:
+        no_change['latest_date'] = no_change.groupby('Ticker')['Date'].transform('max')
+        no_change = no_change[no_change['Date'] == no_change['latest_date']]
+        dfs_to_concat.append(no_change)
+    if dfs_to_concat:
+        latest_prices = pd.concat(dfs_to_concat, ignore_index=True)
+        latest_prices.loc[:, "Date"] = latest_prices["Date"].dt.strftime("%d/%m/%Y")
+        latest_prices.sort_values(by=["Type", "Ticker"], inplace=True)
+        latest_prices_columns = [
+            "Ticker",
+            "Date",
+            "Type",
+            "Original Price",
+            "FX Ticker",
+            "Exchange Rate",
+            "Days of Data",
+            "Price",
+        ]
+    else:
+        latest_prices = pd.DataFrame()
+
+    # Prepare index_currency_prices
+    if not index_currency.empty:
+        index_currency['latest_date'] = index_currency.groupby('Ticker')['Date'].transform('max')
+        index_currency = index_currency[index_currency['Date'] == index_currency['latest_date']]
+        index_currency.loc[:, "Date"] = index_currency["Date"].dt.strftime("%d/%m/%Y")
+        index_currency.sort_values(by=["Type", "Ticker"])
+        index_currency_columns = [
+            "Ticker",
+            "Date",
+            "Type",
+            "Days of Data",
+            "Price",
+        ]
+
+    # Prepare failure
+    if not failure.empty:
+        failure.loc[:, "Date"] = failure["Date"].dt.strftime("%d/%m/%Y")
+        failure.rename(columns={"Outcome": "Failure Reason" }, inplace=True )
+        failure_columns = [
+            "Ticker",
+            "Date",
+            "Type",
+            "Original Price",
+            "FX Ticker",
+            "Exchange Rate",
+            "Failure Reason",
+        ]
+
+    def log_table(table_title, table_data, columns_to_show):
         if table_data.empty:
             logger.text(f"\n\t No {table_title} to display.\n")
         else:
             table_data.reset_index(drop=True, inplace=True)
             table_data.index += 1
             table_data.reset_index(inplace=True)
-            table_data.rename(columns={"index": ""}, inplace=True)
+            table_data=table_data.rename(columns={"index": ""})
+
             table_data_str = (
                 "\n\t "
                 + table_title
@@ -1185,7 +1262,7 @@ def prepare_tables(
                 + "=" * len(table_title)
                 + "\n\t "
                 + tabulate(
-                    table_data[columns],
+                    table_data[columns_to_show],  # Specify columns to show
                     headers="keys",
                     tablefmt="grid",
                     showindex=False,
@@ -1193,169 +1270,37 @@ def prepare_tables(
             )
             logger.text(table_data_str)
 
-    def calculate_summary():
-        # Total tickers from config
-        tickers_processed = len(config.tickers)
+    # Prep summary
 
-        # Currency conversions
-        currency_conversions = success_df.groupby(["original_currency"])["Ticker"].nunique().reset_index()
-        currency_conversions["Conversion"] = currency_conversions["original_currency"] + " to GBP"
-        currency_conversions = currency_conversions[["Conversion", "Ticker"]]
+    # Count tickers for specific conditions
+    unchanged_gbp_tickers = no_change[
+        (no_change["Original Currency"] == "GBP")][
+        "Ticker" ].nunique()
+    unchanged_index_tickers = index_currency[
+        index_currency["Type"] == "INDEX"][
+        "Ticker" ].nunique()
+    unchanged_currency_tickers = index_currency[
+        index_currency["Type"] == "CURRENCY"][
+        "Ticker"].nunique()
 
-        # Count tickers for specific conditions
-        unchanged_gbp_tickers = converted_df[
-            (converted_df['original_currency'] == 'GBP') & (converted_df['new_currency'] == 'GBP')
-        ]['Ticker'].nunique()
+    # Calculate conversion counts (key-value pair eg USD to GBP: 2)
+    conversion_counts = success['Conversion'].value_counts()
 
-        unchanged_index_tickers = converted_df[converted_df['QuoteType'] == 'INDEX']['Ticker'].nunique()
-        unchanged_currency_tickers = converted_df[converted_df['QuoteType'] == 'CURRENCY']['Ticker'].nunique()
-
-        # Conversion success rate
-        non_fx_or_index_tickers = [
-            ticker for ticker in config.tickers if ticker not in set(
-                converted_df[converted_df['QuoteType'].isin(['INDEX', 'CURRENCY'])]['Ticker']
-            )
-        ]
-        success_no_change = converted_df[
-            converted_df["Ticker"].isin(non_fx_or_index_tickers) &
-            (converted_df["outcome"].isin(["Success", "No change"]))
-        ]
-        success_rate = (success_no_change["Ticker"].nunique() / len(non_fx_or_index_tickers)) * 100
-
-        # Prepare the summary
-        summary = [
-            f" Tickers changed from {row['Conversion']}: {int(row['Ticker'])}"
-            for _, row in currency_conversions.iterrows()
-        ]
-        summary.append(f" Unchanged GBP tickers: {unchanged_gbp_tickers}")
-        summary.append(f" Unchanged index tickers: {unchanged_index_tickers}")
-        summary.append(f" Unchanged currency tickers: {unchanged_currency_tickers}")
-        summary.append(f" Total processed: {tickers_processed}")
-        summary.append(f" Conversion success rate: {success_rate:.1f}%")
-
-        return '\n'.join(summary)
-
-    def prepare_latest_prices():
-        latest_prices = converted_df[
-            (~converted_df["QuoteType"].isin(["INDEX", "CURRENCY"]))
-            & (converted_df["outcome"].isin(["Success", "No change"]))
-        ].copy()
-
-        data_days = latest_prices.groupby("Ticker")["Date"].agg(["min", "max"])
-
-        idx = latest_prices.groupby("Ticker")["Date"].idxmax()
-        latest_prices = latest_prices.loc[idx]
-        latest_prices["Exchange_rate"] = latest_prices["Exchange_rate"].fillna(0)
-        latest_prices.loc[
-            (latest_prices["original_currency"] == "GBP")
-            & (latest_prices["new_currency"] == "GBP"),
-            "Exchange_rate",
-        ] = 1.0
-        latest_prices.loc[
-            (latest_prices["original_currency"] == "GBp")
-            & (latest_prices["new_currency"] == "GBP"),
-            "Exchange_rate",
-        ] = 0.01
-
-        latest_prices = latest_prices.merge(
-            (data_days["max"] - data_days["min"])
-            .dt.days.add(1)
-            .reset_index(name="Days"),
-            on="Ticker",
-            how="left",
+    summary = []
+    start_date, end_date, business_days = get_date_range()
+    summary.append(
+        f"{start_date.strftime("%d/%m/%Y")} - {end_date.strftime("%d/%m/%Y")}\n\t {business_days} business days"
+    )
+    for conversion, count in conversion_counts.items():
+        summary.append(
+            f"{pluralise('Ticker', count)} converted from {conversion}: {count}"
         )
-
-        latest_prices["Original Price"] = (
-            latest_prices["original_price"].round(3).astype(str)
-            + " " + latest_prices["original_currency"]
-        )
-        latest_prices["Price"] = (
-            latest_prices["new_price"].round(3).astype(str) + " " + latest_prices["new_currency"]
-        )
-        latest_prices["Date"] = pd.to_datetime(latest_prices["Date"]).dt.strftime(
-            "%d/%m/%Y"
-        )
-
-        latest_prices.rename(
-            columns={
-                "QuoteType": "Type",
-                "FX_ticker": "FX Ticker",
-                "Exchange_rate": "FX Rate",
-            },
-            inplace=True,
-        )
-
-        return latest_prices.sort_values(by=["Type", "Ticker"]), [
-            "Ticker",
-            "Date",
-            "Type",
-            "Original Price",
-            "FX Ticker",
-            "FX Rate",
-            "Days",
-            "Price",
-        ]
-
-    def prepare_index_currency_prices():
-        data_days = converted_df.groupby("Ticker")["Date"].agg(["min", "max"])
-        idx = index_currency_df.groupby("Ticker")["Date"].idxmax()
-        index_currency_prices = index_currency_df.loc[idx]
-        index_currency_prices["Price"] = (
-            index_currency_prices["Price"].round(3).astype(str)
-            + " " + index_currency_prices["Currency"]
-        )
-        index_currency_prices["Date"] = index_currency_prices["Date"].dt.strftime(
-            "%d/%m/%Y"
-        )
-        index_currency_prices = index_currency_prices.merge(
-            (data_days["max"] - data_days["min"])
-            .dt.days.add(1)
-            .reset_index(name="Days"),
-            on="Ticker",
-            how="left",
-        )
-        index_currency_prices.rename(columns={"QuoteType": "Type"}, inplace=True)
-        return index_currency_prices.sort_values(by=["Type", "Ticker"]), [
-            "Ticker",
-            "Date",
-            "Type",
-            "Days",
-            "Price",
-        ]
-
-    def prepare_failed_conversions():
-        failed_conversions = converted_df[
-            (~converted_df["outcome"].isin(["Success", "No change"]))
-            & (~converted_df["QuoteType"].isin(["INDEX", "CURRENCY"]))
-        ]
-        if failed_conversions.empty:
-            return pd.DataFrame(), []
-        failed_conversions["Original Price"] = (
-            failed_conversions["original_price"].round(3).astype(str)
-            + " "
-                     + failed_conversions["original_currency"]
-             )
-        failed_conversions["Date"] = pd.to_datetime(
-            failed_conversions["Date"]
-        ).dt.strftime("%d/%m/%Y")
-        failed_conversions.rename(
-            columns={
-                "QuoteType": "Type",
-                "FX_ticker": "FX Ticker",
-                "Exchange_rate": "FX Rate",
-                "outcome": "Failure Reason",
-            },
-            inplace=True,
-        )
-        return failed_conversions, [
-            "Ticker",
-            "Date",
-            "Type",
-            "Original Price",
-            "FX Ticker",
-            "FX Rate",
-            "Failure Reason",
-        ]
+    summary.append(f"Unchanged GBP tickers: {unchanged_gbp_tickers}")
+    summary.append(f"Index tickers: {unchanged_index_tickers}")
+    summary.append(f"Currency tickers obtained: {unchanged_currency_tickers}")
+    summary.append(f"Total processed: {len(config.tickers)}")
+    summary.append(f"Conversion success rate: {success_rate:.1f}%")
+    summary = "\n\t ".join(summary)
 
     # --------------------
     # Generate Outputs
@@ -1363,23 +1308,21 @@ def prepare_tables(
     print("")
     header("Stock Price Update", logger=logger,major=True)
     start_date, end_date, business_days = get_date_range()
-    logger.text(
-        f"{start_date.strftime("%d/%m/%Y")} - {end_date.strftime("%d/%m/%Y")}\n\t {business_days} business days"
-    )
+    logger.text(summary)
 
-    logger.text("\n\t" + calculate_summary().replace("\n", "\n\t"))
-
-    latest_prices, latest_prices_columns = prepare_latest_prices()
-    log_table("Latest Prices", latest_prices, latest_prices_columns)
-
-    index_currency_prices, index_currency_columns = prepare_index_currency_prices()
-    log_table(
-        "Index and Currency Prices", index_currency_prices, index_currency_columns
-    )
-
-    failed_conversions, failed_columns = prepare_failed_conversions()
-    log_table("failed conversions", failed_conversions, failed_columns)
-
+    if not latest_prices.empty:
+        log_table("Latest Prices", latest_prices, latest_prices_columns)
+    else:
+        logger.text("\nThere were no converted prices.")
+    if not index_currency.empty:
+        log_table("Index and Currency Prices", index_currency, index_currency_columns)
+    else:
+        logger.text("\nThere were no index or currency prices.")
+    if not failure.empty:
+        log_table("Failed Conversions", failure, failure_columns)
+    else:
+        logger.text("\nThere were no failed conversions.")
+    print("")
 
 @retry(Exception, tries=3)
 @log_function
@@ -1490,7 +1433,7 @@ def run_as_admin():
         ctypes.windll.shell32.ShellExecuteW(
             None, "runas", sys.executable, __file__, None, 1
         )
-        logger.info("Elevation request cancelled, continuing unelevated...\n")
+        logger.warning("Elevation request cancelled, continuing unelevated...\n")
         # exit(0)
         return
 
@@ -1621,16 +1564,16 @@ def quicken_import():
             logger.info("Confirmed 'is elevated'. Starting Quicken...")
             return execute_import_sequence()
         else:
-            logger.text("Quicken cannot be opened from here.\n\n")
-            logger.text("Instead:\n")
+            logger.warning("Quicken cannot be opened when unelevated.")
+            logger.text("\nInstead:\n")
             logger.text("1. Close this window.")
             logger.text("2. Click the Quicken 'Update Prices' shortcut.\n")
-            logger.text(header("END", logger=logger,major=True))
-        return True
+            header("END", logger=logger,major=True)
+        return
 
     except Exception as e:
         logger.error(f"Error during Quicken import: {e}")
-        return False
+        return
 
     finally:
         pyautogui.FAILSAFE = True
@@ -1648,6 +1591,11 @@ def main():
     Main function to orchestrate data fetching and processing.
     """
     try:
+        
+        # COnditional clear screen at beginning for clean output
+        if config.clear_startup == True:
+            os.system("cls" if os.name == "nt" else "clear")
+        
         # Get elevation
         run_as_admin()
 
@@ -1666,12 +1614,12 @@ def main():
         processed_data = convert_prices(ticker_dataframe)
 
         # Process and create output dataframes
-        output_csv, success_df, failure_df, index_currency_df = (
+        output_csv, success, failure, no_change, index_currency = (
             process_converted_prices(processed_data)
         )
 
         # Produce tables using processed_data instead of output_csv
-        prepare_tables(processed_data, success_df, index_currency_df, failure_df)
+        prepare_tables(success, failure, no_change, index_currency)
 
         # Save data to CSV
         save_to_csv(output_csv)

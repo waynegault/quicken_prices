@@ -1,7 +1,15 @@
 # QuickenPrices Configuration: config.yaml
 
+# Show startup initiation process
+clear_startup: True
+
+# Logging levels for terminal and logfile: "DEBUG", "INFO", "WARNING", "ERROR", "TEXT"
+logging:
+  levels:
+    file: DEBUG
+    terminal: INFO
+
 # Tickers to track
-  
 tickers:
   "0P00013P6I.L": "HSBC FTSE All-World Index C Acc (GBp)"
   "0P00018XAP.L": "Vanguard FTSE 100 Idx Unit Tr £ Acc (GBp)"
@@ -64,7 +72,3 @@ memory:
   max_memory_percent: 75
   chunk_size: 1000
 
-logging:
-  levels:
-    file: DEBUG
-    terminal: DEBUG
