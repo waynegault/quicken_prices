@@ -872,44 +872,60 @@ def fetch_historical_data(
 @log_function
 def convert_prices(df):
 
-    # Create a copy of the dataframe to avoid modifying the original data
-    final_df = df.copy()
-
-    # Ensure 'Date' is in datetime format
-    final_df['Date'] = pd.to_datetime(final_df['Date'])
-
-    # Initialize new columns
-    final_df['original_price'] = final_df['Price']
-    final_df['original_currency'] = final_df['Currency']
-    final_df['FX_ticker'] = ''
-    final_df['Exchange_rate'] = pd.NA
-    final_df['new_price'] = pd.NA
-    final_df['new_currency'] = pd.NA
-    final_df['outcome'] = ''
-
     # Create exchange rate map from rows where QuoteType is 'CURRENCY'
-    exchange_rate_df = final_df[final_df['QuoteType'] == 'CURRENCY'][['Ticker', 'Date', 'Price']]
+    exchange_rate_df = df[df['QuoteType'] == 'CURRENCY'][['Ticker', 'Date', 'Price']]
     exchange_rate_df = exchange_rate_df.rename(columns={'Price': 'Exchange_rate'})
     exchange_rate_df.set_index(['Date', 'Ticker'], inplace=True)
 
     # Log exchange tickers in the map
-    unique_names = exchange_rate_df.index.get_level_values('Ticker').unique()
-    unique_names_str = ", ".join(unique_names)
-    logger.debug(f"A {len(exchange_rate_df)} item FX rate map created for {unique_names_str}.")
+    unique_FX_names = exchange_rate_df.index.get_level_values('Ticker').unique()
+    unique_FX_names_str = ", ".join(unique_FX_names)
+    logger.debug(
+        f"A {len(exchange_rate_df)} item FX rate map created for {unique_FX_names_str}."
+    )
 
-    # Function to get exchange rate
-    def get_exchange_rate(row):
-        currency = row['original_currency']
+    # Initialize new DF
+    final_df = pd.DataFrame(
+        {
+            "Ticker": df["Ticker"],
+            "Date": df["Date"],
+            "Type": df["QuoteType"],
+            "Original Price": df["Price"].astype(float),
+            "Original Currency": df["Currency"],
+            "FX Ticker": "",
+            "Exchange Rate": np.nan,
+            "Price": np.nan,
+            "Currency": "",
+            "Outcome": "",
+        }
+    )
+
+    logger.debug(
+        f"A {len(final_df)} item 'final_df' dataframe created."
+    )
+
+    # Populate final_df 'FX Ticker' and 'Exchange Rate' columns
+    error_occurred = False
+    for index, row in final_df.iterrows():
+        currency = row['Original Currency']
         date = row['Date']
+        old_price =row['Original Price']
+        outcome=""
+
+        if row['Type'] == 'CURRENCY' or row['Type'] == 'INDEX':
+            final_df.loc[index, 'FX Ticker'] = "-"
+            final_df.loc[index, 'Exchange Rate'] = 1
+            final_df.loc[index, "Price"] = old_price
+            final_df.loc[index, "Currency"] = currency
+            final_df.loc[index, "Outcome"] = "No change"
+            continue  # Skip to the next iteration
 
         if currency == 'GBP':
-            # Exchange rate is 1
             exchange_rate = 1.0
-            FX_ticker = ''
+            FX_ticker = '-'
         elif currency == 'GBp':
-            # Exchange rate is 0.01
             exchange_rate = 0.01
-            FX_ticker = ''
+            FX_ticker = '-'
         else:
             # Determine FX_ticker
             if currency == 'USD':
@@ -917,84 +933,46 @@ def convert_prices(df):
             else:
                 FX_ticker = f"{currency}GBP=X"
 
-            # Try to get exchange rate from exchange_rate_df
+            # Get exchange rates from exchange_rate_df
             try:
                 exchange_rate = exchange_rate_df.loc[(date, FX_ticker), 'Exchange_rate']
-            except KeyError:
-                # Exchange rate not found
-                exchange_rate = pd.NA
-                logger.error(f"Row {row.name}: FX rate not found for {currency} on date {date} for {row['Ticker']}")
-        return exchange_rate, FX_ticker
+                logger.debug(
+                    f"Numeric: {isinstance(exchange_rate, (int, float))} FX rate is {exchange_rate} for {currency} ({FX_ticker}) on date {date.strftime('%d/%m/%Y')} and applied to {row['Ticker']}."
+                )
+            except Exception as e:
+                exchange_rate = "-"
+                outcome = "No FX rate"
+                error_occurred = True
+                logger.error(
+                    f"FX rate not found for {currency} ({FX_ticker}) on date {date.strftime('%d/%m/%Y')}: {e}."
+                )
+        try:
+            if currency =="GBP":
+                new_price = old_price
+                new_currency = "GBP"
+                outcome = "No change"
+            elif outcome != "No FX rate":
+                new_price = old_price * exchange_rate
+                new_currency = "GBP"
+                outcome = "Success"
+        except Exception as e:
+            new_price, new_currency = "?"
+            outcome = outcome + "No price"
+            error_occurred = True
+            logger.error(
+                    f"Price conversion not possible using {currency} ({FX_ticker}) for {row['Ticker']} on date {date.strftime('%d/%m/%Y')}: {e}."
+                )
 
-    # Ensure 'Price' is numeric before calculation
-    final_df['Price'] = pd.to_numeric(final_df['Price'], errors='coerce')
+        # Assign new values to the 'final_df'
+        final_df.loc[index, 'FX Ticker'] = FX_ticker
+        final_df.loc[index, 'Exchange Rate'] = exchange_rate
+        final_df.loc[index, 'Price'] = new_price
+        final_df.loc[index, 'Currency'] = new_currency
+        final_df.loc[index, "Outcome"] = outcome
 
-    try:
-        # Iterate over the dataframe rows
-        for index, row in final_df.iterrows():
-            # Initialize outcome
-            outcome = ''
-
-            # Determine if outcome should be 'no change'
-            if row['QuoteType'] in ['INDEX', 'CURRENCY'] or (row['original_currency'] == 'GBP' and row['QuoteType'] not in ['INDEX', 'CURRENCY']):
-                # Outcome is 'no change', prices remain the same
-                final_df.at[index, 'new_price'] = row['Price']
-                final_df.at[index, 'new_currency'] = row['Currency']
-                outcome = 'no change'
-            else:
-                # For other QuoteTypes, need to convert price
-                exchange_rate, FX_ticker = get_exchange_rate(row)
-                final_df.at[index, 'FX_ticker'] = FX_ticker
-                final_df.at[index, 'Exchange_rate'] = exchange_rate
-
-                # Ensure 'Exchange_rate' is numeric before calculation
-                exchange_rate = pd.to_numeric(exchange_rate, errors='coerce')
-
-                # Check for missing original price and exchange rate
-                price_missing = pd.isna(row['Price'])
-                exchange_rate_missing = pd.isna(exchange_rate)
-
-                if price_missing and exchange_rate_missing:
-                    outcome = 'no price/ no FX rate'
-                    logger.error(f"Row {index}: No price and no FX rate for {row['Ticker']} on {row['Date']}")
-                elif price_missing:
-                    outcome = 'no price'
-                    logger.error(f"Row {index}: No price for {row['Ticker']} on {row['Date']}")
-                elif exchange_rate_missing:
-                    outcome = 'no FX rate'
-                    logger.error(f"Row {index}: No FX rate for {row['Ticker']} on {row['Date']}")
-                else:
-                    # Ensure 'Price' and 'Exchange_rate' are numeric before calculation
-                    if pd.notna(row['Price']) and pd.notna(exchange_rate):
-                        try:
-                            new_price = row['Price'] * exchange_rate
-                            final_df.at[index, 'new_price'] = new_price
-                            final_df.at[index, 'new_currency'] = 'GBP'
-                            outcome = 'success'
-                        except Exception as e:
-                            outcome = 'conversion error'
-                            logger.error(f"Row {index}: Error during price conversion for {row['Ticker']} on {row['Date']} - {e}")
-                    else:
-                        outcome = 'conversion error'
-                        logger.error(f"Row {index}: Non-numeric price or FX rate for {row['Ticker']} on {row['Date']}")
-
-            # Set the outcome
-            final_df.at[index, 'outcome'] = outcome
-
-        # Log a success message after the loop finishes
+    # report on whether anything problematic happened during the for loop or not
+    if not error_occurred:
         logger.info("All currency conversions processed successfully.")
-    except Exception as e:
-        logger.error(f"An unexpected error occured: {e}")
-
-    # Paranoia check to ensure 'Exchange_rate' and 'new_price' are numeric
-    final_df['Exchange_rate'] = pd.to_numeric(final_df['Exchange_rate'], errors='coerce')
-    final_df['new_price'] = pd.to_numeric(final_df['new_price'], errors='coerce')
-
-    # Select the required columns for the final dataframe
-    final_columns = [
-        'Ticker', 'Date', 'QuoteType', 'original_price', 'original_currency',
-        'FX_ticker', 'Exchange_rate', 'new_price', 'new_currency', 'outcome'
-    ]
 
     # Final check that the length of the output df is the same as the input df
     if len(final_df) != len(df):
@@ -1003,25 +981,18 @@ def convert_prices(df):
         )
     else:
         logger.debug(f"{len(final_df)} records successfully processed from {len(df)} inputs.")
-    return final_df[final_columns]
+
+    
+    return final_df
+
 
 @log_function
 def process_converted_prices(
     converted_df: pd.DataFrame,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     try:
-        # Output CSV DataFrame
+        # Make Output CSV DataFrame ######################################################
         output_csv = converted_df.copy()
-
-        # Price will be the new price or original if not changed
-        output_csv["Price"] = output_csv.apply(
-            lambda row: (
-                row["new_price"]
-                if pd.notna(row["new_price"])
-                else row["original_price"]
-            ),
-            axis=1,
-        )
 
         # Select required columns
         output_csv = output_csv[["Ticker", "Price", "Date"]]
@@ -1040,34 +1011,36 @@ def process_converted_prices(
         else:
             logger.debug(f"{len(output_csv)} item 'output_csv' dataframe created successfully.")
 
-        # Success DataFrame
+        print(converted_df.dtypes)
+        # Round all prices for the remaining df's
+        converted_df[["Original Price", "Exchange Rate", "Price"]] = converted_df[
+            ["Original Price", "Exchange Rate", "Price"]
+        ].round(3)
+
+        # Make Success DataFrame ##########################################################
         success = converted_df[
-            (converted_df["outcome"] == "success")
-            & (~converted_df["QuoteType"].isin(["INDEX", "CURRENCY"]))
-        ].copy()
+            converted_df["Outcome"] == "Success"
+            ]
         logger.debug(f"{len(success)} item 'success' dataframe created successfully.")
 
-        # Failure DataFrame
+        # Make Failure DataFrame ##########################################################
         failure = converted_df[
-            (
-                converted_df["outcome"].isin(
-                    ["no price", "no FX rate", "no price/ no FX rate"]
-                )
-            )
-            & (~converted_df["QuoteType"].isin(["INDEX", "CURRENCY"]))
-        ].copy()
+            (converted_df["Outcome"] != "Success")
+            & (converted_df["Outcome"] != "No change")
+        ]
         logger.debug(f"{len(failure)} item 'failure' dataframe created successfully.")
 
-        # No change DataFrame
+        # Make No change DataFrame ########################################################
         no_change = converted_df[
-            (converted_df["outcome"] == "no change")
-            & (~converted_df["QuoteType"].isin(["INDEX", "CURRENCY"]))
-        ].copy()
+            (converted_df["Outcome"] == "No change")
+            & (~converted_df["Type"].isin(["INDEX", "CURRENCY"]))
+        ]
+        logger.debug(f"{len(no_change)} item 'no change' dataframe created successfully.")
 
-        # Index and Currency DataFrame
+        # Make Index and Currency DataFrame ###############################################
         index_currency = converted_df[
-            converted_df["QuoteType"].isin(["INDEX", "CURRENCY"])
-        ].copy()
+            converted_df["Type"].isin(["INDEX", "CURRENCY"])
+        ]
         logger.debug(
             f"{len(index_currency)} item 'index_currency' dataframe created successfully."
         )
@@ -1096,75 +1069,12 @@ def process_converted_prices(
                 f"Inputs {total_rows_input} = outputs {total_rows_output_csv} = successes {total_rows_success} + failures {total_rows_failure} + not changed {total_rows_no_change} + Index & FX {total_rows_index_currency}."
             )
 
-        # Proceed to process success DataFrame
-        success["original_price"] = (
-            success["original_price"].astype(str)
-            + " ("
-            + success["original_currency"]
-            + ")"
-        )
-        success["new_price"] = success["new_price"].astype(str) + " (GBP)"
-
-        # Select required columns
-        success = success[
-            [
-                "Ticker",
-                "Date",
-                "QuoteType",
-                "original_price",
-                "original_currency",
-                "FX_ticker",
-                "Exchange_rate",
-                "new_price",
-                "new_currency",
-                "outcome"
-            ]
-        ]
-
-        # Filter to include only the latest date for each ticker
-        if not pd.api.types.is_datetime64_any_dtype(success["Date"]):
-            success["Date"] = pd.to_datetime(success["Date"])
-        idx = success.groupby("Ticker")["Date"].idxmax()
-        success = success.loc[idx]
-
-        # Group by QuoteType then order alphabetically by Ticker
-        success = success.sort_values(by=["QuoteType", "Ticker"])
-
-        # Process failure DataFrame
-        failure = failure[
-            [
-                "Ticker",
-                "Date",
-                "QuoteType",
-                "original_price",
-                "original_currency",
-                "FX_ticker",
-                "Exchange_rate",
-                "outcome",
-            ]
-        ]
-        failure = failure.sort_values(by=["QuoteType", "Ticker"])
-
-        # Process index_currency DataFrame
-        # Ensure 'Date' is in datetime format if not already
-        if not pd.api.types.is_datetime64_any_dtype(index_currency["Date"]):
-            index_currency["Date"] = pd.to_datetime(index_currency["Date"])
-        idx = index_currency.groupby("Ticker")["Date"].idxmax()
-        index_currency = index_currency.loc[idx]
-
-        # Select required columns and rename appropriately
-        index_currency = index_currency[
-            ["Ticker", "Date", "QuoteType", "new_price", "new_currency"]
-        ]
-        index_currency = index_currency.rename(
-            columns={"new_price": "Price", "new_currency": "Currency"}
-        )
-
-        # Order by Ticker
-        index_currency = index_currency.sort_values(by="Ticker")
-
+        print(f"success {success}")
+        print(f"no_change {no_change}")
+        print(f"index_currency {index_currency}")
+        sys.exit()
         # Return the DataFrames directly
-        return output_csv, success, failure, index_currency
+        return output_csv, success, failure, no_change, index_currency
 
     except Exception as e:
         logger.error(f"An error occurred during processing: {e}")
@@ -1308,7 +1218,7 @@ def prepare_tables(
         ]
         success_no_change = converted_df[
             converted_df["Ticker"].isin(non_fx_or_index_tickers) &
-            (converted_df["outcome"].isin(["success", "no change"]))
+            (converted_df["outcome"].isin(["Success", "No change"]))
         ]
         success_rate = (success_no_change["Ticker"].nunique() / len(non_fx_or_index_tickers)) * 100
 
@@ -1328,7 +1238,7 @@ def prepare_tables(
     def prepare_latest_prices():
         latest_prices = converted_df[
             (~converted_df["QuoteType"].isin(["INDEX", "CURRENCY"]))
-            & (converted_df["outcome"].isin(["success", "no change"]))
+            & (converted_df["outcome"].isin(["Success", "No change"]))
         ].copy()
 
         data_days = latest_prices.groupby("Ticker")["Date"].agg(["min", "max"])
@@ -1415,7 +1325,7 @@ def prepare_tables(
 
     def prepare_failed_conversions():
         failed_conversions = converted_df[
-            (~converted_df["outcome"].isin(["success", "no change"]))
+            (~converted_df["outcome"].isin(["Success", "No change"]))
             & (~converted_df["QuoteType"].isin(["INDEX", "CURRENCY"]))
         ]
         if failed_conversions.empty:
@@ -1552,8 +1462,9 @@ def clean_cache():
     return True
 #
 # ------------------------------------------------------------------------------------
-# Seek elevation
+# Seek elevation                                                                    |
 # ------------------------------------------------------------------------------------
+#
 def is_elevated():
     """Check if script is running with admin privileges."""
     try:

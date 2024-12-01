@@ -35,7 +35,7 @@ paths:
 
 # Data period to collect in years (0.08 years ≈ 1 month,0.08 * 365 ≈ 29.2 days)
 collection:
-  period_years: 15
+  period_years: 0.1
   max_retries: 3
   retry_delay: 2
 
