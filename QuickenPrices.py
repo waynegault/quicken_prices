@@ -503,7 +503,7 @@ def get_date_range() -> Tuple[datetime, datetime, int]:
     period_days = period_year * 365
     # end_date = date.today()
     # start_date = end_date - timedelta(days=int(period_days))
-    start_date = "2010-08-10"
+    start_date = "2010-08-09"
     end_date = "2010-08-17"
     # Convert dates to datetime objects
     end_date = end_dt = pd.to_datetime(end_date)
@@ -515,68 +515,7 @@ def get_date_range() -> Tuple[datetime, datetime, int]:
     business_days = np.busday_count(start_date_np, end_date_np)
     return start_date, end_date, business_days
 
-
-def normalise_dates(df: pd.DataFrame, date_column: str = "Date") -> pd.DataFrame:
-    """
-    Normalizes all date values in the specified column of the DataFrame to UTC and returns
-    them in 'yyyy-mm-dd' format. Invalid dates are handled gracefully and returned as a separate DataFrame.
-
-    Parameters:
-    - df: pandas DataFrame containing the date column.
-    - date_column: The name of the date column. Defaults to 'Date'.
-
-    Returns:
-    - normalized_df: DataFrame with normalized dates in 'yyyy-mm-dd' format.
-    """
-
-    normalized_dates = []
-    invalid_rows = []
-
-    for index, row in df.iterrows():
-        date_value = row[date_column]
-
-        try:
-            # Parse date, coercing invalid formats to NaT
-            parsed_date = pd.to_datetime(date_value, errors="coerce")
-
-            if pd.isna(parsed_date):
-                # If parsing fails, log the invalid date
-                invalid_rows.append(row)
-                normalized_dates.append(None)
-            else:
-                # If timezone-naive, assume it's in UTC and localize it
-                if parsed_date.tzinfo is None or parsed_date.tz is None:
-                    localized_date = parsed_date.tz_localize(
-                        "UTC", ambiguous="NaT", nonexistent="NaT"
-                    )
-                else:
-                    # If timezone-aware, convert it to UTC
-                    localized_date = parsed_date.tz_convert("UTC")
-
-                # Append the date in 'yyyy-mm-dd' format
-                normalized_dates.append(localized_date.strftime("%Y-%m-%d"))
-
-        except Exception as e:
-            # If any unexpected error occurs, log the invalid date
-            invalid_rows.append(row)
-            normalized_dates.append(None)
-
-    # Add the normalized dates to the DataFrame
-    df[date_column] = normalized_dates
-
-    # Convert the 'Date' column explicitly to datetime (in case some values are still objects)
-    df[date_column] = pd.to_datetime(
-        df[date_column], errors="coerce", format="%Y-%m-%d"
-    )
-
-    # Create a DataFrame of invalid rows
-    invalid_dates_df = pd.DataFrame(invalid_rows, columns=df.columns)
-
-    # Print rows that were not successfully transformed
-    if not invalid_dates_df.empty:
-        logger.debug(f"Invalid dates found at: {invalid_dates_df}")
-    return df
-
+import pandas as pd
 
 def pluralise(title: str, quantity: int) -> str:
     if quantity == 1:
@@ -592,7 +531,6 @@ def pluralise(title: str, quantity: int) -> str:
 # as well as required FX rate tickers. Fetch historical price data for each ticker,
 # utilizing caching to minimize redundant API calls and implement rate limiting to
 # adhere to API usage policies.
-
 
 # Get and Validate Tickers
 #
@@ -821,12 +759,6 @@ def fetch_ticker_history(
         )  # Already validated so can go straight to yf function rather than our validate_tickers function.
         logger.debug(f"Fetching data for {ticker_symbol} from Yahoo Finance.")
 
-        print("getting ticker again. line 791")
-        print(f"start: {start_date}")
-        print(f"End: {end_date}")
-        print(ticker_symbol)
-        print(ticker)
-
         time.sleep(0.2)  # Rate limiting
         df = ticker.history(
             start=start_date,
@@ -843,16 +775,18 @@ def fetch_ticker_history(
         # Drop superfluous columns
         df = df.reset_index()  # make the index a regular column named "Date"
         tidy_df = df[["Date", "Price"]].copy()
-        tidy_df.loc[:, "Ticker"] = ticker_symbol
+        tidy_df.loc[:, "Ticker"] = ticker_symbol     
 
-        with open(cache_file, "wb") as f:  # With automatically closes file
-            pickle.dump(df, f)
-            logger.debug(f"Save cache to {format_path(cache_file)}.")
+        logger.warning("Remember to turn caching back on!")
+        # with open(cache_file, "wb") as f:  # With automatically closes file
+        #     pickle.dump(tidy_df, f)
+        #     logger.debug(f"Save cache to {format_path(cache_file)}.")
 
     logger.debug(
         f"Obtained {tidy_df.shape[0]} {pluralise("day", tidy_df.shape[0])} of data for {ticker_symbol}."
     )
     return tidy_df  # returns a pandas df
+
 
 @retry(Exception, tries=3)
 @log_function
@@ -866,7 +800,8 @@ def fetch_historical_data(
     Fetches historical data for a list of validated tickers and compiles it into a DataFrame.
 
     Args:
-        tickers: A list of tuples containing valid ticker details.
+        tickers: A list of tuples containing valid ticker details:
+            (ticker, name, earliest_date, time_zone, quote_type, currency).
         start_date: The start date for the historical data range.
         end_date: The end date for the historical data range.
         business_days: Number of business days in the date range.
@@ -874,186 +809,177 @@ def fetch_historical_data(
     Returns:
         A pandas DataFrame containing the fetched historical data.
     """
-
     records = []
-    for ticker_symbol, quote_type, currency in tickers:
+
+    for ticker, name, earliest_date, time_zone, quote_type, currency in tickers:
+        # Adjusted start date is always the later of earliest_date and start_date unless one is None.
+        adjusted_start_date = max(start_date, earliest_date or start_date)
+
+        # Check if end_date is before earliest_date, if so skip the ticker
+        if earliest_date and end_date < earliest_date:
+            logger.warning(
+                f"Skipping {ticker}: Period requested, ending {end_date.strftime('%d/%m/%Y')}, is before {ticker} existed (from {earliest_date.strftime('%d/%m/%Y')})"
+            )
+            continue
+
+        if adjusted_start_date > start_date:
+            logger.warning(
+                f"Earliest available data for {ticker} is from {adjusted_start_date.strftime('%d-%m-%Y')}."
+            )
         try:
-            # Get pandas df of historical data
-            df = fetch_ticker_history(ticker_symbol, start_date, end_date)
+            # Fetch historical data
+            df = fetch_ticker_history(ticker, adjusted_start_date, end_date)
             if df.empty:
+                logger.info(f"No data for {ticker}. Skipping.")
                 continue
-            df["Ticker"] = ticker_symbol
+
+            # Add metadata columns to the DataFrame
+            df["Ticker"] = ticker
+            df["Name"] = name
+            df["TimeZone"] = time_zone
             df["QuoteType"] = quote_type
             df["Currency"] = currency
+
+            # Append to records
             records.append(df)
         except Exception as e:
-            logger.warning(f"Failed to fetch data for ticker {ticker_symbol}: {e}")
+            logger.warning(f"Failed to fetch data for {ticker}: {e}")
 
-    if records:
-        # combine multiple DataFrames into a single DataFrame.
-        combined_df = pd.concat(records, ignore_index=True)
-        # Normalise dates
-        combined_df = normalise_dates(combined_df, date_column="Date")
-
-        # Reorder columns
-        combined_df = combined_df[["Ticker", "Price", "Date", "QuoteType", "Currency"]]
-
-        logger.info(
-            f"The {business_days} business days from {start_date.strftime("%d/%m/%Y")} - {end_date.strftime("%d/%m/%Y")} returned {combined_df.shape[0]} records."
-        )
-        return combined_df
-    else:
+    if not records:
         logger.error(
-            f"Did not obtain data for the {business_days} business days between {start_date.strftime("%d/%m/%Y")} and {end_date.strftime("%d/%m/%Y")}!"
+            f"No data fetched for the {business_days} business days between "
+            f"{start_date.strftime('%d/%m/%Y')} and {end_date.strftime('%d/%m/%Y')}!"
         )
-    if combined_df.empty:  # checks for empty Pandas DataFrame
-        logger.error(
-            "No data fetched from fetch_historical_data for any tickers. Exiting."
-        )
-        exit(1)
-    else:
-        return pd.DataFrame()  # return an empty DataFrame
+        return pd.DataFrame()  # Return an empty DataFrame when no data is fetched.
 
+    # Combine all individual DataFrames into a single DataFrame
+    combined_df = pd.concat(records, ignore_index=True)
 
-#
-# -----------------------------------------------------------------------------------
-# Data Processing                                                                   |
-# -----------------------------------------------------------------------------------
-# Purpose: Process the raw fetched data by performing currency conversions and organizing the data for output.
-#
-@log_function
-def convert_prices(df):
+    # Reorder columns to ensure consistency
+    combined_df = combined_df[
+        ["Ticker", "Name", "Price", "Date", "TimeZone", "QuoteType", "Currency"]
+    ]
 
-    # Create exchange rate map from rows where QuoteType is 'CURRENCY'
-    exchange_rate_df = df[df['QuoteType'] == 'CURRENCY'][['Ticker', 'Date', 'Price']]
-    exchange_rate_df = exchange_rate_df.rename(columns={'Price': 'Exchange Rate'})
-    exchange_rate_df.set_index(['Date', 'Ticker'], inplace=True)
-
-    print("2010-08-13 was a friday - why no gbp=x data?")
-    # TEst
-    test_date = pd.to_datetime("2010-08-13").strftime("%Y-%m-%d")
-    # Check for data existence
-    try:
-        filtered_df = exchange_rate_df.loc[(test_date, "GBP=X")]
-        print(filtered_df)
-    except KeyError:
-        print(f"No data found for GBP=X on {test_date}")
-    sys.exit()
-
-    # Log exchange tickers in the map
-    unique_FX_names = exchange_rate_df.index.get_level_values("Ticker").unique()
-    unique_FX_names_str = ", ".join(unique_FX_names)
     logger.info(
-        f"A {len(exchange_rate_df)} item FX rate map created for {unique_FX_names_str}."
+        f"The {business_days} business days from {start_date.strftime('%d/%m/%Y')} "
+        f"to {end_date.strftime('%d/%m/%Y')} returned {combined_df.shape[0]} records."
     )
+    return combined_df
 
-    # Initialize new DF
-    final_df = pd.DataFrame(
-        {
-            "Ticker": df["Ticker"],
-            "Date": df["Date"],
-            "Type": df["QuoteType"],
-            "Original Price": df["Price"].astype(float),
-            "Original Currency": df["Currency"],
-            "FX Ticker": "",
-            "Exchange Rate": np.nan,
-            "Price": np.nan,
-            "Currency": "",
-            "Conversion": "",
-            "Outcome": "",
-        }
+    #
+    # -----------------------------------------------------------------------------------
+    # Data Processing                                                                   |
+    # -----------------------------------------------------------------------------------
+    # Purpose: Process the raw fetched data by performing currency conversions and organizing the data for output.
+    #
+
+def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert non-GBP currency to GBP except for QuoteType CURRENCY and INDEX.
+
+    Args:
+        df: A pandas DataFrame with the following columns:
+            - Ticker (str): The stock ticker symbol.
+            - Name (str): The name of the stock or company.
+            - Price (float): The stock price.
+            - Date (datetime): The date of the price data.
+            - TimeZone (str): The timezone of the data source.
+            - QuoteType (str): The type of quote (e.g., "Equity").
+            - Currency (str): The currency of the stock price.
+
+    Returns:
+        A pandas DataFrame with columns Ticker, Name, Price, Date, TimeZone, QuoteType, Currency, FX Ticker, Exchange Rate, Converted Price, Final Currency, Conversion, Outcome
+    """
+    # Convert to datetime and handle timezone-aware dates
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+
+    # Convert timezone-aware timestamps to UTC
+    df["Date"] = df["Date"].dt.tz_convert("UTC")
+
+    # Optionally strip the time component if only dates are needed
+    df["Date"] = df["Date"].dt.normalize()
+
+    # Strip the time component and keep only the date
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
+
+    # Create exchange rate DataFrame
+    exchange_rate_df = (
+        df[df["QuoteType"] == "CURRENCY"]
+        .rename(columns={"Price": "Exchange Rate"})
+        .set_index(["Date", "Ticker"])
     )
+    
+    logger.info(f"Created exchange rate map with {len(exchange_rate_df)} items.")
+    logger.debug(f"Exchange rate map:\n{exchange_rate_df}")
 
-    logger.debug(
-        f"A {len(final_df)} item 'final_df' dataframe created."
-    )
+    # Prepare the output DataFrame
+    final_df = df.copy()
+    final_df["FX Ticker"] = ""
+    final_df["Exchange Rate"] = np.nan
+    final_df["Converted Price"] = np.nan
+    final_df["Final Currency"] = "GBP"
+    final_df["Conversion"] = ""
+    final_df["Outcome"] = ""
 
-    # Populate final_df 'FX Ticker' and 'Exchange Rate' columns
-    error_occurred = False # a counter to see if this look runs completely ok
+    # Process each row
     for index, row in final_df.iterrows():
-        currency = row['Original Currency']
-        date = row['Date']
-        old_price =row['Original Price']
-        outcome=""
+        currency = row["Currency"]
+        date = row["Date"]
+        price = row["Price"]
+        quote_type = row["QuoteType"]
 
-        if row['Type'] == 'CURRENCY' or row['Type'] == 'INDEX':
-            final_df.loc[index, 'FX Ticker'] = "-"
-            final_df.loc[index, 'Exchange Rate'] = 1
-            final_df.loc[index, "Price"] = old_price
-            final_df.loc[index, "Currency"] = currency
-            final_df.loc[index, "Conversion"] = "No change"
-            final_df.loc[index, "Outcome"] = "No change"
-            continue  # Skip to the next iteration
-
-        if currency == 'GBP':
-            exchange_rate = 1.0
-            FX_ticker = '-'
-            conversion = "No change"
-        elif currency == 'GBp':
-            exchange_rate = 0.01
-            FX_ticker = '-'
-            conversion = "GBp to GBP"
-        else:
-            # Determine FX_ticker
-            if currency == 'USD':
-                FX_ticker = 'GBP=X'
-                conversion = "USD to GBP"
-            else:
-                FX_ticker = f"{currency}GBP=X"
-                conversion = f"{currency} to GBP"
-
-            # Get exchange rates from exchange_rate_df
-            try:
-                exchange_rate = exchange_rate_df.loc[(date, FX_ticker), 'Exchange_rate']
-                logger.debug(
-                    f"Numeric: {isinstance(exchange_rate, (int, float))} FX rate is {exchange_rate} for {currency} ({FX_ticker}) on date {date.strftime('%d/%m/%Y')} and applied to {row['Ticker']}."
-                )
-            except Exception as e:
-                exchange_rate = "-"
-                outcome = "No FX rate"
-                error_occurred = True
-                logger.error(
-                    f"FX rate not found for {currency} ({FX_ticker}) on date {date.strftime('%d/%m/%Y')}: {e}."
-                )
         try:
-            if currency =="GBP":
-                new_price = old_price
-                new_currency = "GBP"
-                outcome = "No change"
-            elif outcome != "No FX rate":
-                new_price = old_price * exchange_rate
-                new_currency = "GBP"
-                outcome = "Success"
-        except Exception as e:
-            new_price, new_currency = "?"
-            outcome = outcome + "No price"
-            error_occurred = True
+            # Skip conversion for specific quote types
+            if quote_type in ["CURRENCY", "INDEX"]:
+                final_df.at[index, "FX Ticker"] = "-"
+                final_df.at[index, "Exchange Rate"] = 1
+                final_df.at[index, "Converted Price"] = price
+                final_df.at[index, "Conversion"] = "No change"
+                final_df.at[index, "Outcome"] = "No change"
+                continue
+
+            # Handle GBP and GBp cases
+            if currency == "GBP":
+                fx_ticker = "-"
+                exchange_rate = 1
+                conversion = "No change"
+            elif currency == "GBp":
+                fx_ticker = "-"
+                exchange_rate = 0.01
+                conversion = "GBp to GBP"
+            else:
+                # Create FX ticker for non-GBP currencies
+                fx_ticker = f"{currency}GBP=X" if currency != "USD" else "GBP=X"
+                conversion = f"{currency} to GBP"
+                # Retrieve exchange rate
+                exchange_rate = exchange_rate_df.loc[(date, fx_ticker), "Exchange Rate"]
+
+            # Calculate the converted price
+            converted_price = price * exchange_rate
+
+            # Populate the row with updated data
+            final_df.at[index, "FX Ticker"] = fx_ticker
+            final_df.at[index, "Exchange Rate"] = exchange_rate
+            final_df.at[index, "Converted Price"] = converted_price
+            final_df.at[index, "Conversion"] = conversion
+            final_df.at[index, "Outcome"] = "Success"
+
+        except KeyError:
             logger.error(
-                    f"Price conversion not possible using {currency} ({FX_ticker}) for {row['Ticker']} on date {date.strftime('%d/%m/%Y')}: {e}."
-                )
+                f"FX rate not found for {currency} ({fx_ticker}) on date {date}."
+            )
+            final_df.at[index, "Outcome"] = "No FX rate"
+        except Exception as e:
+            logger.error(f"Error processing row {index}: {e}")
+            final_df.at[index, "Outcome"] = "Error"
 
-        # Assign new values to the 'final_df'
-        final_df.loc[index, 'FX Ticker'] = FX_ticker
-        final_df.loc[index, 'Exchange Rate'] = exchange_rate
-        final_df.loc[index, 'Price'] = new_price
-        final_df.loc[index, 'Currency'] = new_currency
-        final_df.loc[index, "Conversion"] = conversion
-        final_df.loc[index, "Outcome"] = outcome
-
-    # report on whether anything problematic happened during the for loop or not
-    if not error_occurred:
-        logger.info("All currency conversions processed successfully.")
-
-    # Final check that the length of the output df is the same as the input df
-    if len(final_df) != len(df):
-        logger.error(
-            "The length of the output DataFrame does not match the input DataFrame."
-        )
+    # Log overall success or failure
+    if final_df["Outcome"].eq("Error").any():
+        logger.warning("Some rows encountered errors during processing.")
     else:
-        logger.info(f"{len(final_df)} records successfully processed from {len(df)} inputs.")
+        logger.info("All rows processed successfully.")
 
     return final_df
-
 
 @log_function
 def process_converted_prices(
@@ -1670,24 +1596,20 @@ def main():
 
         # Get 'raw' tickers from YAML file and FX tickers if required, validate and acquire metadata.
         ticker_list= config.tickers    
-        valid_tickers, invalid_tickers = get_tickers(ticker_list, set_maximum_tickers=5 )  
+        valid_tickers, invalid_tickers = get_tickers(ticker_list, set_maximum_tickers=5 )
+        # valid_tickers includes: ticker, name, earliest_date, time_zone, quote_type, currency
+
         # remember and deal with invalid_tickers (a list of invalid tickers) in produce tables
 
-        print(valid_tickers)
-        print(invalid_tickers)
-        sys.exit()
-
-        # Fetch Ticker Dataframe
-        # takes:     tickers: List[Tuple[str, str, Optional[datetime], str, str, str]],
-        # start_date: datetime,
-        # end_date: datetime,
-        # business_days: int,
-        ticker_dataframe = fetch_historical_data(
-            valid_tickers, start_date, end_date, business_days
-        )
+        # Fetch historical price and FX data
+        price_data = fetch_historical_data(valid_tickers, start_date, end_date, business_days)
+        # price_data includes ticker, name, price, date, time_zone, quote_type, currency
 
         # Convert prices to GBP except INDEX and CURRENCY
-        processed_data = convert_prices(ticker_dataframe)
+        processed_data = convert_prices(price_data)
+
+        print(processed_data)
+        sys.exit()
 
         # Process and create output dataframes
         output_csv, success, failure, no_change, index_currency = (
