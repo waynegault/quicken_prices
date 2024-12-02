@@ -492,18 +492,22 @@ def copy_to_clipboard(text: str):
     """
     pyperclip.copy(text)
 
-
 def get_date_range():
     """Get period from config dictionary and calculate date range."""
     start_date = None
     end_date = None
     period_year = config.collection.period_years
     period_days = period_year * 365
-    end_date = date.today()
-    start_date = end_date - timedelta(days=int(period_days))
-    # Convert dates to numpy datetime64[D] format
-    start_date_np = np.datetime64(start_date)
-    end_date_np = np.datetime64(end_date)
+    # end_date = date.today()
+    # start_date = end_date - timedelta(days=int(period_days))
+    end_date = "2010-08-17"
+    start_date = "2010-08-10"
+    # Convert dates to datetime objects
+    end_date = end_dt = pd.to_datetime(end_date)
+    start_date = pd.to_datetime(start_date)
+    # Convert dates to numpy datetime64[D] format (day level resolution)
+    start_date_np = np.datetime64(start_date, "D")
+    end_date_np = np.datetime64(end_date, "D")
     # Calculate business days using np.busday_count
     business_days = np.busday_count(start_date_np, end_date_np)
     return start_date, end_date, business_days
@@ -731,6 +735,7 @@ def validate_tickers(
 
     return valid_tickers, invalid_tickers
 
+
 #
 # -----------------------------------------------------------------------------------
 # Data Fetching and Caching                                                         |
@@ -740,26 +745,52 @@ def validate_tickers(
 #
 @retry(Exception, tries=3)
 @log_function
-def get_ticker(ticker_symbol: str) -> Optional[yf.Ticker]:
+def get_ticker(ticker_symbol: str) -> Optional[dict]:
     """
-    Fetches ticker data from Yahoo Finance
+    Fetches ticker metadata to retrieve the earliest available date for historical data
+    and the time zone short name.
 
     Args:
         ticker_symbol: The ticker symbol to fetch data for.
 
     Returns:
-        A yfinance Ticker object if successful, None otherwise.
+        A dictionary with the Ticker object, earliest available date, and time zone short name,
+        or None if the ticker is invalid.
     """
     try:
         ticker = yf.Ticker(ticker_symbol)
-        logger.debug(f"Validated {ticker_symbol}.")
-        return ticker
-    except Exception as e:
-        if "404" in str(e) or "Client" in str(e):
-            logger.error(f"Invalid ticker symbol: {ticker_symbol}")
+        ticker_info = ticker.info
+
+        # Fetch the earliest available date
+        earliest_date = ticker_info.get("firstTradeDateEpoch")
+        if earliest_date:
+            earliest_date = pd.to_datetime(earliest_date, unit="s")
         else:
-            logger.error(f"Error fetching ticker data for {ticker_symbol}: {e}")
+            logger.warning(
+                f"Unable to determine the earliest available date for {ticker_symbol}."
+            )
+            earliest_date = None
+
+        # Fetch the time zone short name
+        time_zone = ticker_info.get("timeZoneShortName")
+        if not time_zone:
+            logger.warning(f"Time zone information is missing for {ticker_symbol}.")
+            time_zone = "Unknown"
+
+        logger.debug(
+            f"Ticker {ticker_symbol} validated. "
+            f"Earliest available data: {earliest_date}, Time zone: {time_zone}."
+        )
+
+        return {
+            "ticker": ticker,
+            "earliest_date": earliest_date,
+            "time_zone": time_zone,
+        }
+    except Exception as e:
+        logger.error(f"Error fetching ticker metadata for {ticker_symbol}: {e}")
         return None
+
 
 @retry(Exception, tries=3)
 @log_function
@@ -770,6 +801,7 @@ def fetch_ticker_history(
     Fetches price/ rate data for a single ticker.
     First checks if the data is cached; if not,
     fetches the data using the appropriate ticker object and caches it.
+    Handles missing or delisted tickers and resolves warnings.
     """
     cache_dir = os.path.join(base_directory, config.paths.cache)
     if not os.path.exists(cache_dir):
@@ -783,26 +815,34 @@ def fetch_ticker_history(
             df = pickle.load(f)
         logger.debug(f"Fetching {format_path(cache_file)}.")
     else:
-        ticker = get_ticker(ticker_symbol)
+        ticker = yf.Ticker(ticker_symbol) # Already validated so can go straight to yf function rather than our get_tickers function.
+        logger.debug(f"Fetching data for {ticker_symbol} from Yahoo Finance.")
+
+        print("getting ticker again. line 791")
+        print(f"start: {start_date}")
+        print(f"End: {end_date}")
+        print(ticker_symbol)
+        print(ticker)
+
         time.sleep(0.2)  # Rate limiting
         df = ticker.history(
-            start=start_date.strftime("%Y-%m-%d"),
-            end=end_date.strftime("%Y-%m-%d"),
+            start=start_date,
+            end=end_date,
             interval="1d",
         ).rename(columns={"Close": "Price"})
+
         if df.empty:
-            logger.warning(f"No data found online for {ticker_symbol}.")
+            logger.warning(f"No data found online for {ticker_symbol}. Check if available during this time period.")
             return pd.DataFrame()
-        else:
-            logger.debug(f"Downloading data for {ticker_symbol}.")
+
+        # Drop superfluous columns
+        df = df.reset_index()  # make the index a regular column named "Date"
+        tidy_df = df[["Date", "Price"]].copy()
+        tidy_df.loc[:, "Ticker"] = ticker_symbol
 
         with open(cache_file, "wb") as f:  # With automatically closes file
             pickle.dump(df, f)
             logger.debug(f"Save cache to {format_path(cache_file)}.")
-
-    # Drop superfluous columns
-    df = df.reset_index()  # make the index a regular column named "Date"
-    tidy_df = df[["Date", "Price"]]
 
     logger.debug(
         f"Obtained {tidy_df.shape[0]} {pluralise("day", tidy_df.shape[0])} of data for {ticker_symbol}."
@@ -875,17 +915,15 @@ def convert_prices(df):
     exchange_rate_df = exchange_rate_df.rename(columns={'Price': 'Exchange Rate'})
     exchange_rate_df.set_index(['Date', 'Ticker'], inplace=True)
 
+    print("2010-08-13 was a friday - why no gbp=x data?")
     # TEst
-    test_date = pd.to_datetime("2010-08-14")
+    test_date = pd.to_datetime("2010-08-13").strftime("%Y-%m-%d")
     # Check for data existence
-    if df[
-        (df["Date"] == test_date)
-        & (df["Ticker"] == "AMGN")
-    ].empty:
-        print(f"No data found for AMGN on {test_date}")
-    else:
-        filtered_df = exchange_rate_df.loc[(test_date, "AMGN")]
+    try:
+        filtered_df = exchange_rate_df.loc[(test_date, "GBP=X")]
         print(filtered_df)
+    except KeyError:
+        print(f"No data found for GBP=X on {test_date}")
     sys.exit()
 
     # Log exchange tickers in the map
