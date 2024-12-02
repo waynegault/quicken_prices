@@ -500,7 +500,7 @@ def get_date_range() -> Tuple[datetime, datetime, int]:
         Tuple containing start_date, end_date, and business_days count.
     """
     period_year = config.collection.period_years
-    period_days = period_year * 365
+    period_days = period_year * 365 + 1
     # end_date = date.today()
     # start_date = end_date - timedelta(days=int(period_days))
     start_date = "2010-08-09"
@@ -866,13 +866,14 @@ def fetch_historical_data(
     )
     return combined_df
 
-    #
-    # -----------------------------------------------------------------------------------
-    # Data Processing                                                                   |
-    # -----------------------------------------------------------------------------------
-    # Purpose: Process the raw fetched data by performing currency conversions and organizing the data for output.
-    #
 
+#
+# -----------------------------------------------------------------------------------
+# Data Processing                                                                   |
+# -----------------------------------------------------------------------------------
+# Purpose: Process the raw fetched data by performing currency conversions and organizing the data for output.
+#
+@log_function
 def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     """
     Convert non-GBP currency to GBP except for QuoteType CURRENCY and INDEX.
@@ -882,7 +883,7 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
             - Ticker (str): The stock ticker symbol.
             - Name (str): The name of the stock or company.
             - Price (float): The stock price.
-            - Date (datetime): The date of the price data.
+            - Date (mixed): The date of the price data (varied formats).
             - TimeZone (str): The timezone of the data source.
             - QuoteType (str): The type of quote (e.g., "Equity").
             - Currency (str): The currency of the stock price.
@@ -890,25 +891,33 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         A pandas DataFrame with columns Ticker, Name, Price, Date, TimeZone, QuoteType, Currency, FX Ticker, Exchange Rate, Converted Price, Final Currency, Conversion, Outcome
     """
-    # Convert to datetime and handle timezone-aware dates
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    # Standardise the Date column to datetime.date
+    def standardise_date(value):
+        try:
+            dt = pd.to_datetime(value, errors="coerce")
+            if pd.isna(dt):
+                return None  # Handle invalid dates
+            return dt.date()  # Convert to date only
+        except Exception as e:
+            logger.warning(f"Error parsing date '{value}': {e}")
+            return None
 
-    # Convert timezone-aware timestamps to UTC
-    df["Date"] = df["Date"].dt.tz_convert("UTC")
+    # Apply the standardisation function to the Date column
+    df["Date"] = df["Date"].apply(standardise_date)
 
-    # Optionally strip the time component if only dates are needed
-    df["Date"] = df["Date"].dt.normalize()
+    # Validate Date column
+    if df["Date"].isna().any():
+        logger.warning("Some rows contain invalid or missing dates.")
+        # Optionally, raise an exception or remove these rows
+        df = df.dropna(subset=["Date"])
 
-    # Strip the time component and keep only the date
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
-
-    # Create exchange rate DataFrame
+    # Create exchange rate DataFrame with valid `Date` index
     exchange_rate_df = (
         df[df["QuoteType"] == "CURRENCY"]
         .rename(columns={"Price": "Exchange Rate"})
         .set_index(["Date", "Ticker"])
     )
-    
+
     logger.info(f"Created exchange rate map with {len(exchange_rate_df)} items.")
     logger.debug(f"Exchange rate map:\n{exchange_rate_df}")
 
@@ -951,7 +960,7 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
                 # Create FX ticker for non-GBP currencies
                 fx_ticker = f"{currency}GBP=X" if currency != "USD" else "GBP=X"
                 conversion = f"{currency} to GBP"
-                # Retrieve exchange rate
+                # Retrieve exchange rate using date objects
                 exchange_rate = exchange_rate_df.loc[(date, fx_ticker), "Exchange Rate"]
 
             # Calculate the converted price
@@ -979,7 +988,9 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     else:
         logger.info("All rows processed successfully.")
 
+    logger.debug("End of function 'convert_prices'.")
     return final_df
+
 
 @log_function
 def process_converted_prices(
