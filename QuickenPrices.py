@@ -37,6 +37,7 @@ logging.info("Beginning script\n=========================")
 # Standard Library Imports
 try:
     import calendar  # Provides calendar-related functions
+    import contextlib  # Used to redirect output streams temporarily
     import ctypes  # Low-level OS interfaces
     import functools  # Higher-order functions and decorators
     import gc  # Garbage collection interface
@@ -47,6 +48,7 @@ try:
         RotatingFileHandler,
     )  # Additional logging handlers (e.g., RotatingFileHandler)
     import pickle  # Object serialization/deserialization
+    import requests  # For making HTTP requests
     import subprocess  # Process creation and management
     import threading  # High-level threading interface
     import time  # Time-related functions
@@ -66,6 +68,7 @@ try:
         Optional,
         Set,
         Tuple,
+        Union,
     )  # Type annotations
     from dataclasses import dataclass  # Easy class creation for storing data
     from enum import Enum  # Define enumerations
@@ -231,9 +234,6 @@ logging.info("All required libraries imported successfully.\n")
 # Definitions required before functions defined
 # Initialise Colorama for cross-platform terminal colours (defined in Global Scope)
 init(autoreset=True)
-# Define named tuples for application (defined in Global Scope)
-valid_ticker = namedtuple("valid_ticker", ["ticker", "quote_type", "currency"])
-ticker_data = namedtuple("ticker_data", ["ticker", "quote_type", "currency", "price", "date"])
 
 # Utility to recursively apply default settings
 def apply_defaults(
@@ -246,7 +246,6 @@ def apply_defaults(
             settings.setdefault(key, value)
     return settings
 
-
 # Load configuration with defaults
 def load_configuration(config_file: str = "config.yaml") -> Box:
     """
@@ -254,11 +253,11 @@ def load_configuration(config_file: str = "config.yaml") -> Box:
     """
     default_settings = {
         "tickers": {
-            "^FTAS": "FTSE All-share (GBP)",
-            "^FTSE": "FTSE 100 (GBP)",
-            "^OEX": "S&P 100 INDEX (USD)",
-            "^GSPC": "S&P 500 INDEX (USD)",
-        },
+            "^FTAS",
+            "^FTSE",
+            "^OEX",
+            "^GSPC",
+            },
         "paths": {
             "base": "C:\\Users\\wayne\\OneDrive\\Documents\\GitHub\\Python\\Projects\\quicken_prices\\",
             "quicken": "C:\\Program Files (x86)\\Quicken\\qw.exe",
@@ -492,20 +491,24 @@ def copy_to_clipboard(text: str):
     """
     pyperclip.copy(text)
 
-def get_date_range():
-    """Get period from config dictionary and calculate date range."""
-    start_date = None
-    end_date = None
+
+def get_date_range() -> Tuple[datetime, datetime, int]:
+    """
+    Calculate the date range and business days for data collection.
+
+    Returns:
+        Tuple containing start_date, end_date, and business_days count.
+    """
     period_year = config.collection.period_years
     period_days = period_year * 365
     # end_date = date.today()
     # start_date = end_date - timedelta(days=int(period_days))
-    end_date = "2010-08-17"
     start_date = "2010-08-10"
+    end_date = "2010-08-17"
     # Convert dates to datetime objects
     end_date = end_dt = pd.to_datetime(end_date)
     start_date = pd.to_datetime(start_date)
-    # Convert dates to numpy datetime64[D] format (day level resolution)
+    # Convert to numpy datetime format for business day calculation
     start_date_np = np.datetime64(start_date, "D")
     end_date_np = np.datetime64(end_date, "D")
     # Calculate business days using np.busday_count
@@ -583,215 +586,213 @@ def pluralise(title: str, quantity: int) -> str:
 
 #
 # -----------------------------------------------------------------------------------
-# Ticker Handling                                                                   |
+# Ticker Validating, Data Fetching and Caching                                      |
 # -----------------------------------------------------------------------------------
-# Manage and validate tickers, ensuring that only valid and correctly formatted tickers are processed as well as any necessary FX rate tickers.
+# Validate tickers, ensuring that only valid and correctly formatted tickers are processed
+# as well as required FX rate tickers. Fetch historical price data for each ticker,
+# utilizing caching to minimize redundant API calls and implement rate limiting to
+# adhere to API usage policies.
+
+
+# Get and Validate Tickers
 #
-@log_function  # Decorator to log entry and exit of functions.
-def get_tickers(config: Dict[str, Any], set_maximum_tickers=5) -> Set[valid_ticker]:
+@retry(Exception, tries=3)
+@log_function
+def validate_ticker(
+    ticker_symbol: str,
+) -> Optional[Dict[str, Union[str, pd.Timestamp]]]:
     """
-    Get the list of tickers from the configuration, including currency pairs.
-    """
-    # Get tickers from config
-    stock_tickers = list(config.tickers.keys())
+    Validates a single ticker and returns a dictionary with metadata or None if validation fails.
 
-    if not stock_tickers:
-        logger.error("No tickers defined in YAML file. Exiting.")
-        sys.exit(1)
-    else:
-        logger.info(
-            f"Received {len(stock_tickers)} unvalidated stock {pluralise('ticker', len(stock_tickers))},: {f'First {set_maximum_tickers}' if set_maximum_tickers<len(stock_tickers) else ''}: {list(stock_tickers)[:set_maximum_tickers]}{f'...\n' if len(stock_tickers)>set_maximum_tickers else '\n'}"
+    Args:
+        ticker_symbol: The ticker symbol to validate.
+
+    Returns:
+        A dictionary with ticker metadata or None.
+    """
+    if not isinstance(ticker_symbol, str):
+        raise TypeError("ticker_symbol must be a string")
+
+    try:
+        ticker = yf.Ticker(ticker_symbol)
+
+        # Suppress yfinance output
+        with contextlib.redirect_stderr(open(os.devnull, 'w')):
+            # Attempt to fetch metadata
+            info = ticker.info
+
+        # If info is empty or lacks meaningful data, consider it invalid
+        if not info or info.get("symbol") is None:
+            logger.error(
+                f"Ticker '{ticker_symbol}' is invalid. Ensure the symbol is correct."
+            )
+            return None
+
+        # Safely handle date conversion
+        first_trade_date = info.get(
+            "firstTradeDateEpochUtc",
+            info.get("firstTradeDateEpoch", None),
         )
-
-    # Validate stock tickers
-    logger.info(f"Validating stock {pluralise('ticker', len(stock_tickers))}...\n")
-    valid_tickers, invalid_tickers = validate_tickers(stock_tickers)
-
-    if not valid_tickers:
-        logger.error("No valid tickers in YAML file. Exiting.")
-        sys.exit(1)
-
-    # iterate through the currencies to extract unique currencies, excluding GBP and GBp
-    currencies = {
-        currency for _, _, currency in valid_tickers if currency not in ["GBP", "GBp"]
-    }
-
-    # Get list of FX tickers for those currencies we have
-    fx_tickers = []  # create empty list
-    for currency in currencies:
-        if currency == "USD":
-            fx_tickers.append("GBP=X")
+        if first_trade_date is not None:
+            try:
+                earliest_date = pd.to_datetime(first_trade_date, unit="s")
+            except (ValueError, TypeError):
+                earliest_date = None
         else:
-            fx_tickers.append(f"{currency}GBP=X")
+            earliest_date = None
 
-    # join the elements of the list using a list comprehension:
-    fx_tickers_list = ", ".join(str(ticker) for ticker in fx_tickers)
-    logger.info(
-        f"Retrieved {len(fx_tickers)} unvalidated FX {pluralise('ticker',len(fx_tickers))}: {fx_tickers_list}\n"
-    )
+        # Construct the data dictionary
+        data = {
+            "ticker": info.get("symbol", ticker_symbol).upper(),
+            "name": info.get("longName", info.get("shortName", "Unknown")),
+            "earliest_date": earliest_date,
+            "time_zone": info.get("timeZoneShortName", "Unknown"),
+            "quote_type": info.get("quoteType", "Unknown"),
+            "currency": info.get("currency", "Unknown"),
+        }
 
-    # Validate FX tickers
-    logger.info(f"Validating FX {pluralise('ticker', len(fx_tickers))}...\n")
-    valid_FX_tickers, invalid_FX_tickers = validate_tickers(fx_tickers)
+        # Check for missing data points
+        missing_fields = []
+        if data["name"] == "Unknown":
+            missing_fields.append("name")
+        if data["earliest_date"] is None:
+            missing_fields.append("earliest_date")
+        if data["time_zone"] == "Unknown":
+            missing_fields.append("time_zone")
+        if data["quote_type"] == "Unknown":
+            missing_fields.append("quote_type")
+        if data["currency"] == "Unknown":
+            missing_fields.append("currency")
 
-    if not valid_FX_tickers:
-        logger.error("No valid FX tickers. Can only process GBP stock")
-        return
+        if missing_fields and not info:
+            logger.warning(
+                f"{ticker_symbol} is valid but missing fields: {', '.join(missing_fields)}."
+            )
+        else:
+            logger.info(f"{ticker_symbol} is valid and metadata complete.")
+        return data
 
-    # Combine stock and FX ticker lists
-    all_tickers = valid_tickers + valid_FX_tickers
-    # Remove duplicates
-    all_tickers = set(ticker for ticker in all_tickers)
-
-    if not all_tickers:  # checks for Falsy values eg empty set.
-        logger.error("A serious error has occurred with no data being returned!")
-        exit(1)
-    else:
-        # Extracting ticker values from valid_tickers
-        all_ticker_list = [vt.ticker for vt in all_tickers]
-        logger.info(
-            f"In total, received {len(all_ticker_list)} stock and FX {pluralise('ticker', len(all_ticker_list))}"
-            f"{f' - First {set_maximum_tickers}' if len(all_ticker_list)>set_maximum_tickers else ''}:"
-            f"{list(all_ticker_list)[:set_maximum_tickers]}{f'...' if len(all_ticker_list)>set_maximum_tickers else ''}"
-        )
-        return all_tickers
+    except Exception as e:
+        logger.error(f"An unexpected error occurred fetching {ticker_symbol}: {e}")
+        return None
 
 
+@log_function
 def validate_tickers(
-    tickers: list[str], set_maximum_tickers=5
-) -> tuple[list[tuple[str, str, str]], list[str]]:
+    tickers: List[str], max_tickers_in_logs: int = 5
+) -> Tuple[List[Tuple[str, str, Optional[datetime], str, str, str]], List[str]]:
     """
-    Validates a list of ticker symbols and returns list of valid ticker tuples and list of invalid tickers strings.
+    Validates a list of tickers and separates them into valid and invalid tickers.
 
     Args:
         tickers: A list of ticker symbols to validate.
+        max_tickers_in_logs: Maximum number of tickers to show in logs.
 
     Returns:
-        A tuple containing two lists:
-            - The first list contains tuples of valid tickers (symbol, quoteType, currency).
-            - The second list contains invalid ticker symbols.
+        A tuple containing:
+            - List of valid tickers as tuples (ticker, name, earliest_date, time_zone, quote_type, currency).
+            - List of invalid ticker symbols as strings.
     """
     valid_tickers = []
     invalid_tickers = []
 
     for ticker_symbol in tickers:
         try:
-            dat = get_ticker(ticker_symbol)  # Get yFinance object
-            info = dat.info  # Get info from yf object
+            data = validate_ticker(ticker_symbol)
+            if not data:
+                invalid_tickers.append(ticker_symbol)
+                continue
 
-            # Retrieve data with default values for missing keys
-            quote_type = info.get("quoteType", None)
-            currency = info.get("currency", None)
-            # Make all tickers uppercase whist we have it as a string
-            ticker = info.get("symbol", ticker_symbol)
-            if ticker:
-                ticker = ticker.upper()
+            ticker, name, earliest_date, time_zone, quote_type, currency = (
+                data["ticker"],
+                data["name"],
+                data["earliest_date"],
+                data["time_zone"],
+                data["quote_type"],
+                data["currency"],
+            )
 
-            # Only append to valid_tickers list if all values are present
-            if ticker and quote_type and currency:
-                new_valid_ticker = valid_ticker(ticker, quote_type, currency)
-                valid_tickers.append(new_valid_ticker)
+            missing_fields = [
+                field for field, value in zip(
+                    ["ticker", "earliest_date", "time_zone", "quote_type", "currency"],
+                    [ticker, earliest_date, time_zone, quote_type, currency],
+                ) if not value or value == "Unknown"
+            ]
+
+            if not missing_fields:
+                valid_tickers.append((ticker, name, earliest_date, time_zone, quote_type, currency))
             else:
-                # Only append to invalid_tickers list if there is a ticker
-                if ticker:
-                    invalid_tickers.append(ticker)
-                    warn = "missing quote type" if not quote_type else ""
-                    warn2 = "missing currency" if not currency else ""
-                    logger.warning(
-                        f"Ticker {ticker} is invalid due to {warn if warn else ''}{' and ' if warn and warn2 else ''}{warn2 if warn2 else ''}."
-                    )
-
+                invalid_tickers.append(ticker_symbol)
+                logger.warning(f"Ticker {ticker_symbol} is invalid due to missing fields: {', '.join(missing_fields)}.")
         except Exception as e:
-            if ticker:
-                logger.warning(f"Ticker {ticker} is invalid: {e}")
-                invalid_tickers.append(ticker)
+            invalid_tickers.append(ticker_symbol)
+            logger.error(f"An unexpected error occurred processing ticker '{ticker_symbol}': {e}")
 
-    # Get a string of all valid ticker names for reporting
-    if not valid_tickers:
-        logger.error("No valid tickers found.")
-        short_valid_ticker_list = ""
-    else:
-        # Extract names of valid tickers
-        valid_ticker_names = [
-            vt.ticker for vt in valid_tickers
-        ]  # List comprehension for names
-        num_valid_tickers = len(valid_ticker_names)
-        # Restrict length of ticker output
-        short_valid_ticker_list = f"{f'First {set_maximum_tickers} valid' if set_maximum_tickers<num_valid_tickers else 'Valid'}: {list(valid_ticker_names)[:set_maximum_tickers]}{f'...' if num_valid_tickers>set_maximum_tickers else ''}"
+    def summarise_tickers(ticker_list: List[str], label: str, limit: int) -> str:
+        num_tickers = len(ticker_list)
+        displayed_tickers = ticker_list[:limit]
+        continuation = "..." if num_tickers > limit else ""
+        return f"{num_tickers} {label.capitalize()} {pluralise("ticker",num_tickers)} {displayed_tickers}{continuation}"
 
-    # Get a string of all invalid ticker names
-    num_invalid_tickers = len(invalid_tickers)
-    if num_invalid_tickers > 0:
-        # Restrict length of ticker output
-        short_invalid_ticker_list = f"{f'\nFirst {set_maximum_tickers} invalid' if set_maximum_tickers<num_invalid_tickers else '\nInvalid'}: {list(invalid_tickers)[:set_maximum_tickers]}{f'...' if num_invalid_tickers>set_maximum_tickers else ''}"
-    else:
-        short_invalid_ticker_list = ""
-
-    # Report outcome
-    logger.info(
-        f"Summary: {num_valid_tickers} validated {pluralise('ticker',num_valid_tickers)} & {num_invalid_tickers} non-validated {pluralise('ticker',num_invalid_tickers)}:"
-    )
-    logger.info(f"{short_valid_ticker_list}{short_invalid_ticker_list}\n")
+    logger.info(summarise_tickers([t[0] for t in valid_tickers], "valid", max_tickers_in_logs))
+    logger.info(summarise_tickers(invalid_tickers, "invalid", max_tickers_in_logs))
 
     return valid_tickers, invalid_tickers
 
 
-#
-# -----------------------------------------------------------------------------------
-# Data Fetching and Caching                                                         |
-# -----------------------------------------------------------------------------------
-# Fetch historical price data for each ticker, utilizing caching to minimize redundant
-# API calls and implement rate limiting to adhere to API usage policies.
-#
-@retry(Exception, tries=3)
 @log_function
-def get_ticker(ticker_symbol: str) -> Optional[dict]:
+def get_tickers(
+    tickers: List[str], set_maximum_tickers: int = 5
+) -> Tuple[List[Tuple[str, str, Optional[datetime], str, str, str]], List[str]]:
     """
-    Fetches ticker metadata to retrieve the earliest available date for historical data
-    and the time zone short name.
+    Get and validate stock and FX tickers.
 
     Args:
-        ticker_symbol: The ticker symbol to fetch data for.
+        tickers: A list of ticker symbols to validate.
+        set_maximum_tickers: Maximum number of tickers to display in logs.
 
     Returns:
-        A dictionary with the Ticker object, earliest available date, and time zone short name,
-        or None if the ticker is invalid.
+        A tuple of:
+            - List of valid tickers with full metadata (tuples).
+            - List of invalid ticker symbols.
     """
-    try:
-        ticker = yf.Ticker(ticker_symbol)
-        ticker_info = ticker.info
+    if not tickers:
+        logger.error("No tickers defined in YAML file. Exiting.")
+        sys.exit(1)
 
-        # Fetch the earliest available date
-        earliest_date = ticker_info.get("firstTradeDateEpoch")
-        if earliest_date:
-            earliest_date = pd.to_datetime(earliest_date, unit="s")
-        else:
-            logger.warning(
-                f"Unable to determine the earliest available date for {ticker_symbol}."
-            )
-            earliest_date = None
+    logger.info(f"Validating {len(tickers)} stock tickers...")
+    valid_tickers, invalid_tickers = validate_tickers(tickers)
 
-        # Fetch the time zone short name
-        time_zone = ticker_info.get("timeZoneShortName")
-        if not time_zone:
-            logger.warning(f"Time zone information is missing for {ticker_symbol}.")
-            time_zone = "Unknown"
+    if not valid_tickers:
+        logger.error("No valid stock tickers found in YAML file. Exiting.")
+        sys.exit(1)
 
-        logger.debug(
-            f"Ticker {ticker_symbol} validated. "
-            f"Earliest available data: {earliest_date}, Time zone: {time_zone}."
-        )
+    # Generate FX tickers based on the currencies in valid_tickers
+    currencies = {t[5] for t in valid_tickers if t[5] not in ["GBP", "GBp"]}
+    fx_tickers = {
+        f"{currency}GBP=X" if currency != "USD" else "GBP=X" for currency in currencies
+    }
 
-        return {
-            "ticker": ticker,
-            "earliest_date": earliest_date,
-            "time_zone": time_zone,
-        }
-    except Exception as e:
-        logger.error(f"Error fetching ticker metadata for {ticker_symbol}: {e}")
-        return None
+    logger.info(f"Validating {len(fx_tickers)} FX tickers...")
+    valid_fx_tickers, invalid_fx_tickers = validate_tickers(list(fx_tickers))
 
+    if not valid_fx_tickers:
+        logger.warning("No valid FX tickers found. Processing GBP stocks only.")
 
+    # Combine and deduplicate valid tickers (preserving full tuples)
+    all_valid_tickers = list({t for t in valid_tickers + valid_fx_tickers})
+    all_invalid_tickers = list(set(invalid_tickers + invalid_fx_tickers))
+
+    logger.info(
+        f"Validated {len(all_valid_tickers)} {pluralise("ticker",len(all_valid_tickers))} in total. Found {len(all_invalid_tickers)} invalid {pluralise("ticker",len(all_invalid_tickers))}."
+    )
+
+    return all_valid_tickers, all_invalid_tickers
+
+#
+#
+# Get data
+#
 @retry(Exception, tries=3)
 @log_function
 def fetch_ticker_history(
@@ -815,7 +816,9 @@ def fetch_ticker_history(
             df = pickle.load(f)
         logger.debug(f"Fetching {format_path(cache_file)}.")
     else:
-        ticker = yf.Ticker(ticker_symbol) # Already validated so can go straight to yf function rather than our get_tickers function.
+        ticker = yf.Ticker(
+            ticker_symbol
+        )  # Already validated so can go straight to yf function rather than our validate_tickers function.
         logger.debug(f"Fetching data for {ticker_symbol} from Yahoo Finance.")
 
         print("getting ticker again. line 791")
@@ -832,7 +835,9 @@ def fetch_ticker_history(
         ).rename(columns={"Close": "Price"})
 
         if df.empty:
-            logger.warning(f"No data found online for {ticker_symbol}. Check if available during this time period.")
+            logger.warning(
+                f"No data found online for {ticker_symbol}. Check if available during this time period."
+            )
             return pd.DataFrame()
 
         # Drop superfluous columns
@@ -849,19 +854,27 @@ def fetch_ticker_history(
     )
     return tidy_df  # returns a pandas df
 
-
 @retry(Exception, tries=3)
 @log_function
 def fetch_historical_data(
-    tickers: Set[valid_ticker],
+    tickers: List[Tuple[str, str, Optional[datetime], str, str, str]],
     start_date: datetime,
     end_date: datetime,
     business_days: int,
 ) -> pd.DataFrame:
     """
-    Iterates over the list of valid tickers, fetching their data using fetch_ticker_history,
-    and compiles the results into a single DataFrame with columns: 'Ticker', 'Price', 'Date', 'QuoteType', 'Currency'.
+    Fetches historical data for a list of validated tickers and compiles it into a DataFrame.
+
+    Args:
+        tickers: A list of tuples containing valid ticker details.
+        start_date: The start date for the historical data range.
+        end_date: The end date for the historical data range.
+        business_days: Number of business days in the date range.
+
+    Returns:
+        A pandas DataFrame containing the fetched historical data.
     """
+
     records = []
     for ticker_symbol, quote_type, currency in tickers:
         try:
@@ -900,6 +913,7 @@ def fetch_historical_data(
         exit(1)
     else:
         return pd.DataFrame()  # return an empty DataFrame
+
 
 #
 # -----------------------------------------------------------------------------------
@@ -1643,23 +1657,33 @@ def main():
     Main function to orchestrate data fetching and processing.
     """
     try:
-        
+
         # Conditional clear screen at beginning for clean output
         if config.clear_startup == True:
             os.system("cls" if os.name == "nt" else "clear")
-        
+
         # Get elevation
         run_as_admin()
 
         # Get date range
         start_date, end_date, business_days = get_date_range()
 
-        # Get tickers
-        tickers = get_tickers(config)
+        # Get 'raw' tickers from YAML file and FX tickers if required, validate and acquire metadata.
+        ticker_list= config.tickers    
+        valid_tickers, invalid_tickers = get_tickers(ticker_list, set_maximum_tickers=5 )  
+        # remember and deal with invalid_tickers (a list of invalid tickers) in produce tables
+
+        print(valid_tickers)
+        print(invalid_tickers)
+        sys.exit()
 
         # Fetch Ticker Dataframe
+        # takes:     tickers: List[Tuple[str, str, Optional[datetime], str, str, str]],
+        # start_date: datetime,
+        # end_date: datetime,
+        # business_days: int,
         ticker_dataframe = fetch_historical_data(
-            tickers, start_date, end_date, business_days
+            valid_tickers, start_date, end_date, business_days
         )
 
         # Convert prices to GBP except INDEX and CURRENCY
