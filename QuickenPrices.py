@@ -989,6 +989,7 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
         logger.info("All rows processed successfully.")
 
     logger.debug("End of function 'convert_prices'.")
+
     return final_df
 
 
@@ -1068,6 +1069,8 @@ def process_converted_prices(
         logger.debug(
             f"{len(index_currency)} item 'index_currency' dataframe created successfully."
         )
+
+        
 
         # Calculate totals before filtering
         total_rows_input = len(converted_df)
@@ -1618,9 +1621,7 @@ def main():
 
         # Convert prices to GBP except INDEX and CURRENCY
         processed_data = convert_prices(price_data)
-
-        print(processed_data)
-        sys.exit()
+        # processed_data contains ['Ticker', 'Name', 'Price', 'Date', 'TimeZone', 'QuoteType', 'Currency', 'FX Ticker', 'Exchange Rate', 'Converted Price', 'Final Currency', 'Conversion', 'Outcome']
 
         # Process and create output dataframes
         output_csv, success, failure, no_change, index_currency = (
