@@ -1,0 +1,18 @@
+{
+  "configurations": [
+    {
+      "type": "debugpy",
+      "request": "launch",
+      "name": "Launch QuickenPrices",
+      "program": "${workspaceFolder}/${input:programPath}",
+      "console": "integratedTerminal"
+    }
+  ],
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "programPath",
+      "description": "Enter the path to the QuickenPrices script"
+    }
+  ]
+}

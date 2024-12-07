@@ -1,0 +1,74 @@
+# QuickenPrices Configuration: config.yaml
+
+# Tickers to track
+tickers:
+  - 0P00013P6I.L
+  - 0P00018XAP.L
+  - AMGN
+  - BZG25.NYM
+  - CUKX.L
+  - CYSE.L
+  - ELIX.L
+  - ^FTAS
+  - ^FTSE
+  - GLTA.L
+  - GCG25.CMX
+  - HMWO.L
+  - IHCU.L
+  - IIND.L
+  - IUIT.L
+  - SEE.L
+  - ^OEX
+  - ^GSPC
+  - VHVG.L
+  - VNRX
+  - VUKG.L
+
+# Data period to collect in years (0.08 years ≈ 1 month,0.08 * 365 ≈ 29.2 days)
+collection:
+  period_years: 0.08
+  max_retries: 3
+  retry_delay: 2
+
+# Application Paths - data files, logs, cache and quicken executable
+paths:
+  base: "C:\\Users\\wayne\\OneDrive\\Documents\\GitHub\\Python\\Projects\\quicken_prices\\"
+  quicken: C:\\Program Files (x86)\\Quicken\\qw.exe
+  data_file: data.csv # Data file 
+  log_file: prices.log # Log file 
+  cache: cache # Directory for cache
+
+# Show startup initiation process
+clear_startup: True
+
+# Logging levels for terminal and logfile: "DEBUG", "INFO", "WARNING", "ERROR", "TEXT"
+logging:
+  levels:
+    file: DEBUG
+    terminal: DEBUG
+
+
+# Default data collection periods for each quoteType:
+default_periods:
+  EQUITY: 5d
+  ETF: 5d
+  MUTUALFUND: 1mo
+  FUTURE: 5d
+  CURRENCY: 5d
+  INDEX: 5d
+
+# Cache Settings
+cache:
+  max_age_days: 30
+  cleanup_threshold: 200
+
+# Yahoo API Settings
+api:
+  rate_limit:
+    max_requests: 30
+    time_window: 60 # seconds
+
+# Memory Management
+memory:
+  max_memory_percent: 75
+  chunk_size: 1000
