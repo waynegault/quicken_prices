@@ -15,6 +15,7 @@ Wayne Gault
 MIT Licence
 """
 
+# Imports
 import logging
 import os
 import sys
@@ -28,30 +29,33 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 import traceback
-import contextlib  # Used to redirect output streams temporarily
+
+# import contextlib  # Used to redirect output streams temporarily
 import ctypes  # Low-level OS interfaces
-import functools  # Higher-order functions and decorators
+
+# import functools  # Higher-order functions and decorators
 from logging.handlers import (
     RotatingFileHandler,
 )  # Additional logging handlers (e.g., RotatingFileHandler)
 import pickle  # Object serialization/deserialization
 import subprocess  # Process creation and management
 import time  # Time-related functions
+from functools import wraps
 from datetime import date, datetime, timedelta  # Date and time handling
 from pathlib import Path  # Object-oriented filesystem paths
-from typing import Any, Dict, List, Optional, Tuple, Union  # Type annotations
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 import numpy as np
 import yaml
 import pandas as pd
 import yfinance as yf
-from colorama import init, Fore, Style
 import pygetwindow as gw
 import pyautogui
 from pythonjsonlogger import jsonlogger
 
-init(autoreset=True)
 
-os.system("cls" if os.name == "nt" else "clear")
+# Constants
+SECONDS_IN_A_DAY = 86400
+
 
 # Utility to recursively apply default settings
 def apply_defaults(
@@ -176,67 +180,61 @@ def validate_quicken_path(provided_path: str) -> Optional[str]:
 
 # Load configuration with defaults
 DEFAULT_CONFIG = {
-    "tickers": ["^FTSE"],  # Changed from set to list
-    "paths": {
-        "data_file": "data.csv",
-        "log_file": "prices.log",
-        "cache": "cache",
-    },
-    "home_currency": "GBP",  # Added explicitly
-    "collection": {"period_years": 0.08, "max_retries": 3, "retry_delay": 2},
-    "cache": {"max_age_days": 30, "cleanup_threshold": 200},
-    "logging": {
-        "levels": {"file": "DEBUG", "terminal": "DEBUG"},
-        "max_bytes": 5_242_880,
-        "backup_count": 5,
-    },
+    "home_currency": "GBP",
+    "collection_period_years": 0.08,
+    "retries": {"max_retries": 3, "retry_delay": 2},
+    "logging_level": {"file": "DEBUG", "terminal": "DEBUG"},
+    "log_file": {"max_bytes": 5242880, "backup_count": 5},
+    "tickers": ["^FTSE"],
+    "paths": {"data_file": "data.csv", "log_file": "prices.log", "cache": "cache"},
+    "cache": {"max_age_days": 30},
 }
 
 
 def load_configuration(config_file: str = "configuration.yaml") -> Dict[str, Any]:
+    """
+    Load and validate YAML configuration with defaults.
+    Exits if critical values are missing or invalid.
+    """
+    base_path = Path(__file__).resolve().parent
+    config_path = base_path / config_file
 
-    base_path = os.path.dirname(os.path.abspath(__file__))
-
-    config_path = os.path.join(base_path, config_file)
-    config = {}
-
-    if not os.path.exists(config_path):
-        # If the configuration file doesn't exist, create it with defaults
-        logging.warning(f"{config_file} not found. Creating with default settings.")
-        with open(config_path, "w") as f:
-            yaml.dump(
-                DEFAULT_CONFIG, f, default_flow_style=False
-            )  # Ensures readable format
+    if not config_path.exists():
+        logging.warning(
+            f"{config_file} not found. Creating default configuration. Please update to suit."
+        )
+        with config_path.open("w", encoding="utf-8") as f:
+            yaml.dump(DEFAULT_CONFIG, f, default_flow_style=False)
         logging.info(f"Default {config_file} created at {config_path}.")
     else:
         # Log that the local YAML file is found and being used
-        logging.info(f"Local {config_file} found at {config_path}. Using it.")
+        logging.info(f"Using {config_file} found at {base_path}.")
 
     # Attempt to load configuration file
     try:
-        with open(config_path, "r") as f:
-            config = yaml.safe_load(f) or {}
+        with config_path.open("r", encoding="utf-8") as f:
+            user_config = yaml.safe_load(f) or {}
 
-        if not isinstance(config, dict):
+        if not isinstance(user_config, dict):
             logging.warning(f"Invalid format in {config_file}. Using defaults.")
-            config = {}
+            user_config = {}
 
     except Exception as e:
         logging.error(f"Error reading {config_file}: {e}. Using internal defaults.")
-        config = {}
+        user_config = {}
 
     # Merge defaults with user config
-    final_config = apply_defaults(DEFAULT_CONFIG, config)
+    final_config = apply_defaults(DEFAULT_CONFIG, user_config)
 
     # Add base path to paths in the config
-    final_config.setdefault("paths", {}).setdefault("base", base_path)
+    final_config.setdefault("paths", {}).setdefault("base", str(base_path))
 
     # Automatically find Quicken path
     validated_quicken_path = find_quicken_via_registry()
 
     if validated_quicken_path:
         final_config["paths"]["quicken"] = validated_quicken_path
-        logging.info(f"Quicken found at: {validated_quicken_path}")
+        logging.info(f"Using Quicken found at: {validated_quicken_path}")
     else:
         logging.error("Quicken executable not found.")
         print(
@@ -251,17 +249,22 @@ def load_configuration(config_file: str = "configuration.yaml") -> Dict[str, Any
         )
         sys.exit(1)
 
+    # Basic validation
+    if not final_config["tickers"]:
+        logging.error(
+            "No tickers defined in configuration. Please add at least one ticker."
+        )
+        sys.exit(1)
+
     return final_config
 
 
-# Load the configuration
-config = load_configuration()
-# Ensure base directory exists
-base_path = config["paths"]["base"]
-os.makedirs(base_path, exist_ok=True)
+def setup_logging(config: Dict[str, any]) -> None:
 
+    base_path = config["paths"]["base"]
+    file_log_level = config["logging_level"]["file"].upper()
+    terminal_log_level = config["logging_level"]["terminal"].upper()
 
-def setup_logging():
     # Determine the log directory based on the operating system
     if os.name == "nt":  # Windows
         log_dir = os.path.join(os.getenv("APPDATA", base_path), "YourApp", "logs")
@@ -272,58 +275,65 @@ def setup_logging():
     os.makedirs(log_dir, exist_ok=True)
 
     # Use the log file path from the configuration or default to the generated log directory
-    log_file = os.path.join(log_dir, config["paths"].get("log_file", "prices.log"))
+    log_file_path = os.path.join(base_path, config["paths"]["log_file"])
 
     # Create a rotating file handler with a simpler format for readability
     file_handler = RotatingFileHandler(
-        log_file,
-        maxBytes=config["logging"]["max_bytes"],
-        backupCount=config["logging"]["backup_count"],
+        log_file_path,
+        maxBytes=config["log_file"]["max_bytes"],
+        backupCount=config["log_file"]["backup_count"],
         encoding="utf-8",
     )
-    file_handler.setLevel(
-        getattr(logging, config["logging"]["levels"]["file"].upper(), logging.DEBUG)
+    file_handler.setLevel(getattr(logging, file_log_level, logging.DEBUG))
+    file_formatter = logging.Formatter(
+        "%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s"
     )
-    # Simple, human-readable format for the file logs
-    file_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
     file_handler.setFormatter(file_formatter)
 
     # Create a console handler with the same format
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(
-        getattr(logging, config["logging"]["levels"]["terminal"].upper(), logging.DEBUG)
+    console_handler.setLevel(getattr(logging, terminal_log_level, logging.DEBUG))
+    console_formatter = logging.Formatter(
+        "%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s"
     )
-    console_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
     console_handler.setFormatter(console_formatter)
 
-    # Add handlers to the root logger
-    logging.getLogger().handlers = []  # Clear existing handlers
+    logging.getLogger().handlers = []
     logging.getLogger().addHandler(file_handler)
     logging.getLogger().addHandler(console_handler)
+    logging.getLogger().setLevel(logging.DEBUG)
 
-    # Log the location of the log file
-    logging.info(f"Logs are being written to: {log_file}")
-
-
-# Call setup_logging early in the script
-setup_logging()
+    logging.info(f"Log file at: {log_file_path}")
 
 
-def retry(exceptions, tries=3, delay=1, backoff=2):
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            for attempt in range(tries):
+def retry(
+    exceptions: Tuple[Type[BaseException], ...],
+    tries: int = 3,
+    delay: float = 1.0,
+    backoff: float = 2.0,
+):
+    """
+    Retry decorator to automatically re-run a function if it raises specified exceptions.
+    """
+
+    def decorator(func: Callable):
+        @wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            current_delay = delay
+            for attempt in range(1, tries + 1):
                 try:
                     return func(*args, **kwargs)
                 except exceptions as e:
-                    if attempt < tries - 1:
-                        logging.warning(f"Retry {attempt + 1}/{tries} failed: {e}")
-                        time.sleep(delay)
-                        delay *= backoff
+                    if attempt < tries:
+                        logging.warning(
+                            f"Attempt {attempt} failed with error '{e}'. Retrying in {current_delay} seconds..."
+                        )
+                        time.sleep(current_delay)
+                        current_delay *= backoff
                     else:
                         logging.error(
-                            f"Function '{func.__name__}' failed after {tries} attempts."
+                            f"Function '{func.__name__}' failed after {tries} attempts. Error: {e}. "
+                            f"Consider checking network connectivity or ticker symbol correctness."
                         )
                         raise
 
@@ -332,64 +342,47 @@ def retry(exceptions, tries=3, delay=1, backoff=2):
     return decorator
 
 
-def get_date_range() -> Tuple[datetime, datetime, int]:
-    period_year = config["collection"]["period_years"]
-    period_days = period_year * 365 + 1
+def get_date_range(config: Dict[str, Any]) -> Tuple[datetime, datetime, int]:
+    # In yfinance, the start and end dates used for data collection are inclusive of the start date and exclusive of the end date.
+
+    period_year = config["collection_period_years"]
+    period_days = period_year * 365
     end_date = date.today()
     start_date = end_date - timedelta(days=int(period_days))
-    # Convert dates to datetime objects
-    end_date = pd.to_datetime(end_date)
-    start_date = pd.to_datetime(start_date)
-    # Convert to numpy datetime format for business day calculation
-    start_date_np = np.datetime64(start_date, "D")
-    end_date_np = np.datetime64(end_date, "D")
-    # Calculate business days using np.busday_count
-    business_days = np.busday_count(start_date_np, end_date_np)
-    return start_date, end_date, business_days
+    end_datetime = pd.to_datetime(end_date)
+    start_datetime = pd.to_datetime(start_date)
+    start_np = np.datetime64(start_datetime, "D")
+    end_np = np.datetime64(end_datetime, "D")
+    business_days = np.busday_count(start_np, end_np)
+    return start_datetime, end_datetime, business_days
 
 
 def pluralise(title: str, quantity: int) -> str:
-    if quantity == 1:
-        return title
-    else:
-        return title + "s"
+    return title if quantity == 1 else title + "s"
 
 
-@retry(Exception, tries=3)
+@retry((Exception,), tries=3)
 def validate_ticker(
     ticker_symbol: str,
 ) -> Optional[Dict[str, Union[str, pd.Timestamp]]]:
-
     if not isinstance(ticker_symbol, str):
-        raise TypeError("ticker_symbol must be a string")
+        logging.error("Ticker must be a string.")
+        return None
 
     try:
         ticker = yf.Ticker(ticker_symbol)
-
-        # Suppress yfinance output
-        with contextlib.redirect_stderr(open(os.devnull, "w")):
-            # Attempt to fetch metadata
-            info = ticker.info
-
-        # If info is empty or lacks meaningful data, consider it invalid
+        info = ticker.info
         if not info or info.get("symbol") is None:
             logging.error(
-                f"Ticker '{ticker_symbol}' is invalid. Ensure the symbol is correct."
+                f"Ticker '{ticker_symbol}' is invalid. Check if the symbol is correct or available on yfinance."
             )
             return None
 
         # Safely handle date conversion
-        first_trade_date = info.get(
-            "firstTradeDateEpochUtc",
-            info.get("firstTradeDateEpoch", None),
+        first_trade_date = info.get("firstTradeDateEpochUtc", None)
+        earliest_date = (
+            pd.to_datetime(first_trade_date, unit="s") if first_trade_date else None
         )
-        if first_trade_date is not None:
-            try:
-                earliest_date = pd.to_datetime(first_trade_date, unit="s")
-            except (ValueError, TypeError):
-                earliest_date = None
-        else:
-            earliest_date = None
 
         # Construct the data dictionary
         data = {
@@ -399,20 +392,6 @@ def validate_ticker(
             "currency": info.get("currency", "Unknown"),
         }
 
-        # Check for missing data points
-        missing_fields = []
-        if data["earliest_date"] is None:
-            missing_fields.append("earliest_date")
-        if data["type"] == "Unknown":
-            missing_fields.append("type")
-        if data["currency"] == "Unknown":
-            missing_fields.append("currency")
-
-        if missing_fields and not info:
-            logging.warning(
-                f"{ticker_symbol} is valid but missing fields: {', '.join(missing_fields)}."
-            )
-
         return data
 
     except Exception as e:
@@ -421,7 +400,7 @@ def validate_ticker(
 
 
 def validate_tickers(
-    tickers: List[str], max_tickers_in_logs: int = 5
+    tickers: List[str], max_show: int = 5
 ) -> List[Tuple[str, Optional[datetime], str, str]]:
     """
     Validates tickers and returns a list of valid tickers with metadata.
@@ -433,53 +412,36 @@ def validate_tickers(
     Returns:
         List of tuples containing ticker metadata.
     """
+
     valid_tickers = []
 
     for ticker_symbol in tickers:
         try:
             data = validate_ticker(ticker_symbol)
-            if not data:
-                continue
-
-            ticker, earliest_date, type, currency = (
-                data["ticker"],
-                data["earliest_date"],
-                data["type"],
-                data["currency"],
-            )
-
-            missing_fields = [
-                field
-                for field, value in zip(
-                    ["ticker", "earliest_date", "type", "currency"],
-                    [ticker, earliest_date, type, currency],
+            if (
+                data
+                and data["ticker"]
+                and data["type"] != "Unknown"
+                and data["currency"] != "Unknown"
+            ):
+                valid_tickers.append(
+                    (
+                        data["ticker"],
+                        data["earliest_date"],
+                        data["type"],
+                        data["currency"],
+                    )
                 )
-                if not value or value == "Unknown"
-            ]
-
-            if not missing_fields:
-                valid_tickers.append((ticker, earliest_date, type, currency))
 
         except Exception as e:
             logging.error(
                 f"An unexpected error occurred processing ticker '{ticker_symbol}': {e}"
             )
 
-    def summarise_tickers(ticker_list: List[str], label: str, limit: int) -> str:
-        num_tickers = len(ticker_list)
-        displayed_tickers = ticker_list[:limit]
-        continuation = "..." if num_tickers > limit else ""
-        return f"{num_tickers} {label.capitalize()} {pluralise('ticker',num_tickers)} {displayed_tickers}{continuation}"
-
-    logging.info(
-        summarise_tickers([t[0] for t in valid_tickers], "valid", max_tickers_in_logs)
-    )
-
     return valid_tickers
 
-
 def get_tickers(
-    tickers: List[str], set_maximum_tickers: int = 5
+    tickers: List[str], max_show: int = 5
 ) -> List[Tuple[str, Optional[datetime], str, str]]:
     """
     Get and validate stock and FX tickers.
@@ -495,27 +457,50 @@ def get_tickers(
         logging.error("No tickers defined in YAML file. Exiting.")
         sys.exit(1)
 
-    logging.info(f"Validating {len(tickers)} user {pluralise("ticker",len(tickers))}...")
+    logging.info(
+        f"Validating {len(tickers)} user {pluralise("ticker",len(tickers))}..."
+    )
     valid_tickers = validate_tickers(tickers)
 
     if not valid_tickers:
-        logging.error("No valid stock tickers found in YAML file. Exiting.")
+        logging.error(
+            "No valid tickers found. Please update your configuration or check network access. Exiting."
+        )
         sys.exit(1)
+    else:
+        logging.info(
+            f"{len(valid_tickers)} valid {pluralise('ticker', len(valid_tickers))} found: {[ticker[0] for ticker in valid_tickers[:max_show]]}{'...' if len(valid_tickers)>max_show else ''}"
+        )
 
     # Generate FX tickers based on the currencies in valid_tickers
     currencies = {t[3] for t in valid_tickers if t[3] not in ["GBP", "GBp"]}
     fx_tickers = {
         f"{currency}GBP=X" if currency != "USD" else "GBP=X" for currency in currencies
     }
+
     if fx_tickers:
-        logging.info(f"Validating {len(fx_tickers)} imported FX {pluralise("ticker",len(fx_tickers))}...")
-    valid_fx_tickers = validate_tickers(list(fx_tickers))
+        # Exclude tickers from fx_tickers that might already be in valid_tickers
 
-    if not valid_fx_tickers:
-        logging.warning("No valid FX tickers found. Processing GBP stocks only.")
+        # Extract only the ticker strings from valid_tickers
+        valid_ticker_strings = {ticker[0] for ticker in valid_tickers}
+        # Exclude tickers from fx_tickers that are already in valid_ticker_strings
+        fx_tickers = {
+            ticker for ticker in fx_tickers if ticker not in valid_ticker_strings
+        }
 
-    # Combine and deduplicate valid tickers (preserving full tuples)
-    all_valid_tickers = list({t for t in valid_tickers + valid_fx_tickers})
+    if fx_tickers:
+        # Validate FX tickers
+        logging.info(
+            f"Validating {len(fx_tickers)} FX {pluralise("ticker",len(fx_tickers))}..."
+        )
+        valid_fx_tickers = validate_tickers(list(fx_tickers))
+        logging.info(
+            f"{len(valid_fx_tickers)} valid FX {pluralise('ticker', len(valid_fx_tickers))} found: {[ticker[0] for ticker in valid_fx_tickers[:max_show]]}{'...' if len(valid_fx_tickers)>max_show else ''}"
+        )
+        all_valid_tickers = list(set(valid_tickers + valid_fx_tickers))
+    else:
+        logging.warning("No new FX tickers required.")
+        all_valid_tickers = valid_tickers
 
     logging.info(
         f"Validated {len(all_valid_tickers)} {pluralise('ticker',len(all_valid_tickers))} in total."
@@ -524,124 +509,103 @@ def get_tickers(
     return all_valid_tickers
 
 
-@retry(Exception, tries=3)
+def download_data(ticker_symbol, start, end):
+    # Convert start and end to datetime objects
+    start_date = start
+    end_date = end + timedelta(days=1)  # Add 1 day to end date
+    ticker = yf.Ticker(ticker_symbol)
+    time.sleep(0.1)  # Rate limiting
+    df = ticker.history(
+        start=start_date.strftime("%Y-%m-%d"),  # Convert back to string for yfinance
+        end=end_date.strftime("%Y-%m-%d"),
+        interval="1d",
+    )
+    df = df.rename(columns={"Close": "Old Price"})
+    df.reset_index(inplace=True)  # Reset the index to make Date a column
+    df["Date"] = df["Date"].dt.strftime("%Y-%m-%d")
+    df = df[["Date", "Old Price"]]  # Select only the "Old Price" column
+    return df
+
+
 def fetch_ticker_history(
-    ticker_symbol: str, start_date: datetime, end_date: datetime
+    ticker: str, start_date: datetime, end_date: datetime, config: Dict
 ) -> pd.DataFrame:
     """
-    Fetches price/rate data for a single ticker.
-    First checks if the data is cached; if not, fetches the data using yfinance and caches it.
-    If cache is corrupted or missing, reload the data. The cache can be supplemented with missing data.
-    Takes weekends and holidays into account when checking for missing data.
-    Handles delisted tickers and avoids warnings during concatenation.
+    Fetches historical data for a ticker, using cached data where available and downloading missing data for business days.
     """
-    cache_dir = os.path.join(base_path, config["paths"]["cache"])
-    if not os.path.exists(cache_dir):
-        os.makedirs(cache_dir)
-
+    cache_dir = os.path.join(config["paths"]["base"], config["paths"]["cache"])
     cache_file = os.path.join(
         cache_dir,
-        f"{ticker_symbol}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.pkl",
+        f"{ticker}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.pkl",
     )
 
-    # Generate list of business days between start_date and end_date
-    business_days = pd.bdate_range(start=start_date, end=end_date).date
+    # Generate the range of required business days
+    required_business_days = pd.date_range(start=start_date, end=end_date, freq="B")
+    all_data = pd.DataFrame()
 
-    try:
-        # Attempt to load cached data
-        if os.path.exists(cache_file):
-            try:
-                with open(cache_file, "rb") as f:
-                    cached_data = pickle.load(f)
+    if os.path.exists(cache_file):
+        logging.info(f"Loading cached data for {ticker} from {cache_file}.")
+        cached_data = pd.read_pickle(cache_file)
 
-                # Ensure cached data has the required structure
-                required_columns = {"Date", "Old Price"}
-                if required_columns.issubset(cached_data.columns):
-                    logging.info(f"Loaded cached data for {ticker_symbol}.")
-                    logging.debug(f"Cached data for {ticker_symbol}:\n{cached_data.head()}")
-                    
-                    # Check which dates are actually present in the cached data
-                    cached_dates = pd.to_datetime(cached_data["Date"]).dt.date.tolist()
+        if not cached_data.empty:
+            cached_data["Date"] = pd.to_datetime(cached_data["Date"])
+            cached_min_date, cached_max_date = (
+                cached_data["Date"].min(),
+                cached_data["Date"].max(),
+            )
 
-                    # Compare with business days to detect missing dates
-                    missing_dates = [d for d in business_days if d not in cached_dates]
-                    if missing_dates:
-                        logging.info(f"Found missing data for {ticker_symbol} on {missing_dates}. Fetching missing dates.")
-                        # Fetch missing data only for the missing dates
-                        try:
-                            missing_data = yf.Ticker(ticker_symbol).history(
-                                start=min(missing_dates),
-                                end=max(missing_dates),
-                                interval="1d",
-                            ).reset_index()
+            # Identify missing business days
+            missing_days = required_business_days.difference(cached_data["Date"])
+            if missing_days.empty:
+                logging.info(
+                    f"Using fully cached data for {ticker} from {cached_min_date} to {cached_max_date}."
+                )
+                all_data = cached_data
+            else:
+                missing_start = missing_days[0]
+                missing_end = missing_days[-1]
 
-                            if missing_data.empty:
-                                logging.warning(f"No price data found for missing dates of {ticker_symbol}.")
-                                return cached_data  # Return cached data if no data found
+                logging.info(
+                    f"Fetching missing data for {ticker} from {missing_start} to {missing_end}."
+                )
+                fetched_data = download_data(ticker, missing_start, missing_end)
 
-                            missing_data = missing_data.rename(columns={"Close": "Old Price"})
-                            missing_data = missing_data[["Date", "Old Price"]].copy()
-                            missing_data["Ticker"] = ticker_symbol
+                if not fetched_data.empty:
+                    fetched_data["Date"] = pd.to_datetime(fetched_data["Date"])
+                    all_data = pd.concat([cached_data, fetched_data], ignore_index=True)
+                    all_data.drop_duplicates(subset=["Date"], inplace=True)
+                else:
+                    logging.warning(f"No new data fetched for {ticker}.")
+                    all_data = cached_data
+        else:
+            logging.warning(f"Cache for {ticker} is empty. Fetching all data.")
 
-                            # Combine cached data with new data
-                            combined_data = pd.concat([cached_data, missing_data], ignore_index=True)
+            all_data = download_data(ticker, start_date, end_date)
+    else:
+        logging.info(f"No cache found for {ticker}. Fetching all data.")
+        all_data = download_data(ticker, start_date, end_date)
 
-                            # Handle potential future pandas warning regarding empty columns
-                            combined_data = combined_data.dropna(how='all', axis=1)  # Drop all-NA columns
-
-                            # Save the combined data back to the cache
-                            with open(cache_file, "wb") as f:
-                                pickle.dump(combined_data, f)
-
-                            return combined_data
-
-                        except Exception as e:
-                            logging.error(f"Error fetching missing data for {ticker_symbol}: {e}")
-                            return cached_data  # Return cached data if fetching fails
-
-                    # No missing data, return cached data
-                    return cached_data
-
-            except Exception as e:
-                logging.warning(f"Error reading cache for {ticker_symbol}: {e}. Reloading data.")
-                # Delete the corrupted cache
-                os.remove(cache_file)
-
-        # If no valid cache, fetch from yfinance
-        ticker = yf.Ticker(ticker_symbol)
-        time.sleep(0.2)  # Rate limiting
-        df = ticker.history(
-            start=start_date,
-            end=end_date,
-            interval="1d",
-        ).reset_index()
-
-        if df.empty:
+    # Process the fetched data
+    if not all_data.empty:
+        required_columns = {"Date", "Old Price"}
+        missing_columns = required_columns - set(all_data.columns)
+        if missing_columns:
             logging.warning(
-                f"No data retrieved for {ticker_symbol} between {start_date} and {end_date}."
+                f"Data for {ticker} is missing required columns {missing_columns}. Available columns: {list(all_data.columns)}. Skipping."
             )
             return pd.DataFrame()
 
-        logging.info(f"Data for {ticker_symbol} retrieved from yfinance.")
-        logging.debug(f"Fetched data for {ticker_symbol}:\n{df.head()}")
+        # Save updated data to cache
+        if not os.path.exists(cache_dir):
+            os.makedirs(cache_dir)
+        all_data.to_pickle(cache_file)
+        logging.info(f"Saved data for {ticker} to cache: {cache_file}.")
 
-        # Rename columns and clean up DataFrame
-        df = df.rename(columns={"Close": "Old Price"})
-        df = df[["Date", "Old Price"]].copy()
-        df["Ticker"] = ticker_symbol
+    return all_data
 
-        # Save to cache
-        with open(cache_file, "wb") as f:
-            pickle.dump(df, f)
-
-        return df
-
-    except Exception as e:
-        logging.error(f"Failed to fetch or process data for {ticker_symbol}: {e}")
-        return pd.DataFrame()
 
 def fetch_historical_data(
-    tickers: List[Tuple[str, Optional[datetime], str, str]]
+    tickers: List[Tuple[str, Optional[datetime], str, str]], config: Dict[str, Any]
 ) -> pd.DataFrame:
     """
     Fetch historical price data for all valid tickers.
@@ -652,13 +616,15 @@ def fetch_historical_data(
     Returns:
         Combined DataFrame containing historical data for all tickers.
     """
-    records = []
-
     # Get date range
-    start_date, end_date, business_days = get_date_range()
+    start_date, end_date, bdays = get_date_range(config)
+    records = []
+    logging.info(
+        f"Getting {bdays} business days of data, {start_date.strftime("%d/%m/%y")} - {end_date.strftime("%d/%m/%y")}."
+    )
 
     for ticker, earliest_date, type, currency in tickers:
-        # Adjusted start date is the later of earliest_date and start_date
+        # Adjusted start date is the later of earliest_date or start_date
         adjusted_start_date = max(start_date, earliest_date or start_date)
 
         # Check if end_date is before earliest_date
@@ -671,7 +637,7 @@ def fetch_historical_data(
 
         try:
             # Fetch historical data (from cache or yfinance)
-            df = fetch_ticker_history(ticker, adjusted_start_date, end_date)
+            df = fetch_ticker_history(ticker, adjusted_start_date, end_date, config)
 
             # Log the data from cache or download for debugging
             logging.debug(
@@ -706,18 +672,13 @@ def fetch_historical_data(
     # If no valid data was fetched, log an error and return an empty DataFrame
     if not records:
         logging.error(
-            f"No data fetched for the {business_days} business days between "
-            f"{start_date.strftime('%d/%m/%Y')} and {end_date.strftime('%d/%m/%Y')}!"
+            f"No data fetched for {bdays} business days of data, {start_date.strftime("%d/%m/%y")} - {end_date.strftime("%d/%m/%y")} "
+            f"{start_date.strftime('%d/%m/%Y')} and {end_date.strftime('%d/%m/%Y')}.  Check your internet connection, ticker validity, or date ranges."
         )
         return pd.DataFrame()
 
     # Combine all DataFrames into one
     combined_df = pd.concat(records, ignore_index=True)
-
-    # Reorder columns for consistency
-    combined_df = combined_df[
-        ["Ticker", "Date", "Type", "Old Price", "Original Currency"]
-    ]
 
     return combined_df
 
@@ -733,99 +694,53 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
         DataFrame with prices converted to GBP where applicable.
     """
 
-    # Standardise the Date column to datetime.date
-    def standardise_date(value):
-        try:
-            dt = pd.to_datetime(value, errors="coerce")
-            if pd.isna(dt):
-                return None  # Handle invalid dates
-            return dt.date()  # Convert to date only
-        except Exception as e:
-            logging.warning(f"Error parsing date '{value}': {e}")
-            return None
+    df = df.copy()
 
-    # Apply the standardisation function to the Date column
-    df["Date"] = df["Date"].apply(standardise_date)
+    # Ensure the Date column is properly formatted
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
+    df = df.dropna(subset=["Date"])  # Drop rows with invalid dates
 
-    # Validate Date column
-    if df["Date"].isna().any():
-        logging.warning("Some rows contain invalid or missing dates.")
-        # Remove these rows
-        df = df.dropna(subset=["Date"])
-
-    # Create exchange rate DataFrame with valid Date index
+    # Extract exchange rates for CURRENCY type into a new DataFrame
     exchange_rate_df = (
         df[df["Type"] == "CURRENCY"]
-        .rename(columns={"Old Price": "FX Rate"})
-        .set_index(["Date", "Ticker"])
+        .rename(columns={"Old Price": "FX Rate", "Ticker": "FX Ticker"})
+        .loc[:, ["Date", "FX Ticker", "FX Rate"]]
+        .sort_values(by=["Date", "FX Ticker"])
     )
 
-    # Prepare the output DataFrame
-    final_df = df.copy()
-    final_df["FX Code"] = ""
-    final_df["FX Rate"] = np.nan
-    final_df["Price"] = np.nan
-    final_df["Currency"] = "GBP"
+    # Standardise FX Code and FX Rate columns in the main DataFrame
+    df["FX Ticker"] = "-"
+    df["FX Rate"] = 1.0  # Default FX Rate (decimal ensured floating type)
+    df["Currency"] = "GBP"  # Default Currency
+    df["Price"] = np.nan  # Placeholder for converted prices
 
-    # Process each row
-    for index, row in final_df.iterrows():
-        currency = row["Original Currency"]
-        date = row["Date"]
-        price = row["Old Price"]
-        type = row["Type"]
+    # Handle rows with GBP and GBp directly
+    df.loc[df["Original Currency"] == "GBP", "FX Rate"] = 1.0
+    df.loc[df["Original Currency"] == "GBp", "FX Rate"] = 0.01
 
-        try:
-            # Skip conversion for specific quote types
-            if type in ["CURRENCY", "INDEX"]:
-                final_df.at[index, "FX Code"] = "-"
-                final_df.at[index, "FX Rate"] = 1
-                final_df.at[index, "Price"] = price
-                final_df.at[index, "Currency"] = currency
-                continue
+    # Identify non-GBP rows and assign FX Code
+    non_gbp_mask = ~df["Original Currency"].isin(["GBP", "GBp"])
+    fx_codes = df.loc[non_gbp_mask, "Original Currency"] + "GBP=X"
+    fx_codes[df["Original Currency"] == "USD"] = "GBP=X"  # USD treated as special case
+    df.loc[non_gbp_mask, "FX Ticker"] = fx_codes
 
-            # Handle GBP and GBp cases
-            if currency == "GBP":
-                fx_ticker = "-"
-                exchange_rate = 1
-            elif currency == "GBp":
-                fx_ticker = "-"
-                exchange_rate = 0.01
-            else:
-                # Create FX ticker for non-GBP currencies
-                fx_ticker = f"{currency}GBP=X" if currency != "USD" else "GBP=X"
-                # Retrieve exchange rate using date objects
-                try:
-                    exchange_rate = exchange_rate_df.loc[(date, fx_ticker), "FX Rate"]
-                except KeyError:
-                    logging.error(
-                        f"FX rate not found for {currency} ({fx_ticker}) on date {date}."
-                    )
-                    exchange_rate = np.nan
+    # Merge exchange rates back into the main DataFrame
+    df = df.merge(
+        exchange_rate_df,
+        how="left",
+        left_on=["Date", "FX Ticker"],
+        right_on=["Date", "FX Ticker"],
+        suffixes=("", "_merge"),
+    )
 
-            # Calculate the converted price
-            if not np.isnan(exchange_rate):
-                converted_price = price * exchange_rate
-            else:
-                converted_price = np.nan
+    # Populate FX Rate from merged data where available
+    df["FX Rate"] = df["FX Rate"].combine_first(df["FX Rate_merge"])
 
-            # Populate the row with updated data
-            final_df.at[index, "FX Code"] = fx_ticker
-            final_df.at[index, "FX Rate"] = exchange_rate
-            final_df.at[index, "Price"] = converted_price
-            final_df.at[index, "Currency"] = "GBP"
+    # Calculate the converted prices
+    df["Price"] = df["Old Price"] * df["FX Rate"].fillna(1)
 
-            # Log the conversion process
-            logging.debug(
-                f"Converted {row['Ticker']}: {price} {currency} -> {converted_price} GBP"
-            )
-
-        except Exception as e:
-            logging.error(f"Error processing row {index}: {e}")
-
-    # Remove rows where conversion failed (Price is NaN)
-    final_df = final_df.dropna(subset=["Price"])
-
-    return final_df
+    # Clean up unnecessary columns
+    return df[["Ticker", "Price", "Date"]]
 
 
 def process_converted_prices(
@@ -835,16 +750,20 @@ def process_converted_prices(
     Prepares the final DataFrame for CSV export.
 
     Args:
-        converted_df: DataFrame with converted prices.
+        converted_df: DataFrame with "Ticker", "Date", "Price"
 
     Returns:
         Processed DataFrame ready to be saved as CSV.
     """
     try:
-        output_csv = converted_df.copy()
 
-        # Select required columns
-        output_csv = output_csv[["Ticker", "Price", "Date"]]
+        if converted_df.empty:
+            logging.error(
+                "No data received. Verify that tickers and date ranges are correct. Exiting."
+            )
+            sys.exit(1)
+
+        output_csv = converted_df[["Ticker", "Price", "Date"]].copy()
 
         # Order by descending date
         output_csv = output_csv.sort_values(by="Date", ascending=False)
@@ -867,8 +786,7 @@ def format_path(full_path):
     return "\\" + full_path  # Just in case there's no parent directory
 
 
-@retry(Exception, tries=3)
-def save_to_csv(df: pd.DataFrame) -> bool:
+def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
     """
     Saves the DataFrame to a CSV file without headers.
 
@@ -879,51 +797,74 @@ def save_to_csv(df: pd.DataFrame) -> bool:
         True if saved successfully, False otherwise.
     """
     try:
-        # Build the output file path
-        CSV_file_name = config["paths"]["data_file"]
-        CSV_path = os.path.join(base_path, CSV_file_name)
-        short_CSV_path = format_path(CSV_path)
-
+        if df.empty:
+            logging.error("No data to save. Check earlier steps for errors.")
+            return False
         required_columns = ["Ticker", "Price", "Date"]
         if not all(col in df.columns for col in required_columns):
             logging.error(
-                f"Required columns are missing. Available columns are: {df.columns.tolist()}"
+                f"Missing required columns {required_cols} in data. Cannot save CSV. Exiting"
             )
-            return False
+            sys.exit(1)
 
+        # Build the output file path
+        file_path = f"{config['paths']['base']}/{config['paths']['data_file']}"
         # Save the DataFrame to CSV without headers
-        df.to_csv(CSV_path, index=False, header=False)
-
+        df.to_csv(file_path, index=False, header=False)
         # Log the save location
+        short_CSV_path = format_path(file_path)
         logging.info(f"Data successfully saved to: {short_CSV_path}")
 
         return True
 
     except Exception as e:
-        logging.exception(
-            f"An error occurred while saving the dataframe to a file called {CSV_file_name}"
-        )
+        logging.exception(f"An error occurred while saving to {short_CSV_path}")
         return False
 
 
-def clean_cache():
-    cache_dir = os.path.join(base_path, config["paths"]["cache"])
-    max_age_seconds = config["cache"]["max_age_days"] * 86400
+def clean_cache(config):
+    """
+    Cleans up cache files older than the configured maximum age.
+
+    Args:
+        config (dict): Configuration dictionary containing cache path and max age settings.
+
+    Returns:
+        bool: True if cleaning completes successfully, False otherwise.
+    """
+    cache_dir = os.path.join(config["paths"]["base"], config["paths"]["cache"])
+    max_age_seconds = config["cache"]["max_age_days"] * SECONDS_IN_A_DAY
     now = time.time()
 
+    if not os.path.exists(cache_dir) or not os.path.isdir(cache_dir):
+        logging.warning(
+            f"Cache directory does not exist or is not a directory: {cache_dir}"
+        )
+        return False
+
+    deleted_files = 0
     try:
         with os.scandir(cache_dir) as it:
             for entry in it:
                 if entry.is_file() and (now - entry.stat().st_mtime) > max_age_seconds:
-                    os.remove(entry.path)
-                    logging.info(
-                        f"Deleting cache older than {config["cache"]["max_age_days"]} days: {entry.name}"
-                    )
+                    try:
+                        os.remove(entry.path)
+                        deleted_files += 1
+                        logging.info(
+                            f"Deleted cache file: {entry.name}, older than {config['cache']['max_age_days']} days."
+                        )
+                    except Exception as remove_error:
+                        logging.error(
+                            f"Failed to delete file {entry.path}: {remove_error}"
+                        )
+
+        logging.debug(f"Total cache files deleted: {deleted_files}")
     except Exception as e:
         logging.error(
             f"Error cleaning cache at {cache_dir}: {e}. Check file permissions or existence of the directory."
         )
         return False
+
     return True
 
 
@@ -937,18 +878,11 @@ def is_elevated():
         return False
 
 
-def is_admin():
-    """
-    Alias for is_elevated to maintain consistency.
-    """
-    return is_elevated()
-
-
 def run_as_admin():
     """
     Re-runs the script with administrative privileges if not already elevated.
     """
-    if not is_admin():
+    if not is_elevated():
         # Re-run the script as admin
 
         return_code = ctypes.windll.shell32.ShellExecuteW(
@@ -1130,21 +1064,38 @@ def quicken_import():
 def main():
 
     try:
+        # Initialise
+        os.system("cls" if os.name == "nt" else "clear")
+        logging.info("Starting script.")
+
+        # Load the configuration
+        config = load_configuration("configuration.yaml")
+
+        # Call setup_logging early in the script
+        setup_logging(config)
 
         # Get elevation
         run_as_admin()
 
-        # Get 'raw' tickers from YAML file and FX tickers if required, validate and acquire metadata.
-        ticker_list = config["tickers"]
-        valid_tickers = get_tickers(ticker_list, set_maximum_tickers=5)
+        # Get 'raw' tickers from YAML file
+        tickers = config.get("tickers", [])
+        if not tickers:
+            logging.error(
+                "No tickers found. Please update your configuration. Exiting."
+            )
+            sys.exit(1)
+
+        # Validate and acquire metadata.
+        valid_tickers = get_tickers(tickers)
+        if not valid_tickers:
+            logging.error("No valid tickers to process. Exiting.")
+            sys.exit(1)
 
         # Fetch historical data
-        price_data = fetch_historical_data(valid_tickers)
-
-        # Validate if price_data is empty
+        price_data = fetch_historical_data(valid_tickers, config)
         if price_data.empty:
-            logging.error("No valid data fetched. Exiting script.")
-            return
+            logging.error("No valid data fetched. Exiting.")
+            sys.exit(1)
 
         # Convert prices to GBP
         processed_data = convert_prices(price_data)
@@ -1153,16 +1104,17 @@ def main():
         output_csv = process_converted_prices(processed_data)
 
         # Save data to CSV
-        save_to_csv(output_csv)
+        save_to_csv(output_csv, config)
 
         # Clean up cache
-        clean_cache()
+        clean_cache(config)
 
         # Quicken import sequence
         setup_pyautogui()
         quicken_import()
 
         # Pause to allow reading of terminal
+        logging.info("Script completed successfully.")
         if is_elevated():
             input("\n\t Press Enter to exit...\n\t")
 
@@ -1174,7 +1126,5 @@ def main():
 
 
 if __name__ == "__main__":
-
-   
 
     main()

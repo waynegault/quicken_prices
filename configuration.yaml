@@ -1,19 +1,26 @@
 # QuickenPrices Configuration: config.yaml
 
+
+
 home_currency: GBP
-collection:
-  period_years: 0.08
+
+#  Data period to collect in years (0.08 years ≈ 1 month,0.08 * 365 ≈ 29.2 days)
+collection_period_years: 0.04
+
+retries:
   max_retries: 3
   retry_delay: 2
 
 
 # Logging levels for terminal and logfile: "DEBUG", "INFO", "WARNING", "ERROR", "TEXT"
-logging:
-  levels:
-    file: DEBUG
-    terminal: DEBUG
+logging_level: 
+
+  file: DEBUG 
+  terminal: INFO
+log_file:
   max_bytes: 5242880
   backup_count: 5
+
 
 # Tickers to track
 tickers:
@@ -21,22 +28,16 @@ tickers:
   - 0P00018XAP.L
   - AMGN
   - BZG25.NYM
+  - GBP=X
  
-# Data period to collect in years (0.08 years ≈ 1 month,0.08 * 365 ≈ 29.2 days)
-period_years: 0.08
-
 
 # Application Paths - data files, logs, cache and quicken executable
 paths:
-  quicken: C:\Program Files (x86)\Quicken\qw.exe
-  data_file: data.csv # Data file 
-  log_file: prices.log # Log file 
+  data_file: data.csv # Data file name 
+  log_file: prices.log # Log file name 
   cache: cache # Directory for cache
 
-# Show startup initiation process
-clear_startup: False
 
 # Cache Settings
 cache:
   max_age_days: 30
-  cleanup_threshold: 200
