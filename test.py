@@ -1,30 +1,34 @@
 import yfinance as yf
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import pandas as pd
+import numpy as np
 
 
 def download_data(ticker_symbol, start, end):
-    # Convert start and end to datetime objects
-    start_date = datetime.strptime(start, "%Y-%m-%d")
-    end_date = datetime.strptime(end, "%Y-%m-%d") + timedelta(
-        days=1
-    )  # Add 1 day to end date
-
+    # assume start and end are datetime objects
     ticker = yf.Ticker(ticker_symbol)
     time.sleep(0.1)  # Rate limiting
     df = ticker.history(
-        start=start_date.strftime("%Y-%m-%d"),  # Convert back to string for yfinance
-        end=end_date.strftime("%Y-%m-%d"),
+        start=start, 
+        end=end,
         interval="1d",
     )
+    if df.empty:
+        # Create an empty DataFrame with the desired columns and data types
+        empty_df = pd.DataFrame(columns=["Date", "Old Price"])
+        empty_df["Date"] = pd.to_datetime(empty_df["Date"])  # Convert to datetime64
+        empty_df["Old Price"] = np.nan
+        return empty_df
     df = df.rename(columns={"Close": "Old Price"})
     df.reset_index(inplace=True)  # Reset the index to make Date a column
-    df["Date"] = df["Date"].dt.strftime("%Y-%m-%d")
+    # Convert the 'Date' column to UTC timezone
+    df["Date"] = df["Date"].dt.tz_convert("UTC")
     df = df[["Date", "Old Price"]]  # Select only the "Old Price" column
     return df
 
 
-data = download_data("MSFT", start="2024-12-02", end="2024-12-09")
+data = download_data("AMGN", start="2024-12-10", end="2024-12-11")
 
 print(data)
 print(data.dtypes)
