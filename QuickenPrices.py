@@ -381,9 +381,12 @@ def get_date_range(config: dict) -> tuple[pd.Timestamp.date, pd.Timestamp.date, 
     end_datetime = pd.Timestamp(end_date).date()
 
     # Calculate business days
-    business_days = busday_count(
-        start_datetime.strftime("%Y-%m-%d"), end_datetime.strftime("%Y-%m-%d")
-    )+1
+    business_days = (
+        busday_count(
+            start_datetime.strftime("%Y-%m-%d"), end_datetime.strftime("%Y-%m-%d")
+        )
+        + 1
+    )
     return start_datetime, end_datetime, business_days
 
 
@@ -544,13 +547,17 @@ def get_tickers(
 
 # Start inclusive, end exclusive
 def download_data(ticker_symbol, start, end):
-    # assume start and end are date datetime objects
+    # ensure start and end are datetime.date objects
+    start = start.date()
+    end = end.date()
+
     ticker = yf.Ticker(ticker_symbol)
     time.sleep(0.1)  # Rate limiting
 
     df = ticker.history(
         start=start,
-        end=end + timedelta(days=1),
+        # end=end + timedelta(days=1),
+        end=end,
         interval="1d",
     )
     if df.empty:
@@ -560,15 +567,18 @@ def download_data(ticker_symbol, start, end):
         empty_df["Old Price"] = np.nan
         return empty_df
     df = df.rename(columns={"Close": "Old Price"})
-    df.reset_index(inplace=True)  # Reset the index to make Date a column
-    # Convert the 'Date' column to UTC timezone
+    # Reset the index to make Date a column
+    df.reset_index(inplace=True) 
+    # Convert the 'Date' column to UTC timezone and extract only the date part
     df["Date"] = pd.to_datetime(df["Date"], utc=True).dt.date
+    # Filter rows based on the date range
+    df = df[(df["Date"] >= start) & (df["Date"] < end)]
     df = df[["Date", "Old Price"]]  # Select only the "Old Price" column
     return df
 
 
 def fetch_ticker_history(
-    ticker: str, start_date: datetime, end_date: datetime, config: Dict
+    ticker: str, start_date: datetime, end_date: datetime, required_business_days: set, config: Dict
 ) -> pd.DataFrame:
     """
     Fetches historical data for a ticker, using cached data where available and downloading missing data for business days.
@@ -579,40 +589,36 @@ def fetch_ticker_history(
         f"{ticker}.pkl",
     )
 
-    # Create the date range with timezone
-    required_business_days = sorted(
-        set(
-            date.date()
-            for date in pd.date_range(
-                start=start_date, end=end_date, freq="B", tz="UTC"
-            )
-        )
-    )
-
+    # Initialise
+    # create empty df with correct column types
     all_data = pd.DataFrame(
         columns=["Date", "Old Price"]
-    )  # create empty df with correct column types
+    )  
     all_data["Date"] = pd.to_datetime(all_data["Date"], utc=True).dt.date
     all_data["Old Price"] = np.nan
-
+    # Zero counter
     count = 0
-    dont_save_cache = 1  # Flag to prevent resaving cache
+    # Flag to prevent resaving cache
+    dont_save_cache = 1 
 
     logging.info(f"############# Seeking data for {ticker}")
     if os.path.exists(cache_file):
         logging.info(f"Loading {format_path(cache_file)}")
         cached_data = pd.read_pickle(cache_file)
-        cached_dates = sorted(set(cached_data["Date"]))
+        cached_data = cached_data.drop_duplicates(subset=["Date"]).sort_values("Date")
+        cached_data["Date"] = pd.to_datetime(cached_data["Date"])
+        cached_dates = cached_data["Date"]  # datetime64[ns]
 
         if not cached_data.empty:
             cached_min_date = cached_data["Date"].min()
             cached_max_date = cached_data["Date"].max()
 
             # Identify missing business days - returns the required_business_days that are not in cached_data["Date"]
-            missing_days = sorted(
-                set(day for day in required_business_days if day not in cached_dates)
-            )
-            if not missing_days:
+            missing_days = required_business_days[
+                ~required_business_days.isin(cached_dates)
+            ]
+
+            if missing_days.empty:
                 logging.info(
                     f"Using 100% cache {cached_min_date.strftime("%d/%m/%y")} - {cached_max_date.strftime("%d/%m/%y")}."
                 )
@@ -621,7 +627,6 @@ def fetch_ticker_history(
                 logging.info(
                     f"Got {len(cached_data)} {pluralise('day', len(cached_data))} cache between {cached_min_date.strftime("%d/%m/%y")} - {cached_max_date.strftime("%d/%m/%y")}. Try to download {len(missing_days)} {pluralise("day", len(missing_days))} more."
                 )
-
                 # Try to download missing dates in batches if contiguous or individually of not to minimise api calls
                 data_frames = []
                 s_date = None
@@ -642,9 +647,12 @@ def fetch_ticker_history(
                             # Dates are consecutive (excluding weekends)
                             e_date = date
                         else:
-                            # Fetch data for the current range
+                            # Fetch data only for dates in missing_days
                             try:
                                 fetched_data = download_data(ticker, s_date, e_date)
+                                # Filter fetched_data to only include dates from missing_days
+                                fetched_data = fetched_data[fetched_data['Date'].isin(missing_days)]
+
                                 if not fetched_data.empty:
                                     count += 1
                                     data_frames.append(fetched_data)
@@ -660,6 +668,8 @@ def fetch_ticker_history(
                 if s_date:
                     try:
                         fetched_data = download_data(ticker, s_date, e_date)
+                        fetched_data = fetched_data[fetched_data["Date"].isin(missing_days)]
+
                         if not fetched_data.empty:
                             count += 1
                             data_frames.append(fetched_data)
@@ -667,8 +677,6 @@ def fetch_ticker_history(
                         print(
                             f"Error fetching data for range {s_date} to {e_date}: {e}"
                         )
-
-                print(f"data_frames {data_frames}")
 
                 # Concatenate all fetched data into a single DataFrame
                 if data_frames:
@@ -678,7 +686,9 @@ def fetch_ticker_history(
                         logging.error(f"Error concatenating data frames: {e}")
                         fetched_data = pd.DataFrame()  # Fallback to an empty DataFrame
                 else:
-                    logging.debug("No data frames to concatenate. Returning empty DataFrame.")
+                    logging.debug(
+                        "No data frames to concatenate. Returning empty DataFrame."
+                    )
                     fetched_data = pd.DataFrame()
 
                 if not fetched_data.empty:
@@ -688,22 +698,23 @@ def fetch_ticker_history(
                     all_data = all_data.sort_values(by=["Date"], ascending=True)
                     dont_save_cache = 0  # Flag to save cache
                 else:
-                    logging.info(f"No new data available to download.")
+                    logging.info(f"No new data available. Using 100% cache.")
                     all_data = cached_data
                     dont_save_cache = 1  # Flag to prevent resaving cache
         else:
             logging.info(f"Cache found but empty. Downloading data.")
             all_data = download_data(ticker, start_date, end_date)
-            count += 1
-            dont_save_cache = 0
+            if not all_data.empty:
+                count += 1
+                dont_save_cache = 0
     else:
         logging.info(f"No cache found. Downloading data.")
         all_data = download_data(ticker, start_date, end_date)
-        count += 1
-        dont_save_cache = 0
+        if not all_data.empty:
+            count += 1
+            dont_save_cache = 0
 
     print(f"Count = {count}")
-    print(f"fetched_data\n{all_data}")
 
     # Process the fetched data
     if not all_data.empty and dont_save_cache == 0:
@@ -751,6 +762,13 @@ def fetch_historical_data(
         f"Seeking {bdays} business days of data, {start_date.strftime("%d/%m/%y")} - {end_date.strftime("%d/%m/%y")}.\n"
     )
 
+    # Create business date range
+    required_business_days = pd.date_range(start=start_date, end=end_date, freq="B", tz="UTC").date
+    # Convert to Series
+    required_business_days = pd.Series(required_business_days, name='Date')
+    # Ensure datetime64[ns] type
+    required_business_days = pd.to_datetime(required_business_days)
+    
     for ticker, earliest_date, type, currency in tickers:
         # Adjusted start date is the later of earliest_date or start_date
         adjusted_start_date = max(start_date, earliest_date or start_date)
@@ -765,7 +783,7 @@ def fetch_historical_data(
 
         try:
             # Fetch historical data (from cache or yfinance)
-            df = fetch_ticker_history(ticker, adjusted_start_date, end_date, config)
+            df = fetch_ticker_history(ticker, adjusted_start_date, end_date, required_business_days,config)
 
             # Validate fetched data
             if df.empty:
