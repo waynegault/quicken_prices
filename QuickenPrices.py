@@ -57,6 +57,17 @@ from pythonjsonlogger import jsonlogger
 # Constants
 SECONDS_IN_A_DAY = 86400
 
+DEFAULT_CONFIG = {
+    "home_currency": "GBP",
+    "collection_period_years": 0.08,
+    "retries": {"max_retries": 3, "retry_delay": 2},
+    "logging_level": {"file": "DEBUG", "terminal": "DEBUG"},
+    "log_file": {"max_bytes": 5242880, "backup_count": 5},
+    "tickers": ["^FTSE"],
+    "paths": {"data_file": "data.csv", "log_file": "prices.log", "cache": "cache"},
+    "cache": {"max_age_days": 30},
+}
+
 
 # Utility to recursively apply default settings
 def apply_defaults(
@@ -132,7 +143,7 @@ def find_quicken_via_registry() -> Optional[str]:
     ]
     for path in standard_paths:
         if os.path.isfile(path):
-            logging.info(f"Quicken executable found at standard path: {path}")
+            logging.debug(f"Quicken executable found at standard path: {path}")
             return path
     logging.error(
         "Quicken executable not found in registry or standard installation paths."
@@ -152,7 +163,7 @@ def validate_quicken_path(provided_path: str) -> Optional[str]:
         Validated path to the Quicken executable or None if not found.
     """
     if os.path.isfile(provided_path):
-        logging.info(f"Quicken executable found at provided path: {provided_path}")
+        logging.debug(f"Quicken executable found at provided path: {provided_path}")
         return provided_path
     else:
         logging.warning(
@@ -171,25 +182,12 @@ def validate_quicken_path(provided_path: str) -> Optional[str]:
         ]
         for path in standard_paths:
             if os.path.isfile(path):
-                logging.info(f"Quicken executable found at standard path: {path}")
+                logging.debug(f"Quicken executable found at standard path: {path}")
                 return path
         logging.error(
             "Quicken executable not found in provided, registry, or standard paths."
         )
         return None
-
-
-# Load configuration with defaults
-DEFAULT_CONFIG = {
-    "home_currency": "GBP",
-    "collection_period_years": 0.08,
-    "retries": {"max_retries": 3, "retry_delay": 2},
-    "logging_level": {"file": "DEBUG", "terminal": "DEBUG"},
-    "log_file": {"max_bytes": 5242880, "backup_count": 5},
-    "tickers": ["^FTSE"],
-    "paths": {"data_file": "data.csv", "log_file": "prices.log", "cache": "cache"},
-    "cache": {"max_age_days": 30},
-}
 
 
 def load_configuration(config_file: str = "configuration.yaml") -> Dict[str, Any]:
@@ -209,7 +207,7 @@ def load_configuration(config_file: str = "configuration.yaml") -> Dict[str, Any
         logging.info(f"Default {config_file} created at {config_path}.")
     else:
         # Log that the local YAML file is found and being used
-        logging.info(f"Using {config_file} found at {base_path}.")
+        logging.debug(f"Using {config_file} found at {base_path}.")
 
     # Attempt to load configuration file
     try:
@@ -235,7 +233,7 @@ def load_configuration(config_file: str = "configuration.yaml") -> Dict[str, Any
 
     if validated_quicken_path:
         final_config["paths"]["quicken"] = validated_quicken_path
-        logging.info(f"Using Quicken found at: {validated_quicken_path}")
+        logging.debug(f"Using Quicken found at: {validated_quicken_path}")
     else:
         logging.error("Quicken executable not found.")
         print(
@@ -304,7 +302,7 @@ def setup_logging(config: Dict[str, any]) -> None:
     logging.getLogger().addHandler(console_handler)
     logging.getLogger().setLevel(logging.DEBUG)
 
-    logging.info(f"Log file at: {log_file_path}")
+    logging.info(f"Log at: {log_file_path}")
 
 
 def retry(
@@ -493,7 +491,7 @@ def get_tickers(
         logging.error("No tickers defined in YAML file. Exiting.")
         sys.exit(1)
 
-    logging.info(
+    logging.debug(
         f"Validating {len(tickers)} user {pluralise("ticker",len(tickers))}..."
     )
     valid_tickers = validate_tickers(tickers)
@@ -526,7 +524,7 @@ def get_tickers(
 
     if fx_tickers:
         # Validate FX tickers
-        logging.info(
+        logging.debug(
             f"Validating {len(fx_tickers)} FX {pluralise("ticker",len(fx_tickers))}..."
         )
         valid_fx_tickers = validate_tickers(list(fx_tickers))
@@ -538,8 +536,8 @@ def get_tickers(
         logging.warning("No new FX tickers required.")
         all_valid_tickers = valid_tickers
 
-    logging.info(
-        f"Validated {len(all_valid_tickers)} {pluralise('ticker',len(all_valid_tickers))} in total."
+    logging.debug(
+        f"Validated {len(all_valid_tickers)} {pluralise('ticker',len(all_valid_tickers))} in total.\n"
     )
 
     return all_valid_tickers
@@ -607,7 +605,7 @@ def fetch_ticker_history(
 
     logging.info(f"############# Seeking data for {ticker}")
     if os.path.exists(cache_file):
-        logging.info(f"Loading {format_path(cache_file)}")
+        logging.debug(f"Loading {format_path(cache_file)}")
         cached_data = pd.read_pickle(cache_file)
         cached_data = cached_data.drop_duplicates(subset=["Date"]).sort_values("Date")
         cached_data["Date"] = pd.to_datetime(cached_data["Date"])
@@ -628,11 +626,11 @@ def fetch_ticker_history(
                 )
                 all_data = cached_data
             else:
-                logging.info(
+                logging.debug(
                     f"Got {len(cached_data)} {pluralise('day', len(cached_data))} cache between {cached_min_date.strftime("%d/%m/%y")} - {cached_max_date.strftime("%d/%m/%y")}. Try to download {len(missing_days)} {pluralise("day", len(missing_days))} more."
                 )
-                print("Missing Dates")
-                print(missing_days)
+                logging.debug(f"Missing dates: {', '.join(missing_days.dt.strftime('%Y-%m-%d'))}")
+            
                 # Try to download missing dates in batches if contiguous or individually of not to minimise api calls
                 data_frames = [
                     pd.DataFrame(columns=["Date", "Old Price"], dtype=object)
@@ -697,7 +695,6 @@ def fetch_ticker_history(
                     try:
                         fetched_data = pd.concat(data_frames, ignore_index=True)
 
-
                     except Exception as e:
                         logging.error(f"Error concatenating data frames: {e}")
                         fetched_data = pd.DataFrame()  # Fallback to an empty DataFrame
@@ -716,7 +713,7 @@ def fetch_ticker_history(
                     all_data = all_data.sort_values(by=["Date"], ascending=True)
 
                     dont_save_cache = 0  # Flag to save cache
-     
+
                 else:
                     logging.info(f"No new data available. Using 100% cache.")
                     all_data = cached_data
@@ -724,7 +721,6 @@ def fetch_ticker_history(
         else:
             logging.info(f"Cache found but empty. Downloading data.")
             all_data = download_data(ticker, start_date, end_date)
-
 
             if not all_data.empty:
 
@@ -739,12 +735,12 @@ def fetch_ticker_history(
             count += 1
             dont_save_cache = 0
 
-    logging.info(f"Count = {count}")
+    logging.debug(f"Count = {count}")
 
     # Process the fetched data
 
     if not all_data.empty and dont_save_cache == 0:
- 
+
         required_columns = {"Date", "Old Price"}
         missing_columns = required_columns - set(all_data.columns)
         if missing_columns:
@@ -763,9 +759,7 @@ def fetch_ticker_history(
         logging.info(
             f"Saved {len(all_data)} business days {all_data["Date"].min().strftime("%d/%m/%y")} - {all_data["Date"].max().strftime("%d/%m/%y")} to {format_path(cache_file)}."
         )
-    logging.info(
-        f"# end fetch_ticker_history for {ticker} #####################################\n"
-    )
+    logging.debug(f"############# end fetch_ticker_history for {ticker}\n")
 
     return all_data
 
@@ -786,7 +780,7 @@ def fetch_historical_data(
     start_date, end_date, bdays = get_date_range(config)
     records = []
     logging.info(
-        f"Seeking {bdays} business days of data, {start_date.strftime("%d/%m/%y")} - {end_date.strftime("%d/%m/%y")}.\n"
+        f"Seeking {bdays} business {pluralise('day',bdays)}  of data, {start_date.strftime("%d/%m/%y")} - {end_date.strftime("%d/%m/%y")}.\n"
     )
 
     # Create business date range
@@ -795,7 +789,7 @@ def fetch_historical_data(
     required_business_days = pd.Series(required_business_days, name='Date')
     # Ensure datetime64[ns] type
     required_business_days = pd.to_datetime(required_business_days)
-    
+
     for ticker, earliest_date, type, currency in tickers:
         # Adjusted start date is the later of earliest_date or start_date
         adjusted_start_date = max(start_date, earliest_date or start_date)
@@ -837,18 +831,20 @@ def fetch_historical_data(
         except Exception as e:
             logging.error(f"Failed to fetch data: {e}")
             logging.info(
-                "fetch_historical_data exception #############################################\n"
+                "############################ Fetch_historical_data exception #############################################\n"
             )
 
     # If no valid data was fetched, log an error and return an empty DataFrame
     if not records:
         logging.error(
-            f"No data fetched for {bdays} business days of data, {start_date.strftime("%d/%m/%y")} - {end_date.strftime("%d/%m/%y")}. Check your internet connection, ticker validity, or date ranges."
+            f"############################ No data fetched for {bdays} business days of data, {start_date.strftime("%d/%m/%y")} - {end_date.strftime("%d/%m/%y")}. Check your internet connection, ticker validity, or date ranges."
         )
         return pd.DataFrame()
 
     # Combine all DataFrames into one
     combined_df = pd.concat(records, ignore_index=True)
+
+    logging.info(f"############################ Got {len(combined_df)} {pluralise('record',len(combined_df))} across {bdays} business {pluralise('day',bdays)} of data\n")
 
     return combined_df
 
@@ -910,6 +906,8 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     df["Price"] = df["Old Price"] * df["FX Rate"].fillna(1)
 
     # Clean up unnecessary columns
+    c = df[~df["FX Ticker"].str.contains("-")].shape[0]
+    logging.debug(f"{c} prices converted.\n")
     return df[["Ticker", "Price", "Date"]]
 
 
@@ -983,7 +981,7 @@ def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
         df.to_csv(file_path, index=False, header=False)
         # Log the save location
         short_CSV_path = format_path(file_path)
-        logging.info(f"Data successfully saved to: {short_CSV_path}")
+        logging.info(f"Data successfully saved to: {short_CSV_path}\n")
 
         return True
 
@@ -1005,6 +1003,7 @@ def clean_cache(config):
     cache_dir = os.path.join(config["paths"]["base"], config["paths"]["cache"])
     max_age_seconds = config["cache"]["max_age_days"] * SECONDS_IN_A_DAY
     now = time.time()
+    logging.debug("Cache cleaning.")
 
     if not os.path.exists(cache_dir) or not os.path.isdir(cache_dir):
         logging.warning(
@@ -1020,15 +1019,17 @@ def clean_cache(config):
                     try:
                         os.remove(entry.path)
                         deleted_files += 1
-                        logging.info(
-                            f"Deleted cache file: {entry.name}, older than {config['cache']['max_age_days']} days."
+                        logging.debug(
+                            f"{entry.name} deleted. Older than {config['cache']['max_age_days']} {pluralise('day', config['cache']['max_age_days'])}."
                         )
                     except Exception as remove_error:
                         logging.error(
                             f"Failed to delete file {entry.path}: {remove_error}"
                         )
 
-        logging.debug(f"Total cache files deleted: {deleted_files}")
+        logging.debug(
+            f"{deleted_files} cache {pluralise('file', deleted_files)} deleted.\n"
+        )
     except Exception as e:
         logging.error(
             f"Error cleaning cache at {cache_dir}: {e}. Check file permissions or existence of the directory."
@@ -1060,26 +1061,27 @@ def run_as_admin():
         )
         if return_code == 5:
             # User rejected the elevation prompt
-            logging.info("Elevation request cancelled.")
+            logging.debug("Elevation request cancelled.")
 
         elif return_code == 42:
             # User accepted elevation prompt
+            logging.debug("Continuing elevated.")
             exit(0)
         else:
-            logging.warning(f"Unknown situation. Code: {return_code}")
+            logging.warning(f"Unknown elevation situation. Code: {return_code}")
             exit(0)
 
 
 @retry(exceptions=(RuntimeError, IOError), tries=3, delay=2, backoff=2)
-def import_data_file():
-
+def import_data_file(config):
     try:
         output_file_name = config["paths"]["data_file"]
+        base_path = config["paths"]["base"]
         filename = os.path.join(base_path, output_file_name)
 
         # Type the file name into the dialog
         pyautogui.typewrite(filename, interval=0.01)
-        time.sleep(0.3)  # Small delay before hitting enter for stability
+        time.sleep(0.5)  # Small delay before hitting enter for stability
         pyautogui.press("enter")
 
         # Wait to get to the price import success dialogue
@@ -1089,11 +1091,12 @@ def import_data_file():
                 "Quicken XG 2004 - Home - [Investing Centre]"
             )
             if windows:
-                time.sleep(1.5)
+                time.sleep(2)
                 pyautogui.press("enter")
                 logging.info(
-                    f"Successfully imported {format_path(filename)} to Quicken at {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+                    f"Successfully imported {format_path(filename)} at {datetime.now().strftime('%d/%m/%Y %H:%M')}"
                 )
+                time.sleep(0.5)
                 return True
             time.sleep(0.5)
 
@@ -1116,7 +1119,7 @@ def open_import_dialog():
             if windows:
                 time.sleep(0.5)
                 return True
-            time.sleep(1)
+            time.sleep(0.5)
 
         return True
     except Exception as e:
@@ -1139,7 +1142,7 @@ def navigate_to_portfolio():
             if windows:
                 time.sleep(0.5)
                 return True
-            time.sleep(1)
+            time.sleep(0.5)
 
         logging.error("Could not get to portfolio page within the expected time.")
         return False
@@ -1150,8 +1153,7 @@ def navigate_to_portfolio():
 
 
 @retry(exceptions=(Exception,), tries=3, delay=2, backoff=2)
-def open_quicken():
-
+def open_quicken(config):
     quicken_path = config["paths"]["quicken"]
     try:
         # Check if Quicken is already open
@@ -1159,33 +1161,40 @@ def open_quicken():
         if len(windows) > 0:
             quicken_window = windows[0]
             quicken_window.activate()  # Bring the existing Quicken window to the foreground
+            logging.info("Quicken is already open.")
             return True
 
         # If not open, launch Quicken
-
-        subprocess.Popen([quicken_path], shell=True)
+        logging.info("Launching Quicken...")
+        process = subprocess.Popen([quicken_path], shell=True)
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"Failed to launch Quicken. Process terminated immediately."
+            )
 
         # Wait for the Quicken window to appear
         start_time = time.time()
         while time.time() - start_time < 30:
             windows = gw.getWindowsWithTitle("Quicken XG 2004")
             if windows:
-                time.sleep(0.5)
-                # Temporarily disable Ctrl+Alt+Del to prevent accidental interruption
-                pyautogui.hotkey("ctrl", "alt", "del")
+                logging.info("Quicken window found.")
                 return True
             time.sleep(1)
 
-        # If we cannot find the window
         logging.error("Quicken window did not appear within the expected time.")
         return False
 
+    except FileNotFoundError:
+        logging.error(
+            f"Quicken executable not found at {quicken_path}. Please check the path."
+        )
+        return False
     except Exception as e:
         logging.error(f"Failed to open Quicken: {e}")
         return False
 
 
-def execute_import_sequence():
+def execute_import_sequence(config):
     """
     Execute the sequence of steps for importing data.
 
@@ -1193,20 +1202,33 @@ def execute_import_sequence():
         bool: True if all steps completed successfully
     """
     steps = [
-        (open_quicken, "Opening Quicken..."),
-        (navigate_to_portfolio, "Navigating to Portfolio view..."),
-        (open_import_dialog, "Opening import dialog..."),
-        (import_data_file, "Importing data file..."),
+        (open_quicken, "Opening Quicken"),
+        (navigate_to_portfolio, "Navigating to Portfolio view"),
+        (open_import_dialog, "Opening import dialog"),
+        (import_data_file, "Importing data file"),
     ]
 
     for step_function, message in steps:
-        logging.info(message)
-        if not step_function():
-            logging.error(f"Step failed: {message}")
+        logging.info(f"Starting step: {message}")
+        try:
+            # Call the step function with necessary arguments if applicable
+            if step_function == import_data_file:
+                result = step_function(config)
+            elif step_function == open_quicken:
+                result = step_function(config)
+            else:
+                result = step_function()
+
+            if not result:
+                logging.error(f"Step '{message}' failed.")
+                return False
+
+            logging.debug(f"Step '{message}' completed successfully.")
+        except Exception as e:
+            logging.error(f"Error in step '{message}': {e}")
             return False
 
-    # Reenabling Ctrl+Alt+Del previously disabled to prevent accidental interruption
-    pyautogui.hotkey("ctrl", "alt", "del")
+    logging.debug("All steps completed successfully.")
     return True
 
 
@@ -1216,19 +1238,21 @@ def setup_pyautogui():
     pyautogui.PAUSE = 0.3  # Delay between actions
 
 
-def quicken_import():
-
+def quicken_import(config):
     try:
-
         if is_elevated():
+            return execute_import_sequence(config)
+        else:
 
-            return execute_import_sequence()
-
-        return
-
+            file_path = f"{config['paths']['base']}/{config['paths']['data_file']}"
+            short_CSV_path = format_path(file_path)        
+            logging.info(
+                f"Can't automate file import. Open Quicken and upload {short_CSV_path} manually."
+            )
+            return False
     except Exception as e:
         logging.error(f"Error during Quicken import: {e}")
-        return
+        return False
 
 
 def main():
@@ -1281,7 +1305,7 @@ def main():
 
         # Quicken import sequence
         setup_pyautogui()
-        quicken_import()
+        quicken_import(config)
 
         # Pause to allow reading of terminal
         logging.info("Script completed successfully.")
