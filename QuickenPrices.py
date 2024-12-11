@@ -547,33 +547,37 @@ def get_tickers(
 
 # Start inclusive, end exclusive
 def download_data(ticker_symbol, start, end):
-    # ensure start and end are datetime.date objects
-    start = start.date()
-    end = end.date()
+    # Ensure start and end are datetime.date objects
+    start = pd.Timestamp(start).date()
+    end = pd.Timestamp(end).date()
 
     ticker = yf.Ticker(ticker_symbol)
     time.sleep(0.1)  # Rate limiting
 
     df = ticker.history(
         start=start,
-        # end=end + timedelta(days=1),
         end=end,
         interval="1d",
     )
     if df.empty:
         # Create an empty DataFrame with the desired columns and data types
         empty_df = pd.DataFrame(columns=["Date", "Old Price"])
-        empty_df["Date"] = pd.to_datetime(empty_df["Date"], utc=True)
+        empty_df["Date"] = pd.to_datetime(empty_df["Date"]).dt.tz_localize(
+            None
+        )  # Ensure tz-naive
         empty_df["Old Price"] = np.nan
         return empty_df
+
+    # Rename and process the DataFrame
     df = df.rename(columns={"Close": "Old Price"})
-    # Reset the index to make Date a column
-    df.reset_index(inplace=True) 
-    # Convert the 'Date' column to UTC timezone and extract only the date part
-    df["Date"] = pd.to_datetime(df["Date"], utc=True).dt.date
+    df.reset_index(inplace=True)  # Make the Date column explicit
+    df["Date"] = pd.to_datetime(df["Date"]).dt.tz_localize(None)  # Ensure tz-naive
+
     # Filter rows based on the date range
-    df = df[(df["Date"] >= start) & (df["Date"] < end)]
-    df = df[["Date", "Old Price"]]  # Select only the "Old Price" column
+    df = df[(df["Date"].dt.date >= start) & (df["Date"].dt.date < end)]
+
+    # Select the relevant columns
+    df = df[["Date", "Old Price"]]
     return df
 
 
@@ -627,8 +631,14 @@ def fetch_ticker_history(
                 logging.info(
                     f"Got {len(cached_data)} {pluralise('day', len(cached_data))} cache between {cached_min_date.strftime("%d/%m/%y")} - {cached_max_date.strftime("%d/%m/%y")}. Try to download {len(missing_days)} {pluralise("day", len(missing_days))} more."
                 )
+                print("Missing Dates")
+                print(missing_days)
                 # Try to download missing dates in batches if contiguous or individually of not to minimise api calls
-                data_frames = []
+                data_frames = [
+                    pd.DataFrame(columns=["Date", "Old Price"], dtype=object)
+                ]
+                data_frames[0]["Date"] = pd.to_datetime(data_frames[0]["Date"], utc=True)
+                data_frames[0]["Old Price"] = np.nan
                 s_date = None
                 e_date = None
 
@@ -651,13 +661,12 @@ def fetch_ticker_history(
                             try:
                                 fetched_data = download_data(ticker, s_date, e_date)
                                 # Filter fetched_data to only include dates from missing_days
-                                fetched_data = fetched_data[fetched_data['Date'].isin(missing_days)]
-
+                                # fetched_data = fetched_data[fetched_data['Date'].isin(missing_days)]
                                 if not fetched_data.empty:
                                     count += 1
                                     data_frames.append(fetched_data)
                             except Exception as e:
-                                print(
+                                logging.error(
                                     f"Error fetching data for range  {s_date} to {e_date}: {e}"
                                 )
                             # Start a new range
@@ -665,23 +674,30 @@ def fetch_ticker_history(
                             e_date = date
 
                 # Handle the final range
+
                 if s_date:
+
                     try:
                         fetched_data = download_data(ticker, s_date, e_date)
-                        fetched_data = fetched_data[fetched_data["Date"].isin(missing_days)]
+                        # fetched_data = fetched_data[fetched_data["Date"].isin(missing_days)]
 
                         if not fetched_data.empty:
+
                             count += 1
                             data_frames.append(fetched_data)
                     except Exception as e:
-                        print(
+                        logging.error(
                             f"Error fetching data for range {s_date} to {e_date}: {e}"
                         )
 
                 # Concatenate all fetched data into a single DataFrame
+
                 if data_frames:
+
                     try:
                         fetched_data = pd.concat(data_frames, ignore_index=True)
+
+
                     except Exception as e:
                         logging.error(f"Error concatenating data frames: {e}")
                         fetched_data = pd.DataFrame()  # Fallback to an empty DataFrame
@@ -692,11 +708,15 @@ def fetch_ticker_history(
                     fetched_data = pd.DataFrame()
 
                 if not fetched_data.empty:
+
                     all_data = pd.concat(
                         [cached_data, fetched_data], ignore_index=True
                     ).drop_duplicates()
+
                     all_data = all_data.sort_values(by=["Date"], ascending=True)
+
                     dont_save_cache = 0  # Flag to save cache
+     
                 else:
                     logging.info(f"No new data available. Using 100% cache.")
                     all_data = cached_data
@@ -704,20 +724,27 @@ def fetch_ticker_history(
         else:
             logging.info(f"Cache found but empty. Downloading data.")
             all_data = download_data(ticker, start_date, end_date)
+
+
             if not all_data.empty:
+
                 count += 1
                 dont_save_cache = 0
     else:
         logging.info(f"No cache found. Downloading data.")
         all_data = download_data(ticker, start_date, end_date)
+
         if not all_data.empty:
+
             count += 1
             dont_save_cache = 0
 
-    print(f"Count = {count}")
+    logging.info(f"Count = {count}")
 
     # Process the fetched data
+
     if not all_data.empty and dont_save_cache == 0:
+ 
         required_columns = {"Date", "Old Price"}
         missing_columns = required_columns - set(all_data.columns)
         if missing_columns:
