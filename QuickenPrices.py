@@ -846,6 +846,12 @@ def fetch_historical_data(
 
     logging.info(f"############################ Got {len(combined_df)} {pluralise('record',len(combined_df))} across {bdays} business {pluralise('day',bdays)} of data\n")
 
+    latest_data = combined_df.sort_values("Date", ascending=False).drop_duplicates(
+        subset=["Ticker"], keep="first"
+    )
+
+    print(latest_data)
+
     return combined_df
 
 
