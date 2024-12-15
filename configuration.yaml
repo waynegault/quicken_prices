@@ -3,7 +3,7 @@
 # Tickers to track
 tickers:
   - 0P00013P6I.L
-  - 0P00018XAP.L
+  # - 0P00018XAP.L
   - AMGN
   # - BZG25.NYM
   # - CUKX.L
@@ -27,7 +27,7 @@ tickers:
 home_currency: GBP
 
 #  Data period to collect in years (0.08 years ≈ 1 month,0.08 * 365 ≈ 29.2 days)
-collection_period_years: 0.08
+collection_period_years: 0.04
 
 retries:
   max_retries: 3
@@ -37,7 +37,7 @@ retries:
 # Logging levels for terminal and logfile: "DEBUG", "INFO", "WARNING", "ERROR", "TEXT"
 logging_level: 
   file: DEBUG 
-  terminal: INFO
+  terminal: DEBUG
 
 log_file:
   max_bytes: 5242880

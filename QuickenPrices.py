@@ -444,6 +444,17 @@ def ensure_tz_aware(df: pd.DataFrame) -> pd.DataFrame:
             df["Date"] = df["Date"].dt.tz_convert("UTC")
     return df
 
+def normalize_datetime(df, date_column="Date"):
+    """
+    Ensures the date column in a DataFrame is tz-aware and standardized to UTC.
+    """
+    if date_column in df.columns:
+        df[date_column] = pd.to_datetime(df[date_column])
+        if df[date_column].dt.tz is None:
+            df[date_column] = df[date_column].dt.tz_localize("UTC")
+        else:
+            df[date_column] = df[date_column].dt.tz_convert("UTC")
+    return df
 
 
 
@@ -558,39 +569,68 @@ def get_tickers(
     return all_valid_tickers
 
 
+def normalize_datetime(df, column_name):
+    """
+    Ensures the datetime column is tz-aware and localized to UTC.
+    Args:
+        df: DataFrame with a datetime column.
+        column_name: Name of the datetime column.
+    Returns:
+        DataFrame with normalized datetime column.
+    """
+    if column_name in df.columns:
+        df[column_name] = pd.to_datetime(df[column_name], utc=True)
+    return df
 
 def download_data(ticker_symbol, start, end):
     """
-    Downloads historical data for a ticker.
-    Ensures start and end are tz-aware.
-
+    Downloads historical data for a ticker from yfinance and ensures consistency.
     Args:
-        ticker_symbol: The ticker symbol.
-        start: Start date.
-        end: End date.
-
+        ticker_symbol: The ticker symbol to fetch data for.
+        start: Start date (tz-aware).
+        end: End date (tz-aware).
     Returns:
-        DataFrame with historical data, tz-aware and localized to UTC.
+        A cleaned DataFrame with historical data.
     """
+    # Ensure the start and end dates are UTC-aware
     start = start.tz_localize("UTC") if start.tz is None else start.tz_convert("UTC")
     end = end.tz_localize("UTC") if end.tz is None else end.tz_convert("UTC")
+    
+    logging.info(f"Downloading data for {ticker_symbol} from {start.date()} to {end.date()}")
 
+    # Fetch data using yfinance
     ticker = yf.Ticker(ticker_symbol)
-    df = ticker.history(start=start.date(), end=end.date(), interval="1d")
-
-    if df.empty:
+    try:
+        raw_data = ticker.history(start=start.date(), end=end.date(), interval="1d")
+    except Exception as e:
+        logging.error(f"Error fetching data for {ticker_symbol}: {e}")
         return pd.DataFrame(columns=["Date", "Old Price"])
 
-    df.reset_index(inplace=True)
+    if raw_data.empty:
+        logging.warning(f"No data returned for {ticker_symbol}.")
+        return pd.DataFrame(columns=["Date", "Old Price"])
 
-    # Handle missing `Close` column
-    if "Close" in df.columns:
-        df.rename(columns={"Close": "Old Price"}, inplace=True)
+    # Reset index to ensure 'Date' is a column
+    raw_data.reset_index(inplace=True)
+
+    # Add logging for raw data
+    logging.debug(f"Raw data for {ticker_symbol}:\n{raw_data.head()}")
+
+    # Handle missing `Close` column and rename to `Old Price`
+    if "Close" in raw_data.columns:
+        raw_data.rename(columns={"Close": "Old Price"}, inplace=True)
     else:
-        logging.warning(f"Ticker {ticker_symbol} is missing 'Close' data. Adding placeholder 'Old Price'.")
-        df["Old Price"] = pd.NA
+        logging.warning(f"{ticker_symbol} missing 'Close' column. Adding placeholder.")
+        raw_data["Old Price"] = pd.NA
 
-    return ensure_tz_aware(df)
+    # Normalize datetime column
+    raw_data = normalize_datetime(raw_data, "Date")
+
+    # Cleaned data logging
+    cleaned_data = raw_data[["Date", "Old Price"]]
+    logging.debug(f"Cleaned data for {ticker_symbol}:\n{cleaned_data.head()}")
+
+    return cleaned_data
 
 
 def fetch_missing_data(ticker: str, missing_days: set) -> pd.DataFrame:
@@ -668,24 +708,10 @@ def fetch_missing_data(ticker: str, missing_days: set) -> pd.DataFrame:
     # Return an empty DataFrame if no data was fetched
     return pd.DataFrame(columns=["Date", "Old Price"])
 
+
 def fetch_ticker_history(ticker, start_date, end_date, required_business_days, config):
-    """
-    Fetch historical data for a ticker with accurate validation and cache handling.
-
-    Args:
-        ticker: The ticker symbol.
-        start_date: Start date for data fetching.
-        end_date: End date for data fetching.
-        required_business_days: List of required business days.
-        config: Configuration dictionary.
-
-    Returns:
-        DataFrame containing historical data for the ticker.
-    """
     start_date = pd.Timestamp(start_date).tz_localize("UTC")
     end_date = pd.Timestamp(end_date).tz_localize("UTC")
-
-    # Normalize required business days to remove time component but keep as datetime
     required_business_days = [
         pd.Timestamp(day).normalize().tz_localize("UTC") for day in required_business_days
     ]
@@ -695,10 +721,8 @@ def fetch_ticker_history(ticker, start_date, end_date, required_business_days, c
     cache_file = os.path.join(cache_dir, f"{ticker}.pkl")
 
     all_data = pd.DataFrame(columns=["Date", "Old Price"])
-    today = pd.Timestamp.now().normalize().tz_localize("UTC")
     cache_updated = False
 
-    # Load cache if available
     cached_dates = set()
     permanently_missing_dates = set()
     if os.path.exists(cache_file):
@@ -707,22 +731,19 @@ def fetch_ticker_history(ticker, start_date, end_date, required_business_days, c
         cached_dates = set(cached_data["Date"])
         all_data = cached_data
 
-        # Identify permanently missing dates (Old Price = None)
         permanently_missing_dates = set(
             cached_data.loc[cached_data["Old Price"].isna(), "Date"]
         )
     else:
         logging.info(f"Ticker {ticker}: No cache available. Initializing fresh cache.")
 
-    # Identify missing days that are not permanently missing
     missing_days = set(required_business_days) - cached_dates - permanently_missing_dates
     if not missing_days:
         logging.info(f"Ticker {ticker}: All required days are either in cache or permanently missing. Skipping download.")
         return all_data
 
-    # Fetch missing data from yfinance
     min_date = min(missing_days)
-    max_date = max(missing_days) + pd.Timedelta(days=1)  # yfinance excludes end_date
+    max_date = max(missing_days) + pd.Timedelta(days=1)
     logging.info(
         f"Ticker {ticker}: Fetching data from yfinance for {len(missing_days)} missing days ({min_date.date()} to {max_date.date()})."
     )
@@ -730,48 +751,47 @@ def fetch_ticker_history(ticker, start_date, end_date, required_business_days, c
     try:
         fetched_data = download_data(ticker, min_date, max_date)
 
-        if not fetched_data.empty:
+        if not fetched_data.empty and {"Date", "Old Price"}.issubset(fetched_data.columns):
             fetched_data["Date"] = pd.to_datetime(fetched_data["Date"]).dt.normalize()
             valid_fetched_dates = set(fetched_data["Date"])
 
-            # Determine genuinely permanently missing days
             permanently_missing_days = missing_days - valid_fetched_dates
             if permanently_missing_days:
                 logging.warning(
                     f"Ticker {ticker}: {len(permanently_missing_days)} permanently missing days: {sorted(permanently_missing_days)}."
                 )
-                # Record permanently missing days in the cache
                 permanently_missing_df = pd.DataFrame(
                     {"Date": list(permanently_missing_days), "Old Price": None}
                 )
-                # Exclude empty DataFrames
-                if not permanently_missing_df.empty:
-                    all_data = pd.concat(
-                        [all_data, permanently_missing_df], ignore_index=True
-                    ).drop_duplicates(subset=["Date"])
-                cache_updated = True
 
-            # Add valid fetched data
-            if not fetched_data.empty:
-                all_data = pd.concat(
-                    [all_data, fetched_data], ignore_index=True
-                ).drop_duplicates(subset=["Date"])
+                valid_dfs = [
+                    df for df in [all_data, permanently_missing_df, fetched_data]
+                    if not df.empty and not df.dropna(how="all").empty and {"Date", "Old Price"}.issubset(df.columns)
+                ]
+
+                for idx, df in enumerate(valid_dfs):
+                    logging.debug(f"Valid DataFrame #{idx} for {ticker} - Shape: {df.shape}")
+                    logging.debug(f"Columns: {df.columns.tolist()}")
+                    logging.debug(f"Sample:\n{df.head()}")
+
+                if valid_dfs:
+                    all_data = pd.concat(valid_dfs, ignore_index=True).drop_duplicates(subset=["Date"])
                 cache_updated = True
+            else:
+                logging.warning(f"Ticker {ticker}: No permanently missing days to record.")
         else:
-            logging.warning(f"Ticker {ticker}: No data returned from yfinance.")
+            logging.warning(f"Ticker {ticker}: No valid data returned from yfinance.")
+            logging.debug(f"Fetched data content:\n{fetched_data}")
 
     except Exception as e:
         logging.error(f"Ticker {ticker}: Error fetching data: {e}")
 
-    # Exclude today’s intraday data from cache
-    if today in all_data["Date"].values:
-        all_data = all_data[all_data["Date"] != today]
+    if all_data["Date"].eq(pd.Timestamp.now().normalize()).any():
+        all_data = all_data[all_data["Date"] != pd.Timestamp.now().normalize()]
         cache_updated = True
 
-    # Filter to only required business days
     all_data = all_data[all_data["Date"].isin(required_business_days)]
 
-    # Save updated cache
     if cache_updated:
         try:
             all_data.to_pickle(cache_file)
@@ -780,6 +800,8 @@ def fetch_ticker_history(ticker, start_date, end_date, required_business_days, c
             logging.error(f"Failed to save cache for {ticker}: {e}")
 
     return all_data
+
+
 
 
 def fetch_historical_data(
