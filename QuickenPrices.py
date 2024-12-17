@@ -977,7 +977,7 @@ def fetch_ticker_data(ticker, start_date, end_date, current_price, config):
 @retry(Exception, config=config)
 def load_cache(ticker: str, cache_dir: str) -> pd.DataFrame:
     """
-    Loads cached data for a specific ticker from a CSV file.
+    Loads cached data for a specific ticker using pickle.
 
     Args:
         ticker (str): The ticker symbol.
@@ -986,13 +986,15 @@ def load_cache(ticker: str, cache_dir: str) -> pd.DataFrame:
     Returns:
         pd.DataFrame: DataFrame containing cached data, or an empty DataFrame if the cache file is not found or cannot be read.
     """
-    cache_file = Path(cache_dir) / f"{ticker}.csv"
+    cache_file = os.path.join(cache_dir, f"{ticker}.pkl")
 
-    if cache_file.exists():
+    if os.path.exists(cache_file):
         try:
-            df = pd.read_csv(cache_file)
-            return df
-        except (FileNotFoundError, IOError, ValueError) as e:
+            # Use pickle.load to deserialize the data
+            with open(cache_file, "rb") as f:
+                data = pickle.load(f)
+            return data
+        except (FileNotFoundError, IOError) as e:
             logging.error(f"Failed to load cache for {ticker}: {e}")
             return pd.DataFrame(columns=CACHE_COLUMNS)
     else:
@@ -1065,22 +1067,27 @@ def download_data(ticker_symbol, start, end):
 @retry(Exception, config=config)
 def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
     """
-    Save cache for a specific ticker to a CSV file.
+    Save cache for a specific ticker using pickle.
 
     Args:
         ticker (str): The ticker symbol.
         data (pd.DataFrame): DataFrame containing data to cache.
     """
-    cache_file = Path(cache_dir) / f"{ticker}.csv"
+    cache_file = os.path.join(cache_dir, f"{ticker}.pkl")  # Use .pkl extension
     try:
         os.makedirs(cache_dir, exist_ok=True)
+
         # Filter to ensure only valid columns are saved
         if "Ticker" not in data.columns:
             raise ValueError(
                 f"Ticker column missing in data for {ticker}. Columns: {data.columns.tolist()}"
             )
         data = data[list(CACHE_COLUMNS)].dropna()
-        data.to_csv(cache_file, index=False, mode="w")
+
+        # Use pickle.dump to serialize the DataFrame
+        with open(cache_file, "wb") as f:
+            pickle.dump(data, f)
+
         logging.info(f"{ticker}: Cache saved.")
     except Exception as e:
         logging.error(f"Failed to save cache for {ticker}: {e}")

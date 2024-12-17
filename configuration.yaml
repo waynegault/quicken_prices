@@ -27,7 +27,7 @@ tickers:
 home_currency: GBP
 
 #  Data period to collect in years (0.08 years ≈ 1 month,0.08 * 365 ≈ 29.2 days)
-collection_period_years: .04
+collection_period_years: 0.08
 
 retries:
   max_retries: 3
@@ -37,7 +37,7 @@ retries:
 
 # Logging levels for terminal and logfile: "DEBUG", "INFO", "WARNING", "ERROR", "TEXT"
 logging_level: 
-  file: DEBUG 
+  file: INFO 
   terminal: INFO
   
 
