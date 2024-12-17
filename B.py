@@ -545,7 +545,6 @@ def find_missing_ranges(start_date, end_date, first_cache, last_cache):
             (panda_date(start_date), panda_date(first_cache - pd.Timedelta(days=1)))
         )
 
-
     # Add range after `last_cache` if applicable
     if end_date > last_cache:
         missing_ranges.append(
@@ -553,6 +552,14 @@ def find_missing_ranges(start_date, end_date, first_cache, last_cache):
         )
 
     return missing_ranges
+
+
+def format_path(full_path):
+    """Format a file path to show the last parent directory and filename."""
+    path_parts = full_path.split("\\")
+    if len(path_parts) > 1:
+        return "\\" + "\\".join(path_parts[-2:])  # Show parent dir and filename
+    return "\\" + full_path  # Just in case there's no parent directory
 
 
 # Validate tickers ############################
@@ -710,9 +717,7 @@ def validate_ticker(
         logging.error(f"An unexpected error occurred fetching {ticker_symbol}: {e}")
         return None
 
-
 # Get data ####################################
-
 
 def fetch_historical_data(
     tickers: List[Tuple[str, Optional[pd.Timestamp], str, str]], config: Dict[str, Any]
@@ -985,6 +990,59 @@ def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
         logging.error(f"Failed to save cache for {ticker}: {e}")
 
 
+def clean_cache(config):
+    """
+    Cleans up cache files older than the configured maximum age.
+
+    Args:
+        config (dict): Configuration dictionary containing cache path and max age settings.
+
+    Returns:
+        bool: True if cleaning completes successfully, False otherwise.
+    """
+    print(
+        f"\n start of {inspect.getframeinfo(inspect.currentframe()).function} function\n"
+    )
+    cache_dir = os.path.join(config["paths"]["base"], config["paths"]["cache"])
+    max_age_seconds = config["cache"]["max_age_days"] * SECONDS_IN_A_DAY
+    now = time.time()
+    max_age_seconds =1
+    logging.info("Cache cleaning.")
+
+    if not os.path.exists(cache_dir) or not os.path.isdir(cache_dir):
+        logging.warning(
+            f"Cache directory does not exist or is not a directory: {cache_dir}"
+        )
+        return False
+
+    deleted_files = 0
+    try:
+        with os.scandir(cache_dir) as it:
+            for entry in it:
+                if entry.is_file() and (now - entry.stat().st_mtime) > max_age_seconds:
+                    try:
+                        os.remove(entry.path)
+                        deleted_files += 1
+                        logging.info(
+                            f"{entry.name} deleted. Older than {config['cache']['max_age_days']} {pluralise('day', config['cache']['max_age_days'])}."
+                        )
+                    except Exception as remove_error:
+                        logging.error(
+                            f"Failed to delete file {entry.path}: {remove_error}"
+                        )
+
+        logging.info(
+            f"{deleted_files} cache {pluralise('file', deleted_files)} deleted.\n"
+        )
+    except Exception as e:
+        logging.error(
+            f"Error cleaning cache at {cache_dir}: {e}. Check file permissions or existence of the directory."
+        )
+        return False
+
+    return True
+
+
 # Process Data ################################
 
 
@@ -1105,14 +1163,6 @@ def process_converted_prices(
         raise
 
 
-def format_path(full_path):
-    """Format a file path to show the last parent directory and filename."""
-    path_parts = full_path.split("\\")
-    if len(path_parts) > 1:
-        return "\\" + "\\".join(path_parts[-2:])  # Show parent dir and filename
-    return "\\" + full_path  # Just in case there's no parent directory
-
-
 def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
     """
     Saves the DataFrame to a CSV file without headers.
@@ -1154,58 +1204,7 @@ def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
         logging.exception(f"An error occurred while saving to {short_CSV_path}")
         return False
 
-
-def clean_cache(config):
-    """
-    Cleans up cache files older than the configured maximum age.
-
-    Args:
-        config (dict): Configuration dictionary containing cache path and max age settings.
-
-    Returns:
-        bool: True if cleaning completes successfully, False otherwise.
-    """
-    print(
-        f"\n start of {inspect.getframeinfo(inspect.currentframe()).function} function\n"
-    )
-    cache_dir = os.path.join(config["paths"]["base"], config["paths"]["cache"])
-    max_age_seconds = config["cache"]["max_age_days"] * SECONDS_IN_A_DAY
-    now = time.time()
-    logging.info("Cache cleaning.")
-
-    if not os.path.exists(cache_dir) or not os.path.isdir(cache_dir):
-        logging.warning(
-            f"Cache directory does not exist or is not a directory: {cache_dir}"
-        )
-        return False
-
-    deleted_files = 0
-    try:
-        with os.scandir(cache_dir) as it:
-            for entry in it:
-                if entry.is_file() and (now - entry.stat().st_mtime) > max_age_seconds:
-                    try:
-                        os.remove(entry.path)
-                        deleted_files += 1
-                        logging.info(
-                            f"{entry.name} deleted. Older than {config['cache']['max_age_days']} {pluralise('day', config['cache']['max_age_days'])}."
-                        )
-                    except Exception as remove_error:
-                        logging.error(
-                            f"Failed to delete file {entry.path}: {remove_error}"
-                        )
-
-        logging.info(
-            f"{deleted_files} cache {pluralise('file', deleted_files)} deleted.\n"
-        )
-    except Exception as e:
-        logging.error(
-            f"Error cleaning cache at {cache_dir}: {e}. Check file permissions or existence of the directory."
-        )
-        return False
-
-    return True
-
+# Quicken GUI #################################
 
 @retry(exceptions=(RuntimeError, IOError), config=config)
 def import_data_file(config):
@@ -1421,6 +1420,8 @@ def quicken_import(config):
         return False
 
 
+# Main ########################################
+
 def main():
     """
     Main script execution.
@@ -1487,3 +1488,4 @@ def main():
 if __name__ == "__main__":
 
     main()
+
