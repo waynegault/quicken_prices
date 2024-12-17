@@ -677,7 +677,6 @@ def get_tickers(
     logging.info(
         f"Validated {len(all_valid_tickers)} {pluralise('ticker', len(all_valid_tickers))} in total.\n"
     )
-
     return all_valid_tickers
 
 
@@ -711,6 +710,7 @@ def validate_tickers(
                         data["earliest_date"],
                         data["type"],
                         data["currency"],
+                        data["current_price"]
                     )
                 )
 
@@ -764,6 +764,7 @@ def validate_ticker(
             "earliest_date": earliest_date,
             "type": info.get("quoteType", "Unknown"),
             "currency": info.get("currency", "Unknown"),
+            "current_price": info.get("currentPrice", "Unknown"),
         }
 
         return data
@@ -775,7 +776,7 @@ def validate_ticker(
 # Get data ####################################
 
 def fetch_historical_data(
-    tickers: List[Tuple[str, Optional[pd.Timestamp], str, str]], config: Dict[str, Any]
+    tickers: List[Tuple[str, Optional[pd.Timestamp], str, str, float]], config: Dict[str, Any]
 ) -> pd.DataFrame:
     """
     Fetch historical data for a list of tickers.
@@ -796,7 +797,7 @@ def fetch_historical_data(
     records = []
 
     # Loop through all the tickers eg [('0P00013P6I.L', datetime.date(2019, 1, 2), 'MUTUALFUND', 'GBP')]
-    for ticker, earliest_date, ticker_type, currency in tickers:
+    for ticker, earliest_date, ticker_type, currency, current_price in tickers:
 
         # Ensure we are seeking data that should exist
         if earliest_date and end_date < earliest_date:
@@ -809,7 +810,9 @@ def fetch_historical_data(
         adjusted_start_date = max(start_date, earliest_date or start_date)
 
         try:
-            df = fetch_ticker_data(ticker, adjusted_start_date, end_date, config)
+            df = fetch_ticker_data(
+                ticker, adjusted_start_date, end_date, current_price, config
+            )
 
             if df.empty:
                 logging.warning(f"No data found for ticker {ticker}. Skipping.")
@@ -831,7 +834,9 @@ def fetch_historical_data(
 
     if not records:
         logging.error("No valid data fetched.")
-        return pd.DataFrame(columns=[list(CACHE_COLUMNS), "Type", "Original Currency"])
+        return pd.DataFrame(
+            columns=[list(CACHE_COLUMNS), "Type", "Original Currency"]
+        )
 
     combined_df = pd.concat([df for df in records if not df.empty], ignore_index=True)
 
@@ -842,7 +847,7 @@ def fetch_historical_data(
     return combined_df
 
 
-def fetch_ticker_data(ticker, start_date, end_date, config):
+def fetch_ticker_data(ticker, start_date, end_date, current_price, config):
     """
     Fetch and manage historical data for a ticker either as cache, download or a combination of the two.
     """
@@ -952,23 +957,20 @@ def fetch_ticker_data(ticker, start_date, end_date, config):
 
     combined_data_count = len(combined_data)
 
-    logging.info(
-        f"{ticker}: Retrieved {cache_count} {pluralise('day',cache_count)} cache, {download_count} {pluralise('day',download_count)} download, with {num_duplicates} {pluralise('day',num_duplicates)} duplicated. {combined_data_count} {pluralise('day',combined_data_count)} in total."
-    )
-
     if not combined_data.equals(cache_data):
         save_cache(ticker, combined_data, cache_dir)
 
     # get today's latest prices
+    if isinstance(current_price, float):
+        new_row = pd.Series({"Ticker": ticker, "Old Price": current_price, "Date": pd.Timestamp.now().date()})
+        # takes the series and converts it into a DataFrame with one row and the correct column names
+        combined_data = pd.concat([combined_data, new_row.to_frame().T], ignore_index=True)  # more efficient than append
+        download_count += 1
+        combined_data_count += 1
 
-    start = panda_date(start).date()
-    end = panda_date(end).date()
-    today = pd.Timestamp.now().date()
-    print("Download function")
-    print(f"start {start}")
-    print(f"end {end}")
-    print(f"today {today}")
-
+    logging.info(
+        f"{ticker}: Retrieved {cache_count} {pluralise('day',cache_count)} cache, {download_count} {pluralise('day',download_count)} download, with {num_duplicates} {pluralise('day',num_duplicates)} duplicated. {combined_data_count} {pluralise('day',combined_data_count)} in total."
+    )
     return combined_data
 
 
@@ -1018,8 +1020,6 @@ def download_data(ticker_symbol, start, end):
     # Dont look for 'close' today as it probably wont exist yet
     if start == today:
         return pd.DataFrame(columns=CACHE_COLUMNS)
-    # elif end== today:
-    #     end = adjust_for_weekend(end - pd.Timedelta(days=1), direction="back")
 
     # Fetch data using yfinance
     try:
@@ -1188,8 +1188,12 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
         suffixes=("", "_merge"),
     )
 
+    print(df)
+
     # Populate FX Rate from merged data where available
     df["FX Rate"] = df["FX Rate"].combine_first(df["FX Rate_merge"])
+
+    print(df)
 
     # Calculate the converted prices
     df["Price"] = df["Old Price"] * df["FX Rate"].fillna(1)
@@ -1197,6 +1201,8 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     # count rows where the "FX Ticker" does not contain "-"
     c = df[~df["FX Ticker"].str.contains("-")].shape[0]
     logging.info(f"{c} prices converted.\n")
+
+    print(df)
 
     return df[["Ticker", "Price", "Date"]]
 
@@ -1511,6 +1517,7 @@ def main():
         if not valid_tickers:
             logging.error("No valid tickers to process. Exiting.")
             sys.exit(1)
+
 
         # Fetch historical data
         price_data = fetch_historical_data(valid_tickers, config=config)

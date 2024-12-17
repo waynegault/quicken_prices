@@ -9,7 +9,7 @@ tickers:
   # - CUKX.L
   # - CYSE.L
   # - ELIX.L
-  # - ^FTAS
+  - ^FTAS
   # - ^FTSE
   # - GLTA.L
   # - GCG25.CMX
@@ -18,10 +18,10 @@ tickers:
   # - IIND.L
   # - IUIT.L
   # - SEE.L
-  # - ^OEX
+  - ^OEX
   # - ^GSPC
-  # - VHVG.L
-  # - VNRX
+  - VHVG.L
+  - VNRX
   - VUKG.L
 
 home_currency: GBP
