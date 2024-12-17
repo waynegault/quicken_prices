@@ -854,21 +854,19 @@ def fetch_ticker_data(ticker, start_date, end_date, config):
                     df = downloaded_data
                 else:
                     df = pd.concat([df, downloaded_data], ignore_index=True)
-
-                print(f"df post concat {df}")
     else:
         logging.info("No missing data.")
 
     download_count = len(df)
     cache_count = len(cache_data)
 
-    if not cache_data.empty:
-        combined_data = pd.concat([df, cache_data], ignore_index=True).sort_values(
-            by="Date"
-        )
-    else:
+    if (cache_data is None or cache_data.empty):
         combined_data = df.copy()
-
+    else:
+        combined_data = pd.concat([df, cache_data], ignore_index=True)
+        
+    print("xxx")
+    
     combined_data_count = len(combined_data)
     duplicates = df["Date"].duplicated().sum()
 
