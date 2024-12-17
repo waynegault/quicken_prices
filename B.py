@@ -609,7 +609,7 @@ def get_tickers(
         )
         all_valid_tickers = list(set(valid_tickers + valid_fx_tickers))
     else:
-        logging.warning("No new FX tickers required.")
+        logging.info("No new FX tickers required.")
         all_valid_tickers = valid_tickers
 
     logging.info(
@@ -751,16 +751,16 @@ def fetch_historical_data(
         try:
             df = fetch_ticker_data(ticker, adjusted_start_date, end_date, config)
 
-            print(f"got df from fetch_ticker_data: {df}")
-
             if df.empty:
                 logging.warning(f"No data found for ticker {ticker}. Skipping.")
+                print("")
                 continue
 
             # Add metadata columns
             df["Type"] = ticker_type
             df["Original Currency"] = currency
             records.append(df)
+            print("")
 
         except Exception as e:
             logging.error(f"Failed to fetch data for ticker {ticker}: {e}")
@@ -772,9 +772,8 @@ def fetch_historical_data(
     combined_df = pd.concat([df for df in records if not df.empty], ignore_index=True)
     # combined_df.drop_duplicates(subset=["Ticker", "Date"], keep="first", inplace=True)
 
-    print("")
     logging.info(
-        f"Fetched {len(combined_df)} {pluralise('record',len(combined_df))} in total across {len(records)} {pluralise('tickers',len(records))}."
+        f"Finished getting {len(combined_df)} {pluralise('record',len(combined_df))} for {len(records)} {pluralise('ticker',len(records))}."
     )
     return combined_df
 
@@ -801,7 +800,7 @@ def fetch_ticker_data(ticker, start_date, end_date, config):
     # If cache is empty, set first and last cache dates to pd.NaT
     if cache_data.empty or len(cache_data) == 0:
         logging.info(
-            f"{ticker}: No cache found. Trying to download from {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}."
+            f"{ticker}: Trying to download {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}."
         )
         first_cache = pd.NaT
         last_cache = pd.NaT
@@ -842,31 +841,32 @@ def fetch_ticker_data(ticker, start_date, end_date, config):
             # Handle single tuple or list of tuples case
             for start_date, end_date in missing_ranges:
                 try:
-                    downloaded_data = download_data(ticker, start_date, end_date)
-                except Exception as e:
 
-                    logging.error(
-                        f"Error downloading data from {start_date} to {end_date}: {e}"
-                    )
+                    downloaded_data = download_data(ticker, start_date, end_date)
+
+                except Exception as e:
+                    logging.error(f"Error downloading data from {start_date} to {end_date}: {e}")
                     continue  # Skip to next iteration on error
+
                 # Concatenate downloaded data to the main DataFrame
                 if df.empty:
                     df = downloaded_data
                 else:
                     df = pd.concat([df, downloaded_data], ignore_index=True)
+
     else:
         logging.info("No missing data.")
 
+    # Concatenate downloaded data with cache if both df's have data
     download_count = len(df)
     cache_count = len(cache_data)
-
-    if (cache_data is None or cache_data.empty):
+    if cache_count == 0 and download_count != 0:
         combined_data = df.copy()
+    elif cache_count != 0 and download_count == 0:
+        combined_data = cache_data.copy()
     else:
         combined_data = pd.concat([df, cache_data], ignore_index=True)
-        
-    print("xxx")
-    
+
     combined_data_count = len(combined_data)
     duplicates = df["Date"].duplicated().sum()
 
@@ -901,7 +901,7 @@ def load_cache(ticker: str, cache_dir: str) -> pd.DataFrame:
             logging.error(f"Failed to load cache for {ticker}: {e}")
             return pd.DataFrame(columns=CACHE_COLUMNS)
     else:
-        logging.info(f"Cache file not found for {ticker}")
+        logging.info(f"{ticker}: No cache found.")
         return pd.DataFrame(columns=CACHE_COLUMNS)
 
 
@@ -927,7 +927,9 @@ def download_data(ticker_symbol, start, end):
         raw_data = ticker_obj.history(start=start, end=end, interval="1d")
 
         if raw_data.empty:
-            logging.warning(f"No data returned for {ticker_symbol} from yfinance.")
+            logging.info(
+                f"{ticker_symbol}: yfinance returned no data from {start.strftime('%d/%m/%Y')} to {end.strftime('%d/%m/%Y')}."
+            )
             return pd.DataFrame(columns=CACHE_COLUMNS)
 
         # Reset index to ensure 'Date' is a column
@@ -941,7 +943,7 @@ def download_data(ticker_symbol, start, end):
 
         # Add ticker to df
         raw_data["Ticker"] = ticker_symbol
-        
+
         # Subset df
         raw_data = raw_data[list(CACHE_COLUMNS)]
 
@@ -950,7 +952,7 @@ def download_data(ticker_symbol, start, end):
         latest_date = raw_data["Date"].max()
 
         logging.info(
-            f"{ticker_symbol}: Could only download {earliest_date.strftime('%d/%m/%Y')} to {latest_date.strftime('%d/%m/%Y')}."
+            f"{ticker_symbol}: Downloaded {earliest_date.strftime('%d/%m/%Y')} to {latest_date.strftime('%d/%m/%Y')}."
         )
 
         return raw_data
@@ -978,7 +980,7 @@ def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
             )
         data = data[list(CACHE_COLUMNS)].dropna()
         data.to_csv(cache_file, index=False, mode="w")
-        logging.info(f"'{ticker}.csv' saved OK.")
+        logging.info(f"{ticker}: Cache saved.")
     except Exception as e:
         logging.error(f"Failed to save cache for {ticker}: {e}")
 
