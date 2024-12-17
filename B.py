@@ -354,7 +354,7 @@ def panda_date(date_obj):
     Returns:
       A Pandas Date object normalized to UTC, or pd.NaT if input is None or invalid.
     """
-    if date_obj is None or pd.isna(date_obj):
+    if pd.isna(date_obj):
         return pd.NaT
 
     try:
@@ -386,14 +386,13 @@ def panda_date(date_obj):
 
         # Handle string inputs
         else:
-            # Use flexible parsing
             date_obj = pd.to_datetime(date_obj, utc=True)
             if date_obj.tzinfo is None:
                 date_obj = date_obj.tz_localize("UTC")
             else:
                 date_obj = date_obj.tz_convert("UTC")
 
-        return date_obj.date()
+        return date_obj
 
     except (ValueError, TypeError):
         if warnings:
@@ -764,6 +763,10 @@ def fetch_historical_data(
             # Add metadata columns
             df["Type"] = ticker_type
             df["Original Currency"] = currency
+
+            # convert Date to right format
+            df["Date"] = df["Date"].apply(panda_date)
+            
             records.append(df)
             print("")
 
@@ -775,11 +778,11 @@ def fetch_historical_data(
         return pd.DataFrame(columns=[list(CACHE_COLUMNS), "Type", "Original Currency"])
 
     combined_df = pd.concat([df for df in records if not df.empty], ignore_index=True)
-    # combined_df.drop_duplicates(subset=["Ticker", "Date"], keep="first", inplace=True)
 
     logging.info(
         f"Finished getting {len(combined_df)} {pluralise('record',len(combined_df))} for {len(records)} {pluralise('ticker',len(records))}."
     )
+
     return combined_df
 
 
@@ -885,6 +888,7 @@ def fetch_ticker_data(ticker, start_date, end_date, config):
     return combined_data
 
 
+@retry(Exception, config=config)
 def load_cache(ticker: str, cache_dir: str) -> pd.DataFrame:
     """
     Loads cached data for a specific ticker from a CSV file.
@@ -967,6 +971,7 @@ def download_data(ticker_symbol, start, end):
         return pd.DataFrame(columns=CACHE_COLUMNS)
 
 
+@retry(Exception, config=config)
 def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
     """
     Save cache for a specific ticker to a CSV file.
@@ -990,6 +995,7 @@ def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
         logging.error(f"Failed to save cache for {ticker}: {e}")
 
 
+@retry(Exception, config=config)
 def clean_cache(config):
     """
     Cleans up cache files older than the configured maximum age.
@@ -1000,18 +1006,15 @@ def clean_cache(config):
     Returns:
         bool: True if cleaning completes successfully, False otherwise.
     """
-    print(
-        f"\n start of {inspect.getframeinfo(inspect.currentframe()).function} function\n"
-    )
+
     cache_dir = os.path.join(config["paths"]["base"], config["paths"]["cache"])
     max_age_seconds = config["cache"]["max_age_days"] * SECONDS_IN_A_DAY
     now = time.time()
     max_age_seconds =1
-    logging.info("Cache cleaning.")
 
     if not os.path.exists(cache_dir) or not os.path.isdir(cache_dir):
         logging.warning(
-            f"Cache directory does not exist or is not a directory: {cache_dir}"
+            f"Cache cleaning: can't find {cache_dir}"
         )
         return False
 
@@ -1024,19 +1027,19 @@ def clean_cache(config):
                         os.remove(entry.path)
                         deleted_files += 1
                         logging.info(
-                            f"{entry.name} deleted. Older than {config['cache']['max_age_days']} {pluralise('day', config['cache']['max_age_days'])}."
+                            f"Cache cleaning: {entry.name} deleted. Older than {config['cache']['max_age_days']} {pluralise('day', config['cache']['max_age_days'])}."
                         )
                     except Exception as remove_error:
                         logging.error(
-                            f"Failed to delete file {entry.path}: {remove_error}"
+                            f"Cache cleaning: Failed to delete file {entry.path}: {remove_error}"
                         )
 
         logging.info(
-            f"{deleted_files} cache {pluralise('file', deleted_files)} deleted.\n"
+            f"Cache cleaning: {deleted_files} cache {pluralise('file', deleted_files)} deleted.\n"
         )
     except Exception as e:
         logging.error(
-            f"Error cleaning cache at {cache_dir}: {e}. Check file permissions or existence of the directory."
+            f"Cache cleaning: Error with {cache_dir}: {e}. Check file permissions or existence of the directory."
         )
         return False
 
@@ -1056,27 +1059,11 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         DataFrame with prices converted to GBP where applicable.
     """
-    print(
-        f"\n start of {inspect.getframeinfo(inspect.currentframe()).function} function\n"
-    )
     if df.empty:
         logging.error(
             "Empty DataFrame received in `convert_prices`. No data to process."
         )
         return pd.DataFrame()
-
-    required_columns = {"Original Currency", "Old Price", "Date", "Ticker"}
-    missing_columns = required_columns - set(df.columns)
-    if missing_columns:
-        logging.error(f"Missing required columns in data: {missing_columns}")
-        return pd.DataFrame()
-
-    df = df.copy()
-
-    # Ensure the Date column is properly formatted
-    df["Date"] = panda_date(df["Date"], errors="coerce").dt.date
-
-    df = df.dropna(subset=["Date"])  # Drop rows with invalid dates
 
     # Extract exchange rates for CURRENCY type into a new DataFrame
     exchange_rate_df = (
@@ -1117,52 +1104,51 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     # Calculate the converted prices
     df["Price"] = df["Old Price"] * df["FX Rate"].fillna(1)
 
-    # Clean up unnecessary columns
+    # count rows where the "FX Ticker" does not contain "-"
     c = df[~df["FX Ticker"].str.contains("-")].shape[0]
     logging.info(f"{c} prices converted.\n")
+
     return df[["Ticker", "Price", "Date"]]
 
 
-def process_converted_prices(
-    converted_df: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Prepares the final DataFrame for CSV export.
+def process_converted_prices(converted_df: pd.DataFrame) -> pd.DataFrame:
+    """Prepares the final DataFrame for CSV export.
 
     Args:
         converted_df: DataFrame with "Ticker", "Date", "Price"
 
     Returns:
-        Processed DataFrame ready to be saved as CSV.
+        Processed DataFrame ready to be saved as CSV, or an empty DataFrame if input is empty.
+        Exits if a critical error occurs.
     """
-    print(
-        f"\n start of {inspect.getframeinfo(inspect.currentframe()).function} function\n"
-    )
+
+    if converted_df.empty:
+        logging.warning(
+            "Input DataFrame is empty. Returning empty DataFrame."
+        )  
+        return pd.DataFrame(
+            columns=["Ticker", "Price", "Date"]
+        )  # return empty dataframe with correct columns
+
     try:
-
-        if converted_df.empty:
-            logging.error(
-                "No data received. Verify that tickers and date ranges are correct. Exiting."
-            )
-            sys.exit(1)
-
         output_csv = converted_df[["Ticker", "Price", "Date"]].copy()
 
-        # Order by descending date
-        output_csv = output_csv.sort_values(by="Date", ascending=False)
+        # Sort by descending date IN PLACE
+        output_csv.sort_values(by="Date", ascending=False, inplace=True)
 
-        # Reformat date into dd/mm/yyyy
-        output_csv["Date"] = panda_date(
-            output_csv["Date"], errors="coerce"
-        ).dt.strftime("%d/%m/%Y")
+        # Format date as string using .dt.strftime()
+        output_csv["Date"] = output_csv["Date"].dt.strftime("%d/%m/%Y")
 
         return output_csv
 
     except Exception as e:
-        logging.error(f"An error occurred during processing: {e}")
-        raise
+        logging.exception(
+            f"A critical error occurred: {e}"
+        )  # log stack trace
+        sys.exit(1)  # Exit program
 
 
+@retry(Exception, config=config)
 def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
     """
     Saves the DataFrame to a CSV file without headers.
@@ -1174,9 +1160,7 @@ def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
     Returns:
         True if saved successfully, False otherwise.
     """
-    print(
-        f"\n start of {inspect.getframeinfo(inspect.currentframe()).function} function\n"
-    )
+
     try:
         if df.empty:
             logging.error("No data to save. Check earlier steps for errors.")
@@ -1196,7 +1180,7 @@ def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
 
         # Log the save location
         short_CSV_path = format_path(file_path)
-        logging.info(f"Data successfully saved to: {short_CSV_path}\n")
+        logging.info(f"{short_CSV_path} saved successfully.\n")
 
         return True
 
@@ -1204,13 +1188,12 @@ def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
         logging.exception(f"An error occurred while saving to {short_CSV_path}")
         return False
 
+
 # Quicken GUI #################################
 
 @retry(exceptions=(RuntimeError, IOError), config=config)
 def import_data_file(config):
-    print(
-        f"\n start of {inspect.getframeinfo(inspect.currentframe()).function} function\n"
-    )
+
     try:
         output_file_name = config["paths"]["data_file"]
         base_path = config["paths"]["base"]
@@ -1244,9 +1227,7 @@ def import_data_file(config):
 
 @retry(exceptions=(Exception), config=config)
 def open_import_dialog():
-    print(
-        f"\n start of {inspect.getframeinfo(inspect.currentframe()).function} function\n"
-    )
+
     try:
         with pyautogui.hold("alt"):
             pyautogui.press(["f", "i", "i"])
@@ -1268,9 +1249,7 @@ def open_import_dialog():
 
 @retry(exceptions=(Exception,), config=config)
 def navigate_to_portfolio():
-    print(
-        f"\n start of {inspect.getframeinfo(inspect.currentframe()).function} function\n"
-    )
+
     try:
         pyautogui.hotkey("ctrl", "u")
 
@@ -1295,9 +1274,7 @@ def navigate_to_portfolio():
 
 @retry(exceptions=(Exception,), config=config)
 def open_quicken(config):
-    print(
-        f"\n start of {inspect.getframeinfo(inspect.currentframe()).function} function\n"
-    )
+
     quicken_path = config["paths"]["quicken"]
     try:
         # Check if Quicken is already open
@@ -1345,9 +1322,7 @@ def execute_import_sequence(config):
     Returns:
         bool: True if all steps completed successfully
     """
-    print(
-        f"\n start of {inspect.getframeinfo(inspect.currentframe()).function} function\n"
-    )
+
     steps = [
         (open_quicken, "Opening Quicken"),
         (navigate_to_portfolio, "Navigating to Portfolio view"),
@@ -1383,9 +1358,7 @@ def setup_pyautogui():
     """
     Configures pyautogui for automation.
     """
-    print(
-        f"\n start of {inspect.getframeinfo(inspect.currentframe()).function} function\n"
-    )
+
     pyautogui.FAILSAFE = True  # Abort ongoing automation by moving mouse to the top-left corner of screen.
     pyautogui.PAUSE = 0.3  # Delay between actions
 
@@ -1400,9 +1373,7 @@ def quicken_import(config):
     Returns:
         bool: True if the import process completes successfully.
     """
-    print(
-        f"\n start of {inspect.getframeinfo(inspect.currentframe()).function} function\n"
-    )
+
     try:
         if is_elevated():
             return execute_import_sequence(config)
@@ -1488,4 +1459,3 @@ def main():
 if __name__ == "__main__":
 
     main()
-
