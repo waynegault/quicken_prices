@@ -401,6 +401,43 @@ def panda_date(date_obj):
         return pd.NaT
 
 
+def adjust_for_weekend(date, direction="forward"):
+    """
+    Adjusts a date that falls on a weekend to either the following Monday
+    ("forward") or the preceding Friday ("back").
+
+    Args:
+        date: A pandas Timestamp or datetime.date object.
+        direction: A string, either "forward" (default) or "back".
+
+    Returns:
+        A pandas Timestamp or datetime.date object adjusted for the weekend,
+        or the original date if it's not a weekend. Raises ValueError if
+        the direction is invalid.
+        Raises TypeError if the date is not a valid type
+    """
+    if not isinstance(date, (pd.Timestamp, datetime.date, datetime.datetime)):
+        raise TypeError(
+            "Input date must be a pandas Timestamp or datetime.date/datetime object"
+        )
+
+    if isinstance(date, pd.Timestamp):
+        weekday = date.weekday()
+    else:  # datetime.date or datetime.datetime
+        weekday = date.weekday()
+
+    if weekday >= 5:  # Saturday or Sunday
+        if direction == "forward":
+            adjustment = calendar.MONDAY - weekday
+        elif direction == "back":
+            adjustment = calendar.FRIDAY - weekday
+        else:
+            raise ValueError("Invalid direction. Must be 'forward' or 'back'.")
+        return date + pd.Timedelta(days=adjustment)
+    else:
+        return date
+
+
 def get_date_range(
     config: dict,
 ) -> tuple[pd.Timestamp.date, pd.Timestamp.date]:
@@ -419,18 +456,12 @@ def get_date_range(
 
     today = pd.Timestamp.now().date()
 
-    def adjust_for_weekend(date):
-        if date.weekday() >= 5:  # Saturday or Sunday
-            return date + pd.Timedelta(days=calendar.MONDAY - date.weekday())
-        else:
-            return date
-
     # Determine end date, adjusting for weekends
-    end_date = adjust_for_weekend(today)
+    end_date = adjust_for_weekend(today, direction="back")
 
     # Determine start date, adjusting for weekends
     start_date = end_date - pd.Timedelta(days=period_days)
-    start_date = adjust_for_weekend(start_date)
+    start_date = adjust_for_weekend(start_date, direction="forward")
 
     # Convert to pandas Timestamp.date
     start_pd_date = panda_date(start_date)
@@ -509,6 +540,14 @@ def find_missing_ranges(start_date, end_date, first_cache, last_cache):
     ):
         return missing_ranges
 
+    # Avoid weekend starts or finishes
+    start_date = adjust_for_weekend(start_date, direction="forward")
+    end_date = adjust_for_weekend(end_date, direction="back")
+
+    # Make sure dates in right format
+    start_date = panda_date(start_date).date()
+    end_date = panda_date(end_date).date()
+
     # Guarantee start date is before end date for download range
     if start_date > end_date:
         start_date, end_date = end_date, start_date
@@ -526,6 +565,14 @@ def find_missing_ranges(start_date, end_date, first_cache, last_cache):
         missing_ranges.append((panda_date(start_date), panda_date(end_date)))
         return missing_ranges
 
+    # Avoid weekend starts or finishes
+    first_cache = adjust_for_weekend(first_cache, direction="forward")
+    last_cache = adjust_for_weekend(last_cache, direction="back")
+
+    # Make sure dates in right format
+    first_cache = panda_date(first_cache).date()
+    last_cache = panda_date(last_cache).date()
+
     # Ensure start cache date is before end cache date for consistency
     if first_cache > last_cache:
         first_cache, last_cache = last_cache, first_cache
@@ -541,13 +588,27 @@ def find_missing_ranges(start_date, end_date, first_cache, last_cache):
     # Add range before `first_cache` if applicable
     if start_date < first_cache:
         missing_ranges.append(
-            (panda_date(start_date), panda_date(first_cache - pd.Timedelta(days=1)))
+            (
+                panda_date(start_date),
+                panda_date(
+                    adjust_for_weekend(
+                        first_cache - pd.Timedelta(days=1), direction="back"
+                    )
+                ),
+            )
         )
 
     # Add range after `last_cache` if applicable
     if end_date > last_cache:
         missing_ranges.append(
-            (panda_date(last_cache + pd.Timedelta(days=1)), panda_date(end_date))
+            (
+                panda_date(
+                    adjust_for_weekend(
+                        last_cache + pd.Timedelta(days=1), direction="forward"
+                    )
+                ),
+                panda_date(end_date),
+            )
         )
 
     return missing_ranges
@@ -608,11 +669,6 @@ def get_tickers(
             f"Validating {len(fx_tickers)} FX {pluralise('ticker', len(fx_tickers))}..."
         )
         valid_fx_tickers = validate_tickers(list(fx_tickers), max_show)
-        logging.info(
-            f"{len(valid_fx_tickers)} valid FX {pluralise('ticker', len(valid_fx_tickers))} found: "
-            f"{[ticker[0] for ticker in valid_fx_tickers[:max_show]]}"
-            f"{'...' if len(valid_fx_tickers) > max_show else ''}"
-        )
         all_valid_tickers = list(set(valid_tickers + valid_fx_tickers))
     else:
         logging.info("No new FX tickers required.")
@@ -766,7 +822,7 @@ def fetch_historical_data(
 
             # convert Date to right format
             df["Date"] = df["Date"].apply(panda_date)
-            
+
             records.append(df)
             print("")
 
@@ -798,8 +854,8 @@ def fetch_ticker_data(ticker, start_date, end_date, config):
     df = pd.DataFrame(columns=CACHE_COLUMNS)
 
     # Ensure input dates are in the correct format
-    start_date = panda_date(start_date)
-    end_date = panda_date(end_date)
+    start_date = panda_date(start_date).date()
+    end_date = panda_date(end_date).date()
 
     # Load cache
     cache_data = load_cache(ticker, cache_dir)
@@ -820,8 +876,8 @@ def fetch_ticker_data(ticker, start_date, end_date, config):
         # Ensure dates correct format and sorted
         cached_dates = sorted([panda_date(date) for date in raw_dates if date])
         # Get the first and last dates, or pd.NaT if the list is empty
-        first_cache = cached_dates[0] if cached_dates else pd.NaT
-        last_cache = cached_dates[-1] if cached_dates else pd.NaT
+        first_cache = cached_dates[0].date() if cached_dates else pd.NaT
+        last_cache = cached_dates[-1].date() if cached_dates else pd.NaT
 
         # safety check if there is something wrong with first_cache or last_cache
         if pd.isna(first_cache) or pd.isna(last_cache):
@@ -837,7 +893,6 @@ def fetch_ticker_data(ticker, start_date, end_date, config):
             )
 
     # Determine missing date ranges (if no cache data, will return download start to finish)
-
     missing_ranges = find_missing_ranges(start_date, end_date, first_cache, last_cache)
 
     # initiate downloaded_data
@@ -859,11 +914,10 @@ def fetch_ticker_data(ticker, start_date, end_date, config):
                 # Concatenate downloaded data to the main DataFrame
                 if df.empty:
                     df = downloaded_data
+                elif downloaded_data.empty:
+                    pass
                 else:
                     df = pd.concat([df, downloaded_data], ignore_index=True)
-
-    else:
-        logging.info("No missing data.")
 
     # Concatenate downloaded data with cache if both df's have data
     download_count = len(df)
@@ -875,15 +929,45 @@ def fetch_ticker_data(ticker, start_date, end_date, config):
     else:
         combined_data = pd.concat([df, cache_data], ignore_index=True)
 
+    # Identify duplicates
+    duplicates = combined_data.duplicated(keep="first")  # Keep the first occurrence
+
+    # Check if duplicates exist and warn
+    num_duplicates = 0
+    if duplicates.any():
+        num_duplicates = duplicates.sum()
+        print(f"WARNING: {num_duplicates} duplicate rows found.")
+
+        # Display the duplicate rows
+        print("Duplicate rows:")
+        print(df[duplicates])
+
+        # Remove duplicates
+        combined_data.drop_duplicates(
+            keep="first", inplace=True
+        )  # using inplace is more memory efficient
+
+        print("Dataframe after removing duplicates:")
+        print(df)
+
     combined_data_count = len(combined_data)
-    duplicates = df["Date"].duplicated().sum()
 
     logging.info(
-        f"{ticker}: Retrieved {cache_count} {pluralise('day',cache_count)} cache, {download_count} {pluralise('day',download_count)} download, with {duplicates} {pluralise('day',duplicates)} duplicated. {combined_data_count} {pluralise('day',combined_data_count)} in total."
+        f"{ticker}: Retrieved {cache_count} {pluralise('day',cache_count)} cache, {download_count} {pluralise('day',download_count)} download, with {num_duplicates} {pluralise('day',num_duplicates)} duplicated. {combined_data_count} {pluralise('day',combined_data_count)} in total."
     )
 
     if not combined_data.equals(cache_data):
         save_cache(ticker, combined_data, cache_dir)
+
+    # get today's latest prices
+
+    start = panda_date(start).date()
+    end = panda_date(end).date()
+    today = pd.Timestamp.now().date()
+    print("Download function")
+    print(f"start {start}")
+    print(f"end {end}")
+    print(f"today {today}")
 
     return combined_data
 
@@ -927,8 +1011,15 @@ def download_data(ticker_symbol, start, end):
     """
 
     # Make sure dates in right format
-    start = panda_date(start)
-    end = panda_date(end)
+    start = panda_date(start).date()
+    end = panda_date(end).date()
+    today = pd.Timestamp.now().date()
+    
+    # Dont look for 'close' today as it probably wont exist yet
+    if start == today:
+        return pd.DataFrame(columns=CACHE_COLUMNS)
+    # elif end== today:
+    #     end = adjust_for_weekend(end - pd.Timedelta(days=1), direction="back")
 
     # Fetch data using yfinance
     try:
@@ -1010,7 +1101,6 @@ def clean_cache(config):
     cache_dir = os.path.join(config["paths"]["base"], config["paths"]["cache"])
     max_age_seconds = config["cache"]["max_age_days"] * SECONDS_IN_A_DAY
     now = time.time()
-    max_age_seconds =1
 
     if not os.path.exists(cache_dir) or not os.path.isdir(cache_dir):
         logging.warning(
