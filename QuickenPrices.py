@@ -1211,8 +1211,6 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     converted_count = df[~df["FX Ticker"].str.contains("-")].shape[0]
     logging.info(f"{converted_count} prices successfully converted to GBP.")
 
-    print(f"df \n{df}")
-
     # Return the required columns
     return df[["Ticker", "Price", "Date"]]
 
