@@ -9,7 +9,7 @@ tickers:
   # - CUKX.L
   # - CYSE.L
   # - ELIX.L
-  - ^FTAS
+  # - ^FTAS
   # - ^FTSE
   # - GLTA.L
   # - GCG25.CMX
@@ -18,16 +18,16 @@ tickers:
   # - IIND.L
   # - IUIT.L
   # - SEE.L
-  - ^OEX
+  # - ^OEX
   # - ^GSPC
-  - VHVG.L
-  - VNRX
-  - VUKG.L
+  # - VHVG.L
+  # - VNRX
+  # - VUKG.L
 
 home_currency: GBP
 
 #  Data period to collect in years (0.08 years ≈ 1 month,0.08 * 365 ≈ 29.2 days)
-collection_period_years: 0.08
+collection_period_years: 0.04
 
 retries:
   max_retries: 3

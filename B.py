@@ -764,7 +764,7 @@ def validate_ticker(
             "earliest_date": earliest_date,
             "type": info.get("quoteType", "Unknown"),
             "currency": info.get("currency", "Unknown"),
-            "current_price": info.get("currentPrice", "Unknown"),
+            "current_price": info.get("bid", "Unknown"),
         }
 
         return data
@@ -1137,8 +1137,6 @@ def clean_cache(config):
 
 
 # Process Data ################################
-
-
 def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     """
     Converts prices to GBP based on ticker type and currency.
@@ -1155,55 +1153,73 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
         )
         return pd.DataFrame()
 
-    # Extract exchange rates for CURRENCY type into a new DataFrame
+    # Remove time component to enable better matching of FX with stock.
+    df["Date"] = pd.to_datetime(df["Date"]).dt.date
+
+    # Extract exchange rates for CURRENCY type
     exchange_rate_df = (
         df[df["Type"] == "CURRENCY"]
         .rename(columns={"Old Price": "FX Rate", "Ticker": "FX Ticker"})
         .loc[:, ["Date", "FX Ticker", "FX Rate"]]
         .sort_values(by=["Date", "FX Ticker"])
+    ).copy()
+
+    print(f"\nexchange_rate_df:\n{exchange_rate_df}\n")
+
+    # Initialise FX-related columns
+    df = df.copy()
+    df["FX Ticker"] = "-"
+    df = df.rename(columns={"Price": "Old Price"})
+
+    # Non-GBP FX Ticker Assignment
+    non_gbp_mask = ~df["Original Currency"].isin(["GBP", "GBp"])
+    df.loc[non_gbp_mask, "FX Ticker"] = (
+        df.loc[non_gbp_mask, "Original Currency"] + "GBP=X"
     )
 
-    # Standardise FX Code and FX Rate columns in the main DataFrame
-    df["FX Ticker"] = "-"
-    df["FX Rate"] = 1.0  # Default FX Rate (decimal ensured floating type)
-    df["Currency"] = "GBP"  # Default Currency
-    df["Price"] = np.nan  # Placeholder for converted prices
+    # Handle USD Special Case
+    df.loc[df["Original Currency"] == "USD", "FX Ticker"] = "GBP=X"
 
-    # Handle rows with GBP and GBp directly
-    df.loc[df["Original Currency"] == "GBP", "FX Rate"] = 1.0
-    df.loc[df["Original Currency"] == "GBp", "FX Rate"] = 0.01
-
-    # Identify non-GBP rows and assign FX Code
-    non_gbp_mask = ~df["Original Currency"].isin(["GBP", "GBp"])
-    fx_codes = df.loc[non_gbp_mask, "Original Currency"] + "GBP=X"
-    fx_codes[df["Original Currency"] == "USD"] = "GBP=X"  # USD treated as special case
-    df.loc[non_gbp_mask, "FX Ticker"] = fx_codes
-
-    # Merge exchange rates back into the main DataFrame
+    # Merge FX rates into the main DataFrame
     df = df.merge(
         exchange_rate_df,
         how="left",
-        left_on=["Date", "FX Ticker"],
-        right_on=["Date", "FX Ticker"],
+        on=["Date", "FX Ticker"],
         suffixes=("", "_merge"),
     )
 
-    print(df)
+    # GBP and GBp Handling
+    gbp_mask = df["Original Currency"] == "GBP"
+    gbp_pence_mask = df["Original Currency"] == "GBp"
+    df.loc[gbp_mask, "FX Rate"] = 1.0
+    df.loc[gbp_pence_mask, "FX Rate"] = 0.01
+    # df.loc[gbp_pence_mask, "Price"] = df["Old Price"] * 0.01
 
-    # Populate FX Rate from merged data where available
-    df["FX Rate"] = df["FX Rate"].combine_first(df["FX Rate_merge"])
+    # Identify rows with missing FX Rates
+    missing_fx_mask = df["FX Rate"].isna() & non_gbp_mask
+    if missing_fx_mask.any():
+        missing_count = missing_fx_mask.sum()
+        logging.error(
+            f"{missing_count} rows have missing FX rates and will be removed."
+        )
+        print(f"\nRows with Missing FX Rates:\n{df.loc[missing_fx_mask]}\n")
+        # Remove rows with missing FX rates for non-GBP currencies
+        df = df[~missing_fx_mask].copy()
 
-    print(df)
 
-    # Calculate the converted prices
-    df["Price"] = df["Old Price"] * df["FX Rate"].fillna(1)
+    print(f"\nDataFrame After Merging FX Rates:\n{df}\n")
 
-    # count rows where the "FX Ticker" does not contain "-"
-    c = df[~df["FX Ticker"].str.contains("-")].shape[0]
-    logging.info(f"{c} prices converted.\n")
 
-    print(df)
+    # Calculate final prices for non-GBP currencies
+    df["Price"] = df["Old Price"] * df["FX Rate"]
 
+    print(f"\nFinal Converted DataFrame:\n{df}\n")
+
+    # Log the number of successfully converted prices
+    converted_count = df[~df["FX Ticker"].str.contains("-")].shape[0]
+    logging.info(f"{converted_count} prices successfully converted.")
+
+    # Return the required columns
     return df[["Ticker", "Price", "Date"]]
 
 
