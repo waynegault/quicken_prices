@@ -34,6 +34,7 @@ from functools import wraps
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+import requests
 
 # Windows-Specific Imports
 import winreg  # Registry access
@@ -483,42 +484,51 @@ def get_business_days(
 def find_missing_ranges(
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
-    first_cached_date: pd.Timestamp,
-    last_cached_date: pd.Timestamp,
+    first_cache: pd.Timestamp,
+    last_cache: pd.Timestamp,
 ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
     """Finds missing date ranges between a download period and cached data.
 
     Args:
         start_date: The start date of the download period.
         end_date: The end date of the download period.
-        first_cached_date: The first date in the cached data.
-        last_cached_date: The last date in the cached data.
+        first_cache: The first date in the cached data.
+        last_cache: The last date in the cached data.
 
     Returns:
         A list of (start, end) tuples representing missing date ranges.
         Returns an empty list if no ranges are missing or if any input is pd.NaT.
     """
 
+    missing_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+
     if any(
-        pd.isna(x) for x in [start_date, end_date, first_cached_date, last_cached_date]
+        pd.isna(x) for x in [start_date, end_date]
     ):
         return []
 
+    # end_date = end_date - pd.Timedelta(days=1)
+
     assert start_date <= end_date, "start_date must be less than or equal to end_date"
-    assert (
-        first_cached_date <= last_cached_date
-    ), "first_cached_date must be less than or equal to last_cached_date"
 
-    missing_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
-
-    if start_date < first_cached_date:
+    if any(pd.isna(x) for x in [first_cache, last_cache]):
         missing_ranges.append(
-            (start_date, min(end_date, first_cached_date - pd.Timedelta(days=1)))
+            (start_date, end_date)
         )
+        return missing_ranges
 
-    if end_date > last_cached_date:
+    assert (
+        first_cache <= last_cache
+    ), "first_cache must be less than or equal to last_cache"
+
+    if start_date < first_cache:
         missing_ranges.append(
-            (max(start_date, last_cached_date + pd.Timedelta(days=1)), end_date)
+            (start_date, min(end_date, first_cache - pd.Timedelta(days=1)))
+        )
+    today = pd.Timestamp.now().date()
+    if end_date > last_cache and end_date != today:
+        missing_ranges.append(
+            (max(start_date, last_cache + pd.Timedelta(days=1)), end_date)
         )
 
     return missing_ranges
@@ -768,7 +778,6 @@ def fetch_ticker_data(ticker, start_date, end_date, current_price, config):
 
     # Load cache
     cache_data = load_cache(ticker, cache_dir)
-    cache_data = cache_data.reset_index(drop=True)
 
     # If cache is empty, set first and last cache dates to pd.NaT
     if cache_data.empty or len(cache_data) == 0:
@@ -778,6 +787,7 @@ def fetch_ticker_data(ticker, start_date, end_date, current_price, config):
         first_cache = pd.NaT
         last_cache = pd.NaT
     else:
+        cache_data = cache_data.reset_index(drop=True)
         # Get first and last cache dates
         # Safely handle missing "Date" column rather than just using cache_data["Date"]
         raw_dates = set(cache_data.get("Date", []))
@@ -798,7 +808,7 @@ def fetch_ticker_data(ticker, start_date, end_date, current_price, config):
         else:
             # Cache is ok
             logging.info(
-                f"{ticker}: Cache loaded {first_cache.strftime('%d/%m/%Y')} to {last_cache.strftime('%d/%m/%Y')}."
+                f"{ticker}: Cache loaded {first_cache.strftime('%d/%m/%Y')} to {last_cache.strftime('%d/%m/%Y')} ({len(cached_dates)} {pluralise("day", len(cached_dates))})."
             )
 
     # Determine missing date ranges (if no cache data, will return download start to finish)
@@ -809,11 +819,12 @@ def fetch_ticker_data(ticker, start_date, end_date, current_price, config):
 
     # Get missing data
     if missing_ranges:
+
         if isinstance(missing_ranges, (list, tuple)):
             # Handle single tuple or list of tuples case
             for start_date, end_date in missing_ranges:
-                try:
 
+                try:
                     downloaded_data = download_data(ticker, start_date, end_date)
 
                 except Exception as e:
@@ -871,6 +882,7 @@ def fetch_ticker_data(ticker, start_date, end_date, current_price, config):
         combined_data = pd.concat([combined_data, new_row.to_frame().T], ignore_index=True)  # more efficient than append
         download_count += 1
         combined_data_count += 1
+        logging.info(f"Today's latest price is {current_price}.")
 
     logging.info(
         f"{ticker}: Retrieved {cache_count} {pluralise('day',cache_count)} cache, {download_count} {pluralise('day',download_count)} download, with {num_duplicates} {pluralise('day',num_duplicates)} duplicated. {combined_data_count} {pluralise('day',combined_data_count)} in total.\n"
@@ -919,8 +931,8 @@ def download_data(ticker_symbol, start, end):
     """
 
     # Make sure dates in right format
-    start = panda_date(start).date()
-    end = panda_date(end).date()
+    start = panda_date(start)
+    end = panda_date(end)
     today = pd.Timestamp.now().date()
 
     # Dont look for 'close' today as it probably wont exist yet
@@ -992,7 +1004,9 @@ def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
         with open(cache_file, "wb") as f:
             pickle.dump(data, f)
 
-        logging.info(f"{ticker}: Cache saved.")
+        logging.info(
+            f"{ticker} cache saved with {len(data)} {pluralise("record",len(data))}"
+        )
     except Exception as e:
         logging.error(f"Failed to save cache for {ticker}: {e}")
 
