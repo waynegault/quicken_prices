@@ -4,7 +4,7 @@
 tickers:
   # - 0P00013P6I.L
   # - 0P00018XAP.L
-  # - AMGN
+  - AMGN
   # - BZG25.NYM
   # - CUKX.L
   # - CYSE.L
@@ -22,7 +22,7 @@ tickers:
   # - ^GSPC
   # - VHVG.L
   # - VNRX
-  - VUKG.L
+  # - VUKG.L
 
 home_currency: GBP
 

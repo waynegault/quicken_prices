@@ -507,8 +507,6 @@ def find_missing_ranges(
     ):
         return []
 
-    # end_date = end_date - pd.Timedelta(days=1)
-
     assert start_date <= end_date, "start_date must be less than or equal to end_date"
 
     if any(pd.isna(x) for x in [first_cache, last_cache]):
@@ -808,8 +806,7 @@ def fetch_ticker_data(ticker, start_date, end_date, current_price, config):
         else:
             # Cache is ok
             logging.info(
-                f"{ticker}: Cache loaded {first_cache.strftime('%d/%m/%Y')} to {last_cache.strftime('%d/%m/%Y')} ({len(cached_dates)} {pluralise("day", len(cached_dates))})."
-            )
+                f"{ticker}: Cache loaded {first_cache.strftime('%d/%m/%Y')} to {last_cache.strftime('%d/%m/%Y')} ({len(cached_dates)} {pluralise('day', len(cached_dates))}).")
 
     # Determine missing date ranges (if no cache data, will return download start to finish)
     missing_ranges = find_missing_ranges(start_date, end_date, first_cache, last_cache)
@@ -1005,7 +1002,7 @@ def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
             pickle.dump(data, f)
 
         logging.info(
-            f"{ticker} cache saved with {len(data)} {pluralise("record",len(data))}"
+            f"{ticker} cache saved with {len(data)} {pluralise('record',len(data))}"
         )
     except Exception as e:
         logging.error(f"Failed to save cache for {ticker}: {e}")
@@ -1062,81 +1059,94 @@ def clean_cache(config):
 
 
 # Process Data ################################
-def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Converts prices to GBP based on ticker type and currency.
+
+def convert_prices(
+    df: pd.DataFrame, valid_currencies: Optional[List[str]] = None
+) -> pd.DataFrame:
+    """Converts prices to GBP based on ticker type and currency.
 
     Args:
-        df: DataFrame containing historical data.
+        df: DataFrame containing historical data. Must include columns:
+            'Date', 'Type', 'Ticker', 'Old Price', 'Original Currency', 'Price'.
+        valid_currencies: Optional list of valid currency codes. If provided,
+            warnings are logged for any unrecognized currencies.
 
     Returns:
         DataFrame with prices converted to GBP where applicable.
+        Raises ValueError if missing FX rates are found.
+        Returns empty DataFrame on other errors.
     """
     if df.empty:
-        logging.error(
-            "Empty DataFrame received in `convert_prices`. No data to process."
-        )
+        logging.error("Empty DataFrame received.")
         return pd.DataFrame()
 
-    # Remove time component to enable better matching of FX with stock.
-    df["Date"] = pd.to_datetime(df["Date"]).dt.date
+    logging.debug(f"Pandas Version: {pd.__version__}")
+    logging.debug(f"Date dtype before conversion: {df['Date'].dtype}")
 
-    # Extract exchange rates for CURRENCY type
+    try:
+        df["Date"] = pd.to_datetime(df["Date"], errors="raise").dt.date
+    except (pd.errors.OutOfBoundsDatetime, ValueError) as e:  # Combine exceptions
+        logging.error(f"Datetime conversion error: {e}")
+        return pd.DataFrame()
+
+    logging.debug(f"Date dtype after conversion: {df['Date'].dtype}")
+
+    weekend_mask = df["Date"].apply(lambda x: x.weekday() >= 5)
+    if weekend_mask.any():
+        logging.warning(
+            f"{weekend_mask.sum()} data points are on weekends and have been removed."
+        )
+        df = df[~weekend_mask].copy()
+
+    if valid_currencies:  # Simplified check
+        invalid_currencies = df.loc[
+            ~df["Original Currency"].isin(valid_currencies), "Original Currency"
+        ].unique()
+        if invalid_currencies.size > 0:  # more efficient than .any()
+            logging.warning(f"Found rows with invalid currencies: {invalid_currencies}")
+
     exchange_rate_df = (
         df[df["Type"] == "CURRENCY"]
-        .rename(columns={"Old Price": "FX Rate", "Ticker": "FX Ticker"})
-        .loc[:, ["Date", "FX Ticker", "FX Rate"]]
-        .sort_values(by=["Date", "FX Ticker"])
-    ).copy()
+        .groupby(["Date", "Ticker"])["Old Price"]
+        .first()
+        .rename("FX Rate")
+        .reset_index()
+        .rename(columns={"Ticker": "FX Ticker"})
+    )
 
-    # Initialise FX-related columns
     df = df.copy()
     df["FX Ticker"] = "-"
     df = df.rename(columns={"Price": "Old Price"})
 
-    # Non-GBP FX Ticker Assignment
     non_gbp_mask = ~df["Original Currency"].isin(["GBP", "GBp"])
     df.loc[non_gbp_mask, "FX Ticker"] = (
         df.loc[non_gbp_mask, "Original Currency"] + "GBP=X"
     )
-
-    # Handle USD Special Case
     df.loc[df["Original Currency"] == "USD", "FX Ticker"] = "GBP=X"
 
-    # Merge FX rates into the main DataFrame
-    df = df.merge(
-        exchange_rate_df,
-        how="left",
-        on=["Date", "FX Ticker"],
-        suffixes=("", "_merge"),
-    )
+    df["FX Ticker"] = df["FX Ticker"].astype(str)
+    exchange_rate_df["FX Ticker"] = exchange_rate_df["FX Ticker"].astype(str)
 
-    # GBP and GBp Handling
+    df = pd.merge(df, exchange_rate_df, on=["Date", "FX Ticker"], how="left")
+
     gbp_mask = df["Original Currency"] == "GBP"
     gbp_pence_mask = df["Original Currency"] == "GBp"
+
+    # More efficient vectorized assignment
     df.loc[gbp_mask, "FX Rate"] = 1.0
     df.loc[gbp_pence_mask, "FX Rate"] = 0.01
-    # df.loc[gbp_pence_mask, "Price"] = df["Old Price"] * 0.01
 
-    # Identify rows with missing FX Rates
     missing_fx_mask = df["FX Rate"].isna() & non_gbp_mask
     if missing_fx_mask.any():
         missing_count = missing_fx_mask.sum()
-        logging.error(
-            f"{missing_count} rows have missing FX rates and will be removed."
+        raise ValueError(
+            f"{missing_count} rows have missing FX rates. This is not allowed."
         )
-        print(f"\nRows with Missing FX Rates:\n{df.loc[missing_fx_mask]}\n")
-        # Remove rows with missing FX rates for non-GBP currencies
-        df = df[~missing_fx_mask].copy()
 
-    # Calculate final prices for non-GBP currencies
     df["Price"] = df["Old Price"] * df["FX Rate"]
-
-    # Log the number of successfully converted prices
     converted_count = df[~df["FX Ticker"].str.contains("-")].shape[0]
     logging.info(f"{converted_count} prices successfully converted to GBP.")
 
-    # Return the required columns
     return df[["Ticker", "Price", "Date"]]
 
 
