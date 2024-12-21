@@ -44,6 +44,7 @@ import numpy as np
 from numpy import busday_count
 import pandas as pd
 from pandas import Timestamp, Timedelta
+from pandas._libs.tslibs.nattype import NaTType
 import yaml
 import yfinance as yf
 
@@ -55,6 +56,7 @@ import pygetwindow as gw
 # Constants ###################################
 
 SECONDS_IN_A_DAY = 86400
+NaTType = type(pd.NaT)
 CACHE_COLUMNS = ("Ticker", "Old Price", "Date")
 DEFAULT_CONFIG = {
     "home_currency": "GBP",
@@ -298,56 +300,6 @@ def setup_logging(config: Dict[str, Any]) -> None:
     logging.info(f"Log at: {log_file_path}")
 
 
-def log_error(message):
-    """Logs an error message with the line number where the error occurred.
-
-    Args:
-        message: The error message to log.
-    """
-    exc_info = sys.exc_info()
-    if exc_info:
-        # Extract traceback information
-        tb = traceback.extract_tb(exc_info[2])[-1]
-        filename, lineno, funcname, _ = tb
-        error_line = f"Error on line {lineno} of {filename} in {funcname}: {message}"
-        logging.error(error_line)
-    else:
-        # No exception information provided, log the message as-is
-        logging.error(message)
-
-
-def error(*args, **kwargs):
-    """Wrapper for logging.error that captures the error line number and attempts to extract the original error message."""
-    exc_info = sys.exc_info()
-    log_error(message="Error occurred", exc_info=exc_info)
-
-    # Directly use traceback.format_exc() to get the full traceback
-    full_traceback = traceback.format_exc(exc_info)
-
-    logging.error(full_traceback, *args, **kwargs)
-
-
-# Similar wrapper functions for warning, info, etc. (implement for each level as needed)
-def warning(message, *args, **kwargs):
-    """Wrapper for logging.error that captures the error line number and attempts to extract the original error message."""
-    log_error(message, exc_info=sys.exc_info())
-
-    original_error = ""
-    if args:
-        try:
-            # Attempt to extract the original error from the first argument
-            original_error = str(args[0])
-        except Exception:
-            # If extracting the first argument fails, try to join all arguments
-            try:
-                original_error = ", ".join(map(str, args))
-            except Exception:
-                # If joining arguments fails, use a generic placeholder
-                original_error = "Error details unavailable"
-
-    logging.warning(f"{message} - Original error: {original_error}", *args, **kwargs)
-
-
 # Initialisation ##############################
 
 
@@ -394,25 +346,26 @@ def panda_date(
     date_obj: Union[
         str, datetime.date, datetime.datetime, pd.Timestamp, int, float, None
     ]
-) -> pd.Timestamp:
-    """Converts a date-like object to a UTC-normalized pandas Timestamp.
+) -> Union[pd.Timestamp, NaTType]:
+    """Converts a date-like object to a UTC midnight pandas Timestamp.
 
     Handles strings, datetime objects, pandas Timestamps, and Unix epoch
-    timestamps (seconds or milliseconds). Returns pd.NaT for invalid input.
+    timestamps (seconds or milliseconds). Assumes UTC for naive datetimes.
+    Returns pd.NaT for invalid input.
 
     Args:
         date_obj: The date object to convert.
 
     Returns:
-        A UTC-normalized pandas Timestamp, or pd.NaT if the input is invalid.
+        A UTC midnight pandas Timestamp, or pd.NaT if the input is invalid.
     """
     if date_obj is None or pd.isna(date_obj):  # Explicitly handle None or NaN
         return pd.NaT
 
     try:
         if isinstance(date_obj, (int, float)):
+            date_obj = abs(date_obj)  # Handle negative epoch timestamps
 
-            date_obj = abs(date_obj) # for some reason, the epoch date for ^GSPC first trading is negative
             # Determine if seconds or milliseconds, with range check
             if 0 <= date_obj < 10**10:  # Likely seconds
                 unit = "s"
@@ -420,46 +373,21 @@ def panda_date(
                 unit = "ms"
             else:
                 raise ValueError(f"Integer/float date_obj is out of range: {date_obj}")
-            date_obj = pd.Timestamp(date_obj, unit=unit, tz="UTC")
+
+            date_obj = pd.Timestamp(date_obj, unit=unit, tz="UTC").floor("D")
             logging.debug(
                 f"Converted unix epoch to UTC Timestamp: {date_obj} type: {type(date_obj)}"
             )
 
-        elif isinstance(date_obj, datetime.datetime):
-            # Handle timezone-naive datetime.datetime
-            if date_obj.tzinfo is None:
-                date_obj = pd.Timestamp(date_obj).tz_localize("UTC")
-                logging.debug(
-                    f"Localized naive datetime to UTC: {date_obj} type: {type(date_obj)}"
-                )
-
-            else:
-                date_obj = pd.Timestamp(date_obj).tz_convert("UTC")
-                logging.debug(
-                    f"Converted datetime to UTC: {date_obj} type: {type(date_obj)}"
-                )
-
-        elif isinstance(date_obj, datetime.date):  # datetime.date is naive
-            date_obj = pd.Timestamp(date_obj).tz_localize("UTC")
-            logging.debug(
-                f"Converted datetime.date to UTC Timestamp: {date_obj} type: {type(date_obj)}"
-            )
-
-        elif isinstance(date_obj, pd.Timestamp):
-            # Handle timezone-naive pandas.Timestamp
-            if date_obj.tzinfo is None:
-                date_obj = date_obj.tz_localize("UTC")
-                logging.debug(
-                    f"Localized naive pd.Timestamp to UTC: {date_obj} type: {type(date_obj)}"
-                )
-            else:
-                date_obj = date_obj.tz_convert("UTC")
-                logging.debug(
-                    f"Converted naive pd.Timestamp to UTC: {date_obj} type: {type(date_obj)}"
-                )
+        elif isinstance(date_obj, (datetime.datetime, datetime.date, pd.Timestamp)):
+            date_obj = pd.to_datetime(date_obj) # Convert to datetime if not already
+            if date_obj.tz is None:  # Check for naive datetimes
+                date_obj = date_obj.tz_localize('UTC')  # Localize to UTC
+            date_obj = date_obj.tz_convert('UTC').floor('D') # Convert to UTC and floor
+            logging.debug(f"Normalized datetime: {date_obj} type: {type(date_obj)}")
 
         else:  # Attempt to parse string
-            date_obj = pd.to_datetime(date_obj, utc=True, dayfirst=True)
+            date_obj = pd.to_datetime(date_obj, utc=True, dayfirst=True).floor("D")
             logging.debug(
                 f"Parsed string date object: {date_obj} type: {type(date_obj)}"
             )
@@ -472,13 +400,12 @@ def panda_date(
 
 
 def adjust_for_weekend(
-    date: Union[pd.Timestamp, datetime.date, datetime.datetime, None],
-    direction: str = "forward",
-) -> Union[pd.Timestamp, datetime.date, datetime.datetime, None]:
+    date: Union[pd.Timestamp, NaTType], direction: str = "forward"
+) -> Union[pd.Timestamp, NaTType]:
     """Adjusts a date for weekends."""
 
-    if date is None or pd.isna(date):
-        return None
+    if date is pd.NaT or pd.isna(date):
+        return pd.NaT
 
     original_date = date
 
@@ -536,7 +463,7 @@ def get_date_range(
     )
 
     # Get today's date, naive timestamp
-    today = pd.Timestamp("now", tz="UTC").floor("D")
+    today = panda_date("today")
     logging.debug(f"Today's date: {today}. Type: {type(today)}")
 
     # Calculate end date (optional: adjust for weekend using adjust_for_weekend)
@@ -580,55 +507,64 @@ def get_business_days(
 
 
 def find_missing_ranges(
-    start_date: pd.Timestamp,
-    end_date: pd.Timestamp,
-    first_cache: pd.Timestamp,
-    last_cache: pd.Timestamp,
+    start_date: Union[pd.Timestamp, NaTType],
+    end_date: Union[pd.Timestamp, NaTType],
+    first_cache: Union[pd.Timestamp, NaTType],
+    last_cache: Union[pd.Timestamp, NaTType],
 ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
-    """Finds missing date ranges between a download period and cached data."""
+    """Finds missing date ranges between a download period and cached data.
 
-    missing_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+    Args:
+        start_date: Start of the download period.
+        end_date: End of the download period.
+        first_cache: First date in the cache.
+        last_cache: Last date in the cache.
 
-    # Validate inputs
+    Returns:
+        A list of tuples representing missing date ranges (start, end).
+        Returns an empty list if any input dates are NaT or if start_date > end_date after adjustments.
+    """
+
     if any(pd.isna(x) for x in [start_date, end_date]):
         return []
 
-    # Get today's date
-    today = pd.Timestamp('now', tz='UTC').floor('D')
+    start_date = adjust_for_weekend(start_date, "forward")
+    end_date = adjust_for_weekend(end_date, "back")
 
-    # Adjust end_date to exclude today if necessary
-    if end_date >= pd.Timestamp(today):
+    if start_date > end_date:
+        return []  # Return empty list if invalid range after weekend adjustment
+
+    today = panda_date("today")
+
+    if end_date >= today:
         logging.debug(
             f"Excluding today from end_date: {end_date} -> {today - pd.Timedelta(days=1)}"
         )
         end_date = today - pd.Timedelta(days=1)
 
-    assert start_date <= end_date, "start_date must be less than or equal to end_date"
+    missing_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
 
     if any(pd.isna(x) for x in [first_cache, last_cache]):
         missing_ranges.append((start_date, end_date))
         return missing_ranges
 
-    assert (
-        first_cache <= last_cache
-    ), "first_cache must be less than or equal to last_cache"
+    if first_cache > last_cache:
+        first_cache, last_cache = last_cache, first_cache
 
-    # Find missing range before cached data
     if start_date < first_cache:
         missing_ranges.append(
             (start_date, min(end_date, first_cache - pd.Timedelta(days=1)))
         )
 
-    # Find missing range after cached data
     if end_date > last_cache:
         missing_ranges.append(
             (max(start_date, last_cache + pd.Timedelta(days=1)), end_date)
         )
 
-    print("find_missing_ranges")
-    for i, (start_date, end_date) in enumerate(missing_ranges):
-        print(f"start_date: {start_date}. Type: {type(start_date)}")
-        print(f"end_date: {end_date}. Type: {type(end_date)}/n")
+    if missing_ranges:
+        logging.debug("Missing Ranges:")
+        for start, end in missing_ranges:
+            logging.debug(f"Start: {start}, End: {end}")
 
     return missing_ranges
 
@@ -863,16 +799,12 @@ def fetch_historical_data(
         return pd.DataFrame(columns=list(CACHE_COLUMNS) + ["Type", "Original Currency"])
 
 
-def fetch_ticker_data(ticker, start_date, end_date, current_price, config):
+def fetch_ticker_data(
+    ticker: str, start_date: pd.Timestamp, end_date: pd.Timestamp, current_price: float, config:dict
+):
     """
     Fetch and manage historical data for a ticker either as cache, download or a combination of the two.
     """
-
-    # Ensure start_date and end_date are pd.Timestamp
-    if isinstance(start_date, datetime.date):
-        start_date = pd.Timestamp(start_date)
-    if isinstance(end_date, datetime.date):
-        end_date = pd.Timestamp(end_date)
 
     cache_dir = os.path.join(config["paths"]["base"], config["paths"]["cache"])
     os.makedirs(cache_dir, exist_ok=True)
@@ -922,14 +854,11 @@ def fetch_ticker_data(ticker, start_date, end_date, current_price, config):
 
     # Get missing data
     if missing_ranges:
-
         if isinstance(missing_ranges, (list, tuple)):
             # Handle single tuple or list of tuples case
             for start_date, end_date in missing_ranges:
-
                 try:
                     downloaded_data = download_data(ticker, start_date, end_date)
-
                 except Exception as e:
                     logging.error(f"Error downloading data from {start_date} to {end_date}: {e}")
                     continue  # Skip to next iteration on error
@@ -980,7 +909,7 @@ def fetch_ticker_data(ticker, start_date, end_date, current_price, config):
 
     # get today's latest prices
     if isinstance(current_price, float):
-        new_row = pd.Series({"Ticker": ticker, "Old Price": current_price, "Date": pd.Timestamp.now().date()})
+        new_row = pd.Series({"Ticker": ticker, "Old Price": current_price, "Date": panda_date("today")})
         # takes the series and converts it into a DataFrame with one row and the correct column names
         combined_data = pd.concat([combined_data, new_row.to_frame().T], ignore_index=True)  # more efficient than append
         download_count += 1
@@ -1036,16 +965,22 @@ def download_data(ticker_symbol, start, end):
     # Make sure dates in right format
     start = panda_date(start)
     end = panda_date(end)
-    today = pd.Timestamp.now().date()
+    today = panda_date("today")
+
+    print("download_data")
+    print(f"start {start} type: {type(start)}")
+    print(f"end {end} type: {type(end)}")
 
     # Dont look for 'close' today as it probably wont exist yet
-    if start == today:
+    if start >= today:
         return pd.DataFrame(columns=CACHE_COLUMNS)
 
     # Fetch data using yfinance
     try:
         ticker_obj = yf.Ticker(ticker_symbol)
-        raw_data = ticker_obj.history(start=start, end=end, interval="1d")
+        raw_data = ticker_obj.history(
+            start=start, end=end + pd.Timedelta(days=1), interval="1d"
+        )
 
         if raw_data.empty:
             logging.info(
@@ -1186,8 +1121,7 @@ def convert_prices(
         logging.error("Empty DataFrame received.")
         return pd.DataFrame()
 
-    logging.debug(f"Pandas Version: {pd.__version__}")
-    logging.debug(f"Date dtype before conversion: {df['Date'].dtype}")
+    print(df["Date"])
 
     try:
         df["Date"] = pd.to_datetime(df["Date"], errors="raise").dt.date
