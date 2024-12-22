@@ -3,31 +3,31 @@
 # Tickers to track
 tickers:
   - 0P00013P6I.L
-  - 0P00018XAP.L
-  - AMGN
-  - BZG25.NYM
-  - CUKX.L
-  - CYSE.L
-  - ELIX.L
-  - ^FTAS
-  - ^FTSE
-  - GLTA.L
-  - GCG25.CMX
-  - HMWO.L
-  - IHCU.L
-  - IIND.L
-  - IUIT.L
-  - SEE.L
-  - ^OEX
-  - ^GSPC
-  - VHVG.L
-  - VNRX
-  - VUKG.L
+  # - 0P00018XAP.L
+  # - AMGN
+  # - BZG25.NYM
+  # - CUKX.L
+  # - CYSE.L
+  # - ELIX.L
+  # - ^FTAS
+  # - ^FTSE
+  # - GLTA.L
+  # - GCG25.CMX
+  # - HMWO.L
+  # - IHCU.L
+  # - IIND.L
+  # - IUIT.L
+  # - SEE.L
+  # - ^OEX
+  # - ^GSPC
+  # - VHVG.L
+  # - VNRX
+  # - VUKG.L
 
 home_currency: GBP
 
 #  Data period to collect in years (0.08 years ≈ 1 month,0.08 * 365 ≈ 29.2 days)
-collection_period_years: 20
+collection_period_years: 5
 
 retries:
   max_retries: 3

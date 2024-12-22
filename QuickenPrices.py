@@ -56,7 +56,6 @@ import pygetwindow as gw
 # Constants ###################################
 
 SECONDS_IN_A_DAY = 86400
-NaTType = type(pd.NaT)
 CACHE_COLUMNS = ("Ticker", "Old Price", "Date")
 DEFAULT_CONFIG = {
     "home_currency": "GBP",
@@ -344,7 +343,7 @@ def pluralise(title: str, quantity: int) -> str:
 
 def panda_date(
     date_obj: Union[
-        str, datetime.date, datetime.datetime, pd.Timestamp, int, float, None
+        str, datetime.date, datetime.datetime, pd.Timestamp, int, float, NaTType, None
     ]
 ) -> Union[pd.Timestamp, NaTType]:
     """Converts a date-like object to a UTC midnight pandas Timestamp.
@@ -359,38 +358,34 @@ def panda_date(
     Returns:
         A UTC midnight pandas Timestamp, or pd.NaT if the input is invalid.
     """
-    if date_obj is None or pd.isna(date_obj):  # Explicitly handle None or NaN
+    if pd.isna(date_obj):  # Explicitly handle None or NaN
         return pd.NaT
 
     try:
         if isinstance(date_obj, (int, float)):
+            # Handle epoch timestamps
             date_obj = abs(date_obj)  # Handle negative epoch timestamps
-
-            # Determine if seconds or milliseconds, with range check
-            if 0 <= date_obj < 10**10:  # Likely seconds
-                unit = "s"
-            elif 10**10 <= date_obj < 10**13:  # Likely milliseconds
-                unit = "ms"
-            else:
-                raise ValueError(f"Integer/float date_obj is out of range: {date_obj}")
-
+            unit = "s" if date_obj < 10**10 else "ms"  # Determine units
             date_obj = pd.Timestamp(date_obj, unit=unit, tz="UTC").floor("D")
-            logging.debug(
-                f"Converted unix epoch to UTC Timestamp: {date_obj} type: {type(date_obj)}"
-            )
-
+            logging.debug(f"Converted epoch to UTC: {date_obj}")
+        
         elif isinstance(date_obj, (datetime.datetime, datetime.date, pd.Timestamp)):
-            date_obj = pd.to_datetime(date_obj) # Convert to datetime if not already
-            if date_obj.tz is None:  # Check for naive datetimes
-                date_obj = date_obj.tz_localize('UTC')  # Localize to UTC
-            date_obj = date_obj.tz_convert('UTC').floor('D') # Convert to UTC and floor
-            logging.debug(f"Normalized datetime: {date_obj} type: {type(date_obj)}")
-
-        else:  # Attempt to parse string
+            # Handle datetime-like objects
+            date_obj = pd.to_datetime(date_obj)  # Ensure it's a pandas Timestamp
+            if date_obj.tz is None:  # Localise naive datetimes
+                date_obj = date_obj.tz_localize("UTC")
+            else:  # Convert timezone-aware to UTC
+                date_obj = date_obj.tz_convert("UTC")
+            date_obj = date_obj.floor("D")  # Floor to midnight
+            logging.debug(f"Normalized datetime: {date_obj}")
+        
+        elif isinstance(date_obj, str):  # Handle strings
             date_obj = pd.to_datetime(date_obj, utc=True, dayfirst=True).floor("D")
-            logging.debug(
-                f"Parsed string date object: {date_obj} type: {type(date_obj)}"
-            )
+            logging.debug(f"Parsed string date: {date_obj}")
+
+        else:
+            logging.warning(f"Unhandled date type: {type(date_obj)}")
+            return pd.NaT
 
         return date_obj
 
@@ -399,47 +394,54 @@ def panda_date(
         return pd.NaT
 
 
-def adjust_for_weekend(
-    date: Union[pd.Timestamp, NaTType], direction: str = "forward"
-) -> Union[pd.Timestamp, NaTType]:
-    """Adjusts a date for weekends."""
 
+def adjust_for_weekend(
+    date: Union[pd.Timestamp, datetime.date, datetime.datetime, NaTType],
+    direction: str = "forward",
+) -> Union[pd.Timestamp, NaTType]:
+    """
+    Adjusts a date for weekends. If the date falls on a Saturday or Sunday,
+    shifts it to the nearest weekday in the specified direction.
+
+    Args:
+        date: A date-like object (pandas Timestamp, datetime.date, or datetime.datetime).
+        direction: Either "forward" to move to the next weekday or "back" to move to the previous weekday.
+
+    Returns:
+        A pandas Timestamp adjusted for weekends, or pd.NaT for invalid input.
+    """
     if date is pd.NaT or pd.isna(date):
         return pd.NaT
-
-    original_date = date
 
     if not isinstance(date, (pd.Timestamp, datetime.date, datetime.datetime)):
         raise TypeError(
             f"Input date must be a pandas Timestamp or datetime.date/datetime object. Got {type(date)}."
         )
 
+    if not isinstance(date, pd.Timestamp):
+        date = pd.Timestamp(date)  # Standardise to pandas Timestamp
+
+    # Handle timezone-naive vs. timezone-aware
+    if date.tzinfo is None:
+        date = date.tz_localize("UTC")  # Assume UTC for naive datetimes
+
     if date.weekday() in (5, 6):  # Saturday or Sunday
         if direction == "forward":
             adjustment = 7 - date.weekday()  # Saturday -> +2, Sunday -> +1
         elif direction == "back":
-            adjustment = (
-                -1 if date.weekday() == 5 else -2
-            )  # Saturday -> -1, Sunday -> -2
+            adjustment = -1 if date.weekday() == 5 else -2  # Saturday -> -1, Sunday -> -2
         else:
-            raise ValueError("Invalid direction. Must be 'forward' or 'back'.")
-        adjusted_date = date + pd.Timedelta(days=adjustment)
-    else:
-        adjusted_date = date
+            raise ValueError(
+                f"Invalid direction '{direction}'. Must be 'forward' usually for start_date or 'back', usually for end_date."
+            )
+        date += pd.Timedelta(days=adjustment)
 
-    logging.debug(
-        f"adjust_for_weekend: from {original_date} {type(original_date)} to {adjusted_date} {type(adjusted_date)}"
-    )
-
-    return adjusted_date
+    return date
 
 
-def get_date_range(
-    config: dict,
-) -> Tuple[
-    pd.Timestamp, pd.Timestamp
-]:
-    """Calculates the start and end dates (naive Timestamps).
+def get_date_range(config: dict) -> Tuple[Union[pd.Timestamp, NaTType], Union[pd.Timestamp, NaTType]]:
+    """
+    Calculates the start and end dates (naive Timestamps).
 
     Considers weekends and the specified collection period (in years).
     Returns naive Timestamps to avoid timezone comparison issues later in the code.
@@ -450,69 +452,95 @@ def get_date_range(
     Returns:
         A tuple containing the start and end dates (naive Timestamps).
     """
+    # Validate input configuration
     if "collection_period_years" not in config:
         raise KeyError("Config is missing 'collection_period_years' key.")
 
     collection_period_years = config["collection_period_years"]
-    if not isinstance(collection_period_years, (int, float)):
-        raise ValueError("'collection_period_years' must be an integer or float.")
+    if not isinstance(collection_period_years, (int, float)) or collection_period_years <= 0:
+        raise ValueError(
+            "'collection_period_years' must be a positive number."
+        )
 
+    # Approximate the collection period in days
     collection_period_days = int(round(collection_period_years * 365.25))
     logging.info(
         f"Collection period: {collection_period_years} years ({collection_period_days} days)."
     )
 
-    # Get today's date, naive timestamp
+    # Get today's date as a naive pandas Timestamp
     today = panda_date("today")
     logging.debug(f"Today's date: {today}. Type: {type(today)}")
 
-    # Calculate end date (optional: adjust for weekend using adjust_for_weekend)
-    end_date = adjust_for_weekend(today, direction="back") or today
+    # Ensure today is valid
+    if today is pd.NaT:
+        raise ValueError("Unable to determine today's date.")
+
+    # Calculate the end date, adjusting for weekends
+    end_date: Timestamp | NaTType = adjust_for_weekend(today, direction="back")
     logging.debug(f"Calculated end_date: {end_date}. Type: {type(end_date)}")
 
-    # Calculate start date
+    # Calculate the start date
     start_date = end_date - pd.Timedelta(days=collection_period_days)
 
-    # Optional: adjust for weekend using adjust_for_weekend
-    start_date = adjust_for_weekend(start_date, direction="forward") or start_date
+    # Adjust start date for weekends
+    start_date = adjust_for_weekend(start_date, direction="forward")
     logging.debug(f"Calculated start_date: {start_date}. Type: {type(start_date)}")
 
-    return (start_date, end_date)
+    # Return both dates as Timestamps
+    return start_date, end_date
 
 
 def get_business_days(
     start_date: pd.Timestamp, end_date: pd.Timestamp
 ) -> List[pd.Timestamp]:
-    """Generates a list of business days between two dates (inclusive).
+    """
+    Generates a list of business days between two timezone-aware UTC pandas Timestamps (inclusive).
+    Validates that no weekends are included in the output.
 
     Business days exclude weekends (Saturday and Sunday) but do not account for public holidays.
 
     Args:
-        start_date: The start date (naive pandas Timestamp).
-        end_date: The end date (naive pandas Timestamp).
+        start_date: The start date (timezone-aware UTC pandas Timestamp).
+        end_date: The end date (timezone-aware UTC pandas Timestamp).
 
     Returns:
         A list of pandas Timestamps representing business days.
-        Returns an empty list if either input date is pd.NaT or if start date is after end date.
+        Returns an empty list if start_date is after end_date.
     """
     # Validate inputs
-    if pd.isna(start_date) or pd.isna(end_date) or start_date > end_date:
+    if not isinstance(start_date, pd.Timestamp) or not isinstance(end_date, pd.Timestamp):
+        raise TypeError("Both start_date and end_date must be pandas Timestamps.")
+    if not start_date.tz or not end_date.tz:
+        raise ValueError("Both start_date and end_date must be timezone-aware.")
+    if start_date.tz != pd.Timestamp.now(tz="UTC").tz:
+        raise ValueError("Both start_date and end_date must be in UTC.")
+    if start_date > end_date:
+        logging.warning("Start date is after end date. Returning an empty list.")
         return []
 
     # Generate date range
-    date_range = pd.date_range(start=start_date.floor("D"), end=end_date.floor("D"))
-    # Filter weekdays (Monday=0, Sunday=6)
-    business_days = date_range[date_range.weekday < 5]
-    return business_days.to_list()
+    date_range = pd.date_range(start=start_date, end=end_date, freq="D", tz="UTC")
+
+    # Filter business days (Monday=0, Sunday=6)
+    business_days = date_range[date_range.weekday < 5].to_list()
+
+    # Temporary validation: Ensure no weekends in the result
+    for day in business_days:
+        if day.weekday() >= 5:  # Saturday or Sunday
+            raise ValueError(f"Weekend date detected in business days list: {day}")
+
+    return business_days
 
 
 def find_missing_ranges(
-    start_date: Union[pd.Timestamp, NaTType],
-    end_date: Union[pd.Timestamp, NaTType],
-    first_cache: Union[pd.Timestamp, NaTType],
-    last_cache: Union[pd.Timestamp, NaTType],
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+    first_cache: pd.Timestamp,
+    last_cache: pd.Timestamp,
 ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
-    """Finds missing date ranges between a download period and cached data.
+    """
+    Finds missing date ranges between a download period and cached data.
 
     Args:
         start_date: Start of the download period.
@@ -524,47 +552,74 @@ def find_missing_ranges(
         A list of tuples representing missing date ranges (start, end).
         Returns an empty list if any input dates are NaT or if start_date > end_date after adjustments.
     """
-
-    if any(pd.isna(x) for x in [start_date, end_date]):
+    # Validate inputs for NaT
+    if pd.isna(start_date) or pd.isna(end_date):
+        logging.warning("Start or end date is NaT. Returning an empty list.")
         return []
 
+    # Adjust start and end dates for weekends
     start_date = adjust_for_weekend(start_date, "forward")
     end_date = adjust_for_weekend(end_date, "back")
 
+    # Validate adjusted range
     if start_date > end_date:
-        return []  # Return empty list if invalid range after weekend adjustment
+        logging.warning("Adjusted start_date is after end_date. Returning an empty list.")
+        return []
 
+    # Exclude today's date from the range
     today = panda_date("today")
-
+    if pd.isna(today):
+        raise ValueError("Failed to retrieve today's date.")
     if end_date >= today:
         logging.debug(
             f"Excluding today from end_date: {end_date} -> {today - pd.Timedelta(days=1)}"
         )
         end_date = today - pd.Timedelta(days=1)
 
-    missing_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+    # Handle missing or invalid cache dates
+    if pd.isna(first_cache) or pd.isna(last_cache):
+        logging.debug("Cache dates are missing. Returning full range as missing.")
+        return [(start_date, end_date)]
 
-    if any(pd.isna(x) for x in [first_cache, last_cache]):
-        missing_ranges.append((start_date, end_date))
-        return missing_ranges
-
+    # Ensure cache dates are in correct order
     if first_cache > last_cache:
+        logging.debug(f"Swapping first_cache ({first_cache}) and last_cache ({last_cache}).")
         first_cache, last_cache = last_cache, first_cache
 
+    missing_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+
+    # Add range before the cache
     if start_date < first_cache:
-        missing_ranges.append(
-            (start_date, min(end_date, first_cache - pd.Timedelta(days=1)))
-        )
+        range_start = start_date
+        range_end = min(end_date, first_cache - pd.Timedelta(days=1))
+        if range_start <= range_end:  # Ensure valid range
+            missing_ranges.append((range_start, range_end))
 
+    # Add range after the cache
     if end_date > last_cache:
-        missing_ranges.append(
-            (max(start_date, last_cache + pd.Timedelta(days=1)), end_date)
-        )
+        range_start = max(start_date, last_cache + pd.Timedelta(days=1))
+        range_end = end_date
+        if range_start <= range_end:  # Ensure valid range
+            missing_ranges.append((range_start, range_end))
 
+    # Log missing ranges
     if missing_ranges:
         logging.debug("Missing Ranges:")
         for start, end in missing_ranges:
             logging.debug(f"Start: {start}, End: {end}")
+    else:
+        logging.debug("No missing ranges detected.")
+
+    # Temporary validation: Ensure start and end of each range are not weekends
+    for start, end in missing_ranges:
+        if start.weekday() >= 5:  # Start is a weekend
+            raise ValueError(
+                f"Range start falls on a weekend: Start={start}, End={end}"
+            )
+        if end.weekday() >= 5:  # End is a weekend
+            raise ValueError(
+                f"Range end falls on a weekend: Start={start}, End={end}"
+            )
 
     return missing_ranges
 
@@ -883,8 +938,8 @@ def fetch_ticker_data(
 
     combined_data_count = len(combined_data)
 
-    if not combined_data.equals(cache_data):
-        save_cache(ticker, combined_data, cache_dir)
+    # if not combined_data.equals(cache_data):
+    #     save_cache(ticker, combined_data, cache_dir)
 
     # get today's latest prices but not if today is a weekend
     today = panda_date("today")
@@ -948,61 +1003,100 @@ def load_cache(ticker: str, cache_dir: str) -> pd.DataFrame:
 
 
 @retry(Exception, config=config)
-def download_data(ticker_symbol, start, end):
+def download_data(ticker_symbol, start_date, end_date):
     """
     Downloads historical data for a ticker from yfinance and ensures consistency.
     Args:
         ticker_symbol: The ticker symbol to fetch data for.
-        start: Start date (tz-aware).
-        end: End date (tz-aware).
+        start_date: Start date (tz-aware).
+        end_date: End date (tz-aware).
     Returns:
         A cleaned DataFrame with historical data.
     """
-
-    # Make sure dates in right format
-    start = panda_date(start)
-    end = panda_date(end)
+    # Ensure dates are in the right format
+    start_date = panda_date(start_date)
+    end_date = panda_date(end_date)
     today = panda_date("today")
 
-    # Dont look for 'close' today as it probably wont exist yet
-    if start >= today:
+    print("\ndownload_data")
+    print(f"start_date {start_date} ")
+    print(f"end_date {end_date} ")
+
+    # Validate date conversion
+    if pd.isna(start_date) or pd.isna(end_date):
+        logging.error("Invalid download dates.")
+        return pd.DataFrame(columns=CACHE_COLUMNS)
+    # Skip today’s data if start_date is today or later
+    elif start_date >= today:
+        logging.error(
+            f"{ticker_symbol}: Start date {start_date.strftime('%d/%m/%Y')} is today or in the future. No data fetched."
+        )
         return pd.DataFrame(columns=CACHE_COLUMNS)
 
     # Fetch data using yfinance
+    extended_end = end_date + pd.Timedelta(days=1)
     try:
         ticker_obj = yf.Ticker(ticker_symbol)
         raw_data = ticker_obj.history(
-            start=start, end=end + pd.Timedelta(days=1), interval="1d"
+            start=start_date.date(), end=extended_end.date(), interval="1d"
         )
 
         if raw_data.empty:
-            logging.info(
-                f"{ticker_symbol}: yfinance returned no data from {start.strftime('%d/%m/%Y')} to {end.strftime('%d/%m/%Y')}."
+            logging.error(
+                f"{ticker_symbol}: yfinance returned no data from {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}."
             )
             return pd.DataFrame(columns=CACHE_COLUMNS)
 
-        # Reset index to ensure 'Date' is a column
+        # Reset index and ensure 'Date' column exists
         raw_data.reset_index(inplace=True)
 
         # Rename `Close` to `Old Price`
         raw_data = raw_data.rename(columns={"Close": "Old Price"})
 
-        # Apply panda_date function to the entire 'Date' column
-        raw_data["Date"] = raw_data["Date"].apply(panda_date)
-
-        # Add ticker to df
+        # Add ticker symbol to the DataFrame
         raw_data["Ticker"] = ticker_symbol
 
-        # Subset df
+        # Subset to expected columns
         raw_data = raw_data[list(CACHE_COLUMNS)]
+
+        print("\nPre panda_date:")
+        print(f"Example first row of data:\n {raw_data.head(1)}")
+        weekend_rows = raw_data[raw_data["Date"].dt.weekday >= 5]
+        if not weekend_rows.empty:
+            print(f"First 5 weekend dates for {ticker_symbol}:\n")
+            print(weekend_rows.head(5))
+        else:
+            print("No weekend rows")
+        print()
+
+        # Apply panda_date to the 'Date' column
+        raw_data["Date"] = raw_data["Date"].apply(panda_date)
+
+        print("Post panda_date:")
+        weekend_rows = raw_data[raw_data["Date"].dt.weekday >= 5]
+        if not weekend_rows.empty:
+            print(f"First 5 weekend dates for {ticker_symbol}:\n")
+            print(weekend_rows.head(5))
+        else:
+            print("No weekend rows")
+        print()
 
         # Get the earliest and latest dates
         earliest_date = raw_data["Date"].min()
         latest_date = raw_data["Date"].max()
 
         logging.info(
-            f"{ticker_symbol}: Downloaded {earliest_date.strftime('%d/%m/%Y')} to {latest_date.strftime('%d/%m/%Y')}."
+            f"{ticker_symbol}: Downloaded data from {earliest_date.strftime('%d/%m/%Y')} to {latest_date.strftime('%d/%m/%Y')}."
         )
+
+        # Temporary validation: Check for weekend dates
+        weekend_rows = raw_data[raw_data["Date"].dt.weekday >= 5]
+        if not weekend_rows.empty:
+            latest_weekend = weekend_rows["Date"].max()
+            count_weekends = len(weekend_rows)
+            logging.warning(
+                f"{ticker_symbol}: Data contains {count_weekends} weekend date(s). Latest example: {latest_weekend.strftime('%d/%m/%Y')}."
+            )
 
         return raw_data
 
