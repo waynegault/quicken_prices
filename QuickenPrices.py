@@ -198,7 +198,7 @@ def quicken_not_found_error():
     """
     Handle the case where the Quicken executable cannot be located.
     """
-    print(
+    logging.error(
         "\n❌ Critical Error: Quicken executable could not be located.\n"
         "✅ Suggestions:\n"
         "  1. Ensure Quicken is installed on your system.\n"
@@ -881,44 +881,41 @@ def fetch_ticker_data(
     else:
         combined_data = pd.concat([df, cache_data], ignore_index=True)
 
-    # Identify duplicates
-    duplicates = combined_data.duplicated(keep="first")  # Keep the first occurrence
-
-    # Check if duplicates exist and warn
-    num_duplicates = 0
-    if duplicates.any():
-        num_duplicates = duplicates.sum()
-        print(f"WARNING: {num_duplicates} duplicate rows found.")
-
-        # Display the duplicate rows
-        print("Duplicate rows:")
-        print(df[duplicates])
-
-        # Remove duplicates
-        combined_data.drop_duplicates(
-            keep="first", inplace=True
-        )  # using inplace is more memory efficient
-
-        print("Dataframe after removing duplicates:")
-        print(df)
-
     combined_data_count = len(combined_data)
 
     if not combined_data.equals(cache_data):
         save_cache(ticker, combined_data, cache_dir)
 
-    # get today's latest prices
-    if isinstance(current_price, float):
-        new_row = pd.Series({"Ticker": ticker, "Old Price": current_price, "Date": panda_date("today")})
+    # get today's latest prices but not if today is a weekend
+    today = panda_date("today")
+    adjusted_for_weekend_today = adjust_for_weekend(today, 'back')
+    if isinstance(current_price, float) and today == adjusted_for_weekend_today:
+        new_row = pd.Series({"Ticker": ticker, "Old Price": current_price, "Date": today})
         # takes the series and converts it into a DataFrame with one row and the correct column names
         combined_data = pd.concat([combined_data, new_row.to_frame().T], ignore_index=True)  # more efficient than append
         download_count += 1
         combined_data_count += 1
-        logging.info(f"Today's latest price is {current_price}.")
+        logging.info(f"Latest price is {current_price}.")
 
     logging.info(
-        f"{ticker}: Retrieved {cache_count} {pluralise('day',cache_count)} cache, {download_count} {pluralise('day',download_count)} download, with {num_duplicates} {pluralise('day',num_duplicates)} duplicated. {combined_data_count} {pluralise('day',combined_data_count)} in total.\n"
+        f"{ticker}: Retrieved {cache_count} {pluralise('day',cache_count)} cache, {download_count} {pluralise('day',download_count)} downloaded. {combined_data_count} {pluralise('day',combined_data_count)} in total."
     )
+
+    # check for weekend dates
+    # Identify weekend dates (Saturday: 5, Sunday: 6)
+    weekend_dates = combined_data[combined_data["Date"].dt.weekday.isin([5, 6])]
+
+    # Check if weekend dates exist and warn
+    num_weekend_dates = len(weekend_dates)
+    if num_weekend_dates > 0:
+        logging.warning(f"{ticker}: WARNING: {num_weekend_dates} weekend dates found.")
+
+        # Display the rows with weekend dates
+        print("\nRows with weekend dates:")
+        print(weekend_dates)
+    else:
+        logging.debug(f"{ticker}: Confirmed - no weekends in data.")
+    print()
     return combined_data
 
 
@@ -966,10 +963,6 @@ def download_data(ticker_symbol, start, end):
     start = panda_date(start)
     end = panda_date(end)
     today = panda_date("today")
-
-    print("download_data")
-    print(f"start {start} type: {type(start)}")
-    print(f"end {end} type: {type(end)}")
 
     # Dont look for 'close' today as it probably wont exist yet
     if start >= today:
@@ -1121,22 +1114,9 @@ def convert_prices(
         logging.error("Empty DataFrame received.")
         return pd.DataFrame()
 
-    print(df["Date"])
-
-    try:
-        df["Date"] = pd.to_datetime(df["Date"], errors="raise").dt.date
-    except (pd.errors.OutOfBoundsDatetime, ValueError) as e:  # Combine exceptions
-        logging.error(f"Datetime conversion error: {e}")
-        return pd.DataFrame()
-
-    logging.debug(f"Date dtype after conversion: {df['Date'].dtype}")
-
     weekend_mask = df["Date"].apply(lambda x: x.weekday() >= 5)
     if weekend_mask.any():
-        logging.warning(
-            f"{weekend_mask.sum()} data points are on weekends and have been removed."
-        )
-        df = df[~weekend_mask].copy()
+        raise ValueError(f"{weekend_mask.sum()} data points are on weekends. This is an error.")
 
     if valid_currencies:  # Simplified check
         invalid_currencies = df.loc[
@@ -1162,6 +1142,7 @@ def convert_prices(
     df.loc[non_gbp_mask, "FX Ticker"] = (
         df.loc[non_gbp_mask, "Original Currency"] + "GBP=X"
     )
+    # Special case for USD
     df.loc[df["Original Currency"] == "USD", "FX Ticker"] = "GBP=X"
 
     df["FX Ticker"] = df["FX Ticker"].astype(str)
@@ -1169,10 +1150,9 @@ def convert_prices(
 
     df = pd.merge(df, exchange_rate_df, on=["Date", "FX Ticker"], how="left")
 
+    # Special case for GBP and GBp - used vectorised assignment
     gbp_mask = df["Original Currency"] == "GBP"
     gbp_pence_mask = df["Original Currency"] == "GBp"
-
-    # More efficient vectorized assignment
     df.loc[gbp_mask, "FX Rate"] = 1.0
     df.loc[gbp_pence_mask, "FX Rate"] = 0.01
 
@@ -1180,12 +1160,41 @@ def convert_prices(
     if missing_fx_mask.any():
         missing_count = missing_fx_mask.sum()
         raise ValueError(
-            f"{missing_count} rows have missing FX rates. This is not allowed."
+            f"{missing_count} rows have missing FX rates. This is an error."
         )
 
     df["Price"] = df["Old Price"] * df["FX Rate"]
     converted_count = df[~df["FX Ticker"].str.contains("-")].shape[0]
     logging.info(f"{converted_count} prices successfully converted to GBP.")
+
+    # Final check for accuracy
+    df["Conversion Check"] = df.apply(
+        lambda row: (
+            "Correct"
+            if abs(row["FX Rate"] * row["Old Price"] - row["Price"]) < 1e-6
+            else "Error"
+        ),  # 1e-6 is a tolerance to check if two floating-point numbers are "close enough" to be considered equal
+        axis=1,
+    )
+
+    # Raise logging warning for and incorrect rows
+    incorrect_rows = df[df["Conversion Check"] == "Error"]
+    if not incorrect_rows.empty:
+        logging.warning(f"The following rows have conversion errors:\n{incorrect_rows}")  
+
+    latest_data = (
+        df.sort_values("Date").groupby("Ticker").tail(1).copy()
+    )  # copy to avoid warnings
+
+    latest_data["Date"] = latest_data["Date"].dt.strftime("%d/%m/%Y")  # Format date
+
+    latest_data = latest_data.sort_values(
+        by=["Type", "FX Ticker", "Ticker"]
+    )  # sorts by Type then FX ticker then ticker
+
+    latest_data = latest_data.reset_index(drop=True)  # Reset the index 
+
+    print(f"\nLatest Data\n{latest_data}\n")
 
     return df[["Ticker", "Price", "Date"]]
 
