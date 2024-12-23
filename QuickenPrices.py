@@ -53,10 +53,16 @@ import pyautogui
 import pygetwindow as gw
 
 
+
 # Constants ###################################
 
 SECONDS_IN_A_DAY = 86400
 CACHE_COLUMNS = ("Ticker", "Old Price", "Date")
+DEFAULT_TRANSIENT_EXCEPTIONS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.HTTPError,  # Sometimes a retry helps if it's 5xx
+)
 DEFAULT_CONFIG = {
     "home_currency": "GBP",
     "collection_period_years": 0.08,
@@ -215,39 +221,55 @@ config = load_configuration("configuration.yaml")
 
 # Coding utilities ############################
 
-
 def retry(
-    exceptions,
-    config=config,
-    tries=config["retries"]["max_retries"],
-    delay=config["retries"]["retry_delay"],
-    backoff=config["retries"]["backoff"],
+    exceptions: Union[Type[BaseException], Tuple[Type[BaseException], ...]] = Exception,
+    config: dict = None
 ):
+    """
+    A decorator that retries a function call in case of specified exceptions.
+    By default, uses global DEFAULT_CONFIG to get max_retries, retry_delay, backoff.
+
+    Args:
+        exceptions:
+            Exception class or tuple of exception classes to catch.
+            Defaults to `Exception` if not specified.
+        config:
+            A config dict with structure similar to DEFAULT_CONFIG. If None,
+            uses the globally defined DEFAULT_CONFIG.
+
+    Raises:
+        The last exception if the maximum number of retries is reached.
+    """
+
+    # If user didn't pass a custom config, fall back to DEFAULT_CONFIG
+    if config is None:
+        config = DEFAULT_CONFIG
 
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            attempt = 0
-            while attempt < tries:
+            tries = config["retries"]["max_retries"]
+            delay = config["retries"]["retry_delay"]
+            backoff = config["retries"]["backoff"]
+
+            for attempt in range(1, tries + 1):
                 try:
                     return func(*args, **kwargs)
                 except exceptions as e:
-                    attempt += 1
                     if attempt == tries:
                         logging.error(
-                            f"Max retries reached for {func.__name__}. Error: {e}"
+                            f"[{func.__name__}] Max retries reached ({tries}). "
+                            f"Last error: {e}"
                         )
                         raise
                     logging.warning(
-                        f"Retry {attempt}/{tries} for {func.__name__} in {delay} seconds after error: {e}"
+                        f"[{func.__name__}] Attempt {attempt}/{tries} failed "
+                        f"with error: {e}. Retrying in {delay:.1f} seconds..."
                     )
                     time.sleep(delay)
                     delay *= backoff
-
         return wrapper
-
     return decorator
-
 
 def setup_logging(config: Dict[str, Any]) -> None:
     """
@@ -394,232 +416,95 @@ def panda_date(
         return pd.NaT
 
 
-
-def adjust_for_weekend(
-    date: Union[pd.Timestamp, datetime.date, datetime.datetime, NaTType],
-    direction: str = "forward",
-) -> Union[pd.Timestamp, NaTType]:
-    """
-    Adjusts a date for weekends. If the date falls on a Saturday or Sunday,
-    shifts it to the nearest weekday in the specified direction.
-
-    Args:
-        date: A date-like object (pandas Timestamp, datetime.date, or datetime.datetime).
-        direction: Either "forward" to move to the next weekday or "back" to move to the previous weekday.
-
-    Returns:
-        A pandas Timestamp adjusted for weekends, or pd.NaT for invalid input.
-    """
-    if date is pd.NaT or pd.isna(date):
-        return pd.NaT
-
-    if not isinstance(date, (pd.Timestamp, datetime.date, datetime.datetime)):
-        raise TypeError(
-            f"Input date must be a pandas Timestamp or datetime.date/datetime object. Got {type(date)}."
-        )
-
-    if not isinstance(date, pd.Timestamp):
-        date = pd.Timestamp(date)  # Standardise to pandas Timestamp
-
-    # Handle timezone-naive vs. timezone-aware
-    if date.tzinfo is None:
-        date = date.tz_localize("UTC")  # Assume UTC for naive datetimes
-
-    if date.weekday() in (5, 6):  # Saturday or Sunday
-        if direction == "forward":
-            adjustment = 7 - date.weekday()  # Saturday -> +2, Sunday -> +1
-        elif direction == "back":
-            adjustment = -1 if date.weekday() == 5 else -2  # Saturday -> -1, Sunday -> -2
+def adjust_weekend(date: pd.Timestamp, direction: str) -> pd.Timestamp:
+    """Adjusts a date to the nearest weekday."""
+    if date.weekday() >= 5:  # More efficient weekend check (5=Saturday, 6=Sunday)
+        if direction == "start":
+            days_to_add = (calendar.MONDAY - date.weekday()) % 7
+            date += pd.Timedelta(days=days_to_add)
+        elif direction == "end":
+            date -= pd.Timedelta(days=date.weekday() - calendar.FRIDAY)
         else:
-            raise ValueError(
-                f"Invalid direction '{direction}'. Must be 'forward' usually for start_date or 'back', usually for end_date."
-            )
-        date += pd.Timedelta(days=adjustment)
+            raise ValueError("Direction must be 'start' or 'end'")
+    return date.floor('D') #added to remove time component
 
-    return date
-
-
-def get_date_range(config: dict) -> Tuple[Union[pd.Timestamp, NaTType], Union[pd.Timestamp, NaTType]]:
-    """
-    Calculates the start and end dates (naive Timestamps).
-
-    Considers weekends and the specified collection period (in years).
-    Returns naive Timestamps to avoid timezone comparison issues later in the code.
-
-    Args:
-        config: Configuration with "collection_period_years".
-
-    Returns:
-        A tuple containing the start and end dates (naive Timestamps).
-    """
-    # Validate input configuration
+def get_date_range(config: dict) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    """Calculates start and end dates, adjusting for weekends."""
     if "collection_period_years" not in config:
         raise KeyError("Config is missing 'collection_period_years' key.")
 
     collection_period_years = config["collection_period_years"]
     if not isinstance(collection_period_years, (int, float)) or collection_period_years <= 0:
-        raise ValueError(
-            "'collection_period_years' must be a positive number."
-        )
+        raise ValueError("'collection_period_years' must be a positive number.")
 
-    # Approximate the collection period in days
     collection_period_days = int(round(collection_period_years * 365.25))
-    logging.info(
-        f"Collection period: {collection_period_years} years ({collection_period_days} days)."
-    )
 
-    # Get today's date as a naive pandas Timestamp
-    today = panda_date("today")
-    logging.debug(f"Today's date: {today}. Type: {type(today)}")
-
-    # Ensure today is valid
-    if today is pd.NaT:
+    today_utc = pd.Timestamp.now(tz="UTC").normalize()
+    today_naive = today_utc.replace(tzinfo=None)
+    if pd.isna(today_naive):
         raise ValueError("Unable to determine today's date.")
 
-    # Calculate the end date, adjusting for weekends
-    end_date: Timestamp | NaTType = adjust_for_weekend(today, direction="back")
-    logging.debug(f"Calculated end_date: {end_date}. Type: {type(end_date)}")
+    end_date = today_naive
+    end_date = adjust_weekend(end_date, "end")
+    logging.debug(f"Calculated end_date (adjusted): {end_date}")
 
-    # Calculate the start date
     start_date = end_date - pd.Timedelta(days=collection_period_days)
+    start_date = adjust_weekend(start_date, "start")
+    logging.debug(f"Calculated start_date (adjusted): {start_date}")
 
-    # Adjust start date for weekends
-    start_date = adjust_for_weekend(start_date, direction="forward")
-    logging.debug(f"Calculated start_date: {start_date}. Type: {type(start_date)}")
 
-    # Return both dates as Timestamps
+    # Calculate non-weekend days based on the *original* day count
+    original_start_date = end_date - pd.Timedelta(days=collection_period_days)
+    business_days_range = pd.bdate_range(original_start_date, end_date)
+    non_weekend_days = len(business_days_range)
+
+    logging.info(
+        f"Collection period: {collection_period_years} years ({collection_period_days} days, {non_weekend_days} business days)."
+    )
+
     return start_date, end_date
-
-
-def get_business_days(
-    start_date: pd.Timestamp, end_date: pd.Timestamp
-) -> List[pd.Timestamp]:
-    """
-    Generates a list of business days between two timezone-aware UTC pandas Timestamps (inclusive).
-    Validates that no weekends are included in the output.
-
-    Business days exclude weekends (Saturday and Sunday) but do not account for public holidays.
-
-    Args:
-        start_date: The start date (timezone-aware UTC pandas Timestamp).
-        end_date: The end date (timezone-aware UTC pandas Timestamp).
-
-    Returns:
-        A list of pandas Timestamps representing business days.
-        Returns an empty list if start_date is after end_date.
-    """
-    # Validate inputs
-    if not isinstance(start_date, pd.Timestamp) or not isinstance(end_date, pd.Timestamp):
-        raise TypeError("Both start_date and end_date must be pandas Timestamps.")
-    if not start_date.tz or not end_date.tz:
-        raise ValueError("Both start_date and end_date must be timezone-aware.")
-    if start_date.tz != pd.Timestamp.now(tz="UTC").tz:
-        raise ValueError("Both start_date and end_date must be in UTC.")
-    if start_date > end_date:
-        logging.warning("Start date is after end date. Returning an empty list.")
-        return []
-
-    # Generate date range
-    date_range = pd.date_range(start=start_date, end=end_date, freq="D", tz="UTC")
-
-    # Filter business days (Monday=0, Sunday=6)
-    business_days = date_range[date_range.weekday < 5].to_list()
-
-    # Temporary validation: Ensure no weekends in the result
-    for day in business_days:
-        if day.weekday() >= 5:  # Saturday or Sunday
-            raise ValueError(f"Weekend date detected in business days list: {day}")
-
-    return business_days
 
 
 def find_missing_ranges(
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
-    first_cache: pd.Timestamp,
-    last_cache: pd.Timestamp,
+    first_cache: Optional[Union[pd.Timestamp, None]],
+    last_cache: Optional[Union[pd.Timestamp, None]],
 ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
-    """
-    Finds missing date ranges between a download period and cached data.
+    """Finds missing date ranges, adjusting for weekends."""
 
-    Args:
-        start_date: Start of the download period.
-        end_date: End of the download period.
-        first_cache: First date in the cache.
-        last_cache: Last date in the cache.
-
-    Returns:
-        A list of tuples representing missing date ranges (start, end).
-        Returns an empty list if any input dates are NaT or if start_date > end_date after adjustments.
-    """
-    # Validate inputs for NaT
-    if pd.isna(start_date) or pd.isna(end_date):
-        logging.warning("Start or end date is NaT. Returning an empty list.")
-        return []
-
-    # Adjust start and end dates for weekends
-    start_date = adjust_for_weekend(start_date, "forward")
-    end_date = adjust_for_weekend(end_date, "back")
-
-    # Validate adjusted range
     if start_date > end_date:
-        logging.warning("Adjusted start_date is after end_date. Returning an empty list.")
+        logging.warning("start_date is after end_date; no valid range.")
         return []
 
-    # Exclude today's date from the range
-    today = panda_date("today")
-    if pd.isna(today):
-        raise ValueError("Failed to retrieve today's date.")
-    if end_date >= today:
-        logging.debug(
-            f"Excluding today from end_date: {end_date} -> {today - pd.Timedelta(days=1)}"
-        )
-        end_date = today - pd.Timedelta(days=1)
-
-    # Handle missing or invalid cache dates
     if pd.isna(first_cache) or pd.isna(last_cache):
-        logging.debug("Cache dates are missing. Returning full range as missing.")
+        start_date = adjust_weekend(start_date, "start")
+        end_date = adjust_weekend(end_date, "end")
         return [(start_date, end_date)]
 
-    # Ensure cache dates are in correct order
     if first_cache > last_cache:
-        logging.debug(f"Swapping first_cache ({first_cache}) and last_cache ({last_cache}).")
         first_cache, last_cache = last_cache, first_cache
 
-    missing_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+    if start_date >= first_cache and end_date <= last_cache:
+        return []
 
-    # Add range before the cache
+    missing_ranges = []
+
     if start_date < first_cache:
-        range_start = start_date
-        range_end = min(end_date, first_cache - pd.Timedelta(days=1))
-        if range_start <= range_end:  # Ensure valid range
-            missing_ranges.append((range_start, range_end))
+        missing_end = min(end_date, first_cache - pd.Timedelta(days=1))
+        if start_date <= missing_end:
+            start_date = adjust_weekend(start_date, "start")
+            missing_end = adjust_weekend(missing_end, "end")
+            if start_date <= missing_end:
+                missing_ranges.append((start_date, missing_end))
 
-    # Add range after the cache
     if end_date > last_cache:
-        range_start = max(start_date, last_cache + pd.Timedelta(days=1))
-        range_end = end_date
-        if range_start <= range_end:  # Ensure valid range
-            missing_ranges.append((range_start, range_end))
-
-    # Log missing ranges
-    if missing_ranges:
-        logging.debug("Missing Ranges:")
-        for start, end in missing_ranges:
-            logging.debug(f"Start: {start}, End: {end}")
-    else:
-        logging.debug("No missing ranges detected.")
-
-    # Temporary validation: Ensure start and end of each range are not weekends
-    for start, end in missing_ranges:
-        if start.weekday() >= 5:  # Start is a weekend
-            raise ValueError(
-                f"Range start falls on a weekend: Start={start}, End={end}"
-            )
-        if end.weekday() >= 5:  # End is a weekend
-            raise ValueError(
-                f"Range end falls on a weekend: Start={start}, End={end}"
-            )
+        missing_start = max(start_date, last_cache + pd.Timedelta(days=1))
+        if missing_start <= end_date:
+            missing_start = adjust_weekend(missing_start, "start")
+            end_date = adjust_weekend(end_date, "end")
+            if missing_start <= end_date:
+                missing_ranges.append((missing_start, end_date))
 
     return missing_ranges
 
@@ -693,27 +578,12 @@ def get_tickers(
 def validate_tickers(
     tickers: List[str], max_show: int = 5
 ) -> List[Tuple[str, Optional[pd.Timestamp], str, str]]:
-    """
-    Validates tickers and returns a list of valid tickers with metadata.
-
-    Args:
-        tickers: List of ticker symbols.
-        max_show: Maximum number of tickers to display in logs.
-
-    Returns:
-        List of tuples containing ticker metadata.
-    """
     valid_tickers = []
-
     for ticker_symbol in tickers:
+        data = None
         try:
-            data = validate_ticker(ticker_symbol)
-            if (
-                data
-                and data["ticker"]
-                and data["type"] != "Unknown"
-                and data["currency"] != "Unknown"
-            ):
+            data = validate_ticker(ticker_symbol)  # if you want to keep that approach
+            if data and data["ticker"] and data["type"] != "Unknown" and data["currency"] != "Unknown":
                 valid_tickers.append(
                     (
                         data["ticker"],
@@ -723,7 +593,6 @@ def validate_tickers(
                         data["current_price"]
                     )
                 )
-
         except Exception as e:
             logging.error(
                 f"An unexpected error occurred processing ticker '{ticker_symbol}': {e}"
@@ -734,14 +603,12 @@ def validate_tickers(
         f"{[ticker[0] for ticker in valid_tickers[:max_show]]}"
         f"{'...' if len(valid_tickers) > max_show else ''}"
     )
-
     return valid_tickers
 
 
-@retry(Exception, config=config)
-def validate_ticker(
-    ticker_symbol: str,
-) -> Optional[Dict[str, Union[str, pd.Timestamp]]]:
+
+
+def validate_ticker(ticker_symbol: str) -> Optional[Dict[str, Union[str, pd.Timestamp]]]:
     """
     Validate a ticker symbol and fetch metadata using yfinance.
 
@@ -754,19 +621,34 @@ def validate_ticker(
     if not isinstance(ticker_symbol, str):
         logging.error("Ticker must be a string.")
         return None
+    
+    # prevent UnboundLocalError due to data in except
+    data= None
 
     try:
         ticker = yf.Ticker(ticker_symbol)
-        info = ticker.info
+        
+        # In yfinance 2.x, ticker.info is now a method, so we must call it:
+        info = ticker.info  
+        
         if not info or info.get("symbol") is None:
             logging.error(
                 f"Ticker '{ticker_symbol}' is invalid. Check if the symbol is correct or available on yfinance."
             )
             return None
 
-        # Safely handle date conversion
+        # Safely parse the first trade date (Unix epoch in seconds)
         first_trade_date = info.get("firstTradeDateEpochUtc", None)
-        earliest_date = panda_date(first_trade_date) if first_trade_date else pd.nat
+        if first_trade_date is not None:
+            try:
+                earliest_date = pd.Timestamp(first_trade_date, unit="s")
+            except (ValueError, OverflowError) as e:
+                logging.warning(
+                    f"Failed to parse firstTradeDateEpochUtc={first_trade_date} for '{ticker_symbol}': {e}"
+                )
+                earliest_date = pd.NaT
+        else:
+            earliest_date = pd.NaT
 
         # Construct the data dictionary
         data = {
@@ -780,55 +662,63 @@ def validate_ticker(
         return data
 
     except Exception as e:
+        print("DEBUG data:", data, type(data))
         logging.error(f"An unexpected error occurred fetching {ticker_symbol}: {e}")
         return None
-
 
 # Get data ####################################
 def fetch_historical_data(
     tickers: List[Tuple[str, Optional[pd.Timestamp], str, str, float]],
     config: Dict[str, Any],
 ) -> pd.DataFrame:
-    """Fetch historical data for a list of tickers."""
+    """
+    Fetch historical data for a list of tickers using daily yfinance data
+    and caching logic (handled in fetch_ticker_data).
+
+    Args:
+        tickers: A list of tuples containing:
+            (ticker_symbol, earliest_date, ticker_type, currency, current_price).
+        config: A dictionary with necessary configuration values
+            (e.g., for cache paths, date ranges, etc.).
+
+    Returns:
+        A combined DataFrame with columns in CACHE_COLUMNS plus 'Type'
+        and 'Original Currency'. Returns empty DataFrame if no data.
+    """
 
     if not tickers:
         logging.info("No tickers provided. Returning empty DataFrame.")
         return pd.DataFrame(columns=list(CACHE_COLUMNS) + ["Type", "Original Currency"])
 
-    # Get date range and business days
+    # Retrieve date range from config (updated version with no weekend logic)
     start_date, end_date = get_date_range(config)
-    business_days = get_business_days(start_date, end_date)
-    num_business_days = len(business_days)
 
     logging.info(
-        f"Seeking data from {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')} ({num_business_days} business days).\n"
+        f"Seeking data from {start_date.strftime('%d/%m/%Y')} "
+        f"to {end_date.strftime('%d/%m/%Y')}\n"
     )
 
     records = []
 
+    # For each ticker, fetch data
     for ticker, earliest_date, ticker_type, currency, current_price in tickers:
-
-        # Skip tickers with end_date earlier than earliest_date
+        # Skip tickers that began trading after our end_date
         if earliest_date and end_date < earliest_date:
             logging.warning(
-                f"Skipping {ticker}: Period requested ends before ticker existed."
+                f"Skipping {ticker}: Requested period ends before ticker existed."
             )
             continue
 
-        # Determine start date for fetching data
+        # Only fetch from max(start_date, earliest_date)
         data_start_date = max(start_date, earliest_date or start_date)
 
         try:
-            # Fetch data for the ticker
-            df = fetch_ticker_data(
-                ticker, data_start_date, end_date, current_price, config
-            )
-
+            df = fetch_ticker_data(ticker, data_start_date, end_date, current_price, config)
             if df is None or df.empty:
                 logging.warning(f"No data found for ticker {ticker}. Skipping.")
                 continue
 
-            # Add metadata if missing
+            # Ensure metadata columns exist
             if "Type" not in df.columns:
                 df["Type"] = ticker_type
             if "Original Currency" not in df.columns:
@@ -841,140 +731,111 @@ def fetch_historical_data(
         except Exception as e:
             logging.error(f"Unexpected error fetching data for {ticker}: {e}")
 
-    # Combine and return records
+    # Combine records
     valid_records = [df for df in records if not df.empty and df is not None]
     if valid_records:
         combined_df = pd.concat(valid_records, ignore_index=True)
         logging.info(
-            f"Finished getting {len(combined_df)} {pluralise('record',len(combined_df))} for {len(valid_records)} {pluralise('ticker',len(valid_records))}."
+            f"Finished retrieving {len(combined_df)} {pluralise('record', len(combined_df))} "
+            f"for {len(valid_records)} {pluralise('ticker', len(valid_records))}\n"
         )
         return combined_df
-    else:
-        logging.warning("No valid data fetched for any tickers.")
-        return pd.DataFrame(columns=list(CACHE_COLUMNS) + ["Type", "Original Currency"])
+
+    logging.warning("No valid data fetched for any tickers.")
+    return pd.DataFrame(columns=list(CACHE_COLUMNS) + ["Type", "Original Currency"])
 
 
 def fetch_ticker_data(
-    ticker: str, start_date: pd.Timestamp, end_date: pd.Timestamp, current_price: float, config:dict
-):
+    ticker: str,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+    current_price: float,
+    config: Dict[str, any]
+) -> pd.DataFrame:
     """
-    Fetch and manage historical data for a ticker either as cache, download or a combination of the two.
+    Fetch historical data (daily) for a ticker using local cache + yfinance,
+    only calling yfinance for missing date ranges.
+
+    Returns a DataFrame with no duplicate dates, sorted by Date.
     """
 
+    # 0) Ensure dates in right format
+    
+    start_date = pd.to_datetime(start_date).tz_localize("UTC")
+    end_date = pd.to_datetime(end_date).tz_localize("UTC")
+
+    # 1) Load cache
     cache_dir = os.path.join(config["paths"]["base"], config["paths"]["cache"])
     os.makedirs(cache_dir, exist_ok=True)
-
-    # Initialize empty DataFrame to store downloaded data
-    df = pd.DataFrame(columns=CACHE_COLUMNS)
-
-    # Load cache
     cache_data = load_cache(ticker, cache_dir)
 
-    # If cache is empty, set first and last cache dates to pd.NaT
-    if cache_data.empty or len(cache_data) == 0:
-        logging.info(
-            f"{ticker}: Trying to download {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}."
-        )
-        first_cache = pd.NaT
-        last_cache = pd.NaT
+    # 2) Identify missing date ranges
+    if cache_data is None:
+        logging.info(f"{ticker}: No cache. Will fetch entire range.")
+        first_cache, last_cache = None, None
+    elif cache_data.empty:
+        logging.info(f"{ticker}: Cache is empty. Will fetch entire range.")
+        first_cache, last_cache = None, None
     else:
-        cache_data = cache_data.reset_index(drop=True)
-        # Get first and last cache dates
-        # Safely handle missing "Date" column rather than just using cache_data["Date"]
-        raw_dates = set(cache_data.get("Date", []))
+        # Make sure "Date" column is panda date format
+        cache_data["Date"] = pd.to_datetime(cache_data["Date"], errors="coerce")
+        # Convert to UTC 
+        cache_data['Date'] = cache_data['Date'].dt.tz_convert('UTC')
+        # Drop rows with missing dates (NaT)
+        cache_data.dropna(subset=["Date"], inplace=True)
 
-        # Ensure dates correct format and sorted
-        cached_dates = sorted([panda_date(date) for date in raw_dates if date])
-        # Get the first and last dates, or pd.NaT if the list is empty
-        first_cache = cached_dates[0] if cached_dates else pd.NaT
-        last_cache = cached_dates[-1] if cached_dates else pd.NaT
+        first_cache = cache_data["Date"].min()
+        last_cache = cache_data["Date"].max()
+        logging.info(
+            f"{ticker}: Cache loaded from {first_cache.strftime('%d/%m/%Y')} to {last_cache.strftime('%d/%m/%Y')} "
+            f"({len(cache_data)} {pluralise("day", len(cache_data))})."
+        )
 
-        # safety check if there is something wrong with first_cache or last_cache
-        if pd.isna(first_cache) or pd.isna(last_cache):
-            logging.info(
-                f"{ticker}: Invalid cache dates. Trying to download from {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}."
-            )
-            first_cache = pd.NaT
-            last_cache = pd.NaT
-        else:
-            # Cache is ok
-            logging.info(
-                f"{ticker}: Cache loaded {first_cache.strftime('%d/%m/%Y')} to {last_cache.strftime('%d/%m/%Y')} ({len(cached_dates)} {pluralise('day', len(cached_dates))}).")
-
-    # Determine missing date ranges (if no cache data, will return download start to finish)
+    # 3) Determine missing date ranges (if no cache data, you'll get the full [start_date, end_date])
     missing_ranges = find_missing_ranges(start_date, end_date, first_cache, last_cache)
-
-    # initiate downloaded_data
-    downloaded_data = pd.DataFrame(columns=CACHE_COLUMNS)
-
-    # Get missing data
+   
+    # 4) Download missing data via yfinance
+    downloaded_data = pd.DataFrame()
     if missing_ranges:
-        if isinstance(missing_ranges, (list, tuple)):
-            # Handle single tuple or list of tuples case
-            for start_date, end_date in missing_ranges:
-                try:
-                    downloaded_data = download_data(ticker, start_date, end_date)
-                except Exception as e:
-                    logging.error(f"Error downloading data from {start_date} to {end_date}: {e}")
-                    continue  # Skip to next iteration on error
+        for rng_start, rng_end in missing_ranges:
+            partial_df = download_data(ticker, rng_start, rng_end)  
+            if not (partial_df is None or partial_df.empty):
+                downloaded_data = pd.concat([downloaded_data, partial_df], ignore_index=True)
 
-                # Concatenate downloaded data to the main DataFrame
-                if df.empty:
-                    df = downloaded_data
-                elif downloaded_data.empty:
-                    pass
-                else:
-                    df = pd.concat([df, downloaded_data], ignore_index=True)
-
-    # Concatenate downloaded data with cache if both df's have data
-    download_count = len(df)
-    cache_count = len(cache_data)
-    if cache_count == 0 and download_count != 0:
-        combined_data = df.copy()
-    elif cache_count != 0 and download_count == 0:
+    
+    # 5) Merge newly downloaded data with cache
+    if cache_data.empty and not downloaded_data.empty:
+        combined_data = downloaded_data.copy()
+    elif not cache_data.empty and downloaded_data.empty:
         combined_data = cache_data.copy()
     else:
-        combined_data = pd.concat([df, cache_data], ignore_index=True)
+        combined_data = pd.concat([cache_data, downloaded_data], ignore_index=True)
+    combined_data.drop_duplicates(subset=["Date"], keep="last", inplace=True)
+    combined_data.sort_values("Date", inplace=True)   
+    
+    # 6) Save cache only if there is a change to cache
+    if not cache_data.equals(combined_data):
+        save_cache(ticker, combined_data, cache_dir)
 
-    combined_data_count = len(combined_data)
+    # 7) Append latest price if todays closing not available 
+    max_date = combined_data["Date"].max()
+    today = pd.Timestamp.now(tz='UTC').normalize() # Get today's date at midnight UTC
 
-    # if not combined_data.equals(cache_data):
-    #     save_cache(ticker, combined_data, cache_dir)
-
-    # get today's latest prices but not if today is a weekend
-    today = panda_date("today")
-    adjusted_for_weekend_today = adjust_for_weekend(today, 'back')
-    if isinstance(current_price, float) and today == adjusted_for_weekend_today:
+    if max_date.normalize() < today and isinstance(current_price, float) and current_price > 0:
         new_row = pd.Series({"Ticker": ticker, "Old Price": current_price, "Date": today})
-        # takes the series and converts it into a DataFrame with one row and the correct column names
-        combined_data = pd.concat([combined_data, new_row.to_frame().T], ignore_index=True)  # more efficient than append
-        download_count += 1
-        combined_data_count += 1
-        logging.info(f"Latest price is {current_price}.")
+        combined_data = pd.concat([combined_data, new_row.to_frame().T], ignore_index=True)
+        logging.info(f"{ticker}: Appended today's {today.strftime('%d/%m/%Y')} price = {current_price:.3f}")
 
+
+    # 8) Log final result
     logging.info(
-        f"{ticker}: Retrieved {cache_count} {pluralise('day',cache_count)} cache, {download_count} {pluralise('day',download_count)} downloaded. {combined_data_count} {pluralise('day',combined_data_count)} in total."
+        f"{ticker}: Got {len(combined_data)} {pluralise("day", len(combined_data))} data from {combined_data['Date'].min().strftime('%d/%m/%Y')} to {combined_data['Date'].max().strftime('%d/%m/%Y')}\n"
     )
 
-    # check for weekend dates
-    # Identify weekend dates (Saturday: 5, Sunday: 6)
-    weekend_dates = combined_data[combined_data["Date"].dt.weekday.isin([5, 6])]
-
-    # Check if weekend dates exist and warn
-    num_weekend_dates = len(weekend_dates)
-    if num_weekend_dates > 0:
-        logging.warning(f"{ticker}: WARNING: {num_weekend_dates} weekend dates found.")
-
-        # Display the rows with weekend dates
-        print("\nRows with weekend dates:")
-        print(weekend_dates)
-    else:
-        logging.debug(f"{ticker}: Confirmed - no weekends in data.")
-    print()
     return combined_data
 
 
-@retry(Exception, config=config)
+@retry()
 def load_cache(ticker: str, cache_dir: str) -> pd.DataFrame:
     """
     Loads cached data for a specific ticker using pickle.
@@ -1001,111 +862,52 @@ def load_cache(ticker: str, cache_dir: str) -> pd.DataFrame:
         logging.info(f"{ticker}: No cache found.")
         return pd.DataFrame(columns=CACHE_COLUMNS)
 
-
-@retry(Exception, config=config)
-def download_data(ticker_symbol, start_date, end_date):
+@retry()
+def download_data(
+    ticker_symbol: str,
+    rng_start: pd.Timestamp,
+    rng_end: pd.Timestamp,
+) -> Optional[pd.DataFrame]:
     """
-    Downloads historical data for a ticker from yfinance and ensures consistency.
-    Args:
-        ticker_symbol: The ticker symbol to fetch data for.
-        start_date: Start date (tz-aware).
-        end_date: End date (tz-aware).
-    Returns:
-        A cleaned DataFrame with historical data.
+    Downloads daily data for the specified date range [rng_start, rng_end] from yfinance.
+    Returns a DataFrame with columns including "Date".
     """
-    # Ensure dates are in the right format
-    start_date = panda_date(start_date)
-    end_date = panda_date(end_date)
-    today = panda_date("today")
-
-    print("\ndownload_data")
-    print(f"start_date {start_date} ")
-    print(f"end_date {end_date} ")
-
-    # Validate date conversion
-    if pd.isna(start_date) or pd.isna(end_date):
-        logging.error("Invalid download dates.")
-        return pd.DataFrame(columns=CACHE_COLUMNS)
-    # Skip today’s data if start_date is today or later
-    elif start_date >= today:
-        logging.error(
-            f"{ticker_symbol}: Start date {start_date.strftime('%d/%m/%Y')} is today or in the future. No data fetched."
-        )
-        return pd.DataFrame(columns=CACHE_COLUMNS)
-
-    # Fetch data using yfinance
-    extended_end = end_date + pd.Timedelta(days=1)
     try:
-        ticker_obj = yf.Ticker(ticker_symbol)
-        raw_data = ticker_obj.history(
-            start=start_date.date(), end=extended_end.date(), interval="1d"
+        # Make range end inclusive
+        rng_end = rng_end + pd.Timedelta(days=1)
+        ticker=yf.Ticker(ticker_symbol)
+        raw_df = ticker.history(
+            start=rng_start,
+            end=rng_end,
+            interval="1d",
         )
 
-        if raw_data.empty:
-            logging.error(
-                f"{ticker_symbol}: yfinance returned no data from {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}."
-            )
-            return pd.DataFrame(columns=CACHE_COLUMNS)
+        if raw_df is None or raw_df.empty:
+            logging.warning(f"{ticker_symbol}: No data from {rng_start.strftime('%d/%m/%Y')} to {rng_end.strftime('%d/%m/%Y')}.")
+            return pd.DataFrame()
 
-        # Reset index and ensure 'Date' column exists
-        raw_data.reset_index(inplace=True)
+        raw_df.reset_index(inplace=True)
+        raw_df.rename(columns={"Close": "Old Price"}, inplace=True)
+        raw_df["Ticker"] = ticker_symbol
 
-        # Rename `Close` to `Old Price`
-        raw_data = raw_data.rename(columns={"Close": "Old Price"})
+        # Make sure "Date" column is in correct format
+        raw_df["Date"] = raw_df["Date"].dt.tz_convert('UTC')
 
-        # Add ticker symbol to the DataFrame
-        raw_data["Ticker"] = ticker_symbol
+        # Select columns
+        raw_df = raw_df[list(CACHE_COLUMNS)] 
 
-        # Subset to expected columns
-        raw_data = raw_data[list(CACHE_COLUMNS)]
+        first_data = raw_df["Date"].min().strftime('%d/%m/%Y')
+        last_data = raw_df["Date"].max().strftime('%d/%m/%Y')
 
-        print("\nPre panda_date:")
-        print(f"Example first row of data:\n {raw_data.head(1)}")
-        weekend_rows = raw_data[raw_data["Date"].dt.weekday >= 5]
-        if not weekend_rows.empty:
-            print(f"First 5 weekend dates for {ticker_symbol}:\n")
-            print(weekend_rows.head(5))
-        else:
-            print("No weekend rows")
-        print()
+        logging.info(f"{ticker_symbol}: Downloaded from {first_data} to {last_data} ({len(raw_df)} days.)")
 
-        # Apply panda_date to the 'Date' column
-        raw_data["Date"] = raw_data["Date"].apply(panda_date)
-
-        print("Post panda_date:")
-        weekend_rows = raw_data[raw_data["Date"].dt.weekday >= 5]
-        if not weekend_rows.empty:
-            print(f"First 5 weekend dates for {ticker_symbol}:\n")
-            print(weekend_rows.head(5))
-        else:
-            print("No weekend rows")
-        print()
-
-        # Get the earliest and latest dates
-        earliest_date = raw_data["Date"].min()
-        latest_date = raw_data["Date"].max()
-
-        logging.info(
-            f"{ticker_symbol}: Downloaded data from {earliest_date.strftime('%d/%m/%Y')} to {latest_date.strftime('%d/%m/%Y')}."
-        )
-
-        # Temporary validation: Check for weekend dates
-        weekend_rows = raw_data[raw_data["Date"].dt.weekday >= 5]
-        if not weekend_rows.empty:
-            latest_weekend = weekend_rows["Date"].max()
-            count_weekends = len(weekend_rows)
-            logging.warning(
-                f"{ticker_symbol}: Data contains {count_weekends} weekend date(s). Latest example: {latest_weekend.strftime('%d/%m/%Y')}."
-            )
-
-        return raw_data
+        return raw_df
 
     except Exception as e:
-        logging.error(f"Error fetching data for {ticker_symbol}: {e}")
-        return pd.DataFrame(columns=CACHE_COLUMNS)
+        logging.error(f"Failed to download data for {ticker_symbol} from {rng_start} to {rng_end}: {e}")
+        return pd.DataFrame()
 
-
-@retry(Exception, config=config)
+@retry()
 def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
     """
     Save cache for a specific ticker using pickle.
@@ -1129,14 +931,18 @@ def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
         with open(cache_file, "wb") as f:
             pickle.dump(data, f)
 
+        first_data = data["Date"].min().strftime('%d/%m/%Y')
+        last_data = data["Date"].max().strftime('%d/%m/%Y')
+
         logging.info(
-            f"{ticker} cache saved with {len(data)} {pluralise('record',len(data))}"
+            f"{ticker}: Cache saved from {first_data} to {last_data} "
+            f"({len(data)} days)."
         )
     except Exception as e:
         logging.error(f"Failed to save cache for {ticker}: {e}")
 
 
-@retry(Exception, config=config)
+@retry()
 def clean_cache(config):
     """
     Cleans up cache files older than the configured maximum age.
@@ -1189,112 +995,151 @@ def clean_cache(config):
 # Process Data ################################
 
 def convert_prices(
-    df: pd.DataFrame, valid_currencies: Optional[List[str]] = None
+    df: pd.DataFrame,
+    valid_currencies: Optional[List[str]] = None
 ) -> pd.DataFrame:
-    """Converts prices to GBP based on ticker type and currency.
+    """
+    Converts prices to GBP based on ticker type and currency (daily data),
+    while also logging mismatched days between equity and FX.
+
+    Logic Overview:
+      1) Separate equity rows (Type != "CURRENCY") from FX rows (Type == "CURRENCY").
+      2) Log how many dates appear in equity vs. FX vs. both (mismatched days).
+      3) For currency rows, group by (Date, Ticker) to build an 'FX Rate'.
+      4) Merge 'FX Rate' into equity rows on (Date, FX Ticker).
+      5) Set FX Rate = 1.0 or 0.01 for GBP or GBp rows respectively.
+      6) Raise an error if non-GBP rows have missing FX rates.
+      7) Compute final Price in GBP and return the result.
 
     Args:
         df: DataFrame containing historical data. Must include columns:
             'Date', 'Type', 'Ticker', 'Old Price', 'Original Currency', 'Price'.
         valid_currencies: Optional list of valid currency codes. If provided,
-            warnings are logged for any unrecognized currencies.
+            logs a warning for any unrecognised currencies.
 
     Returns:
-        DataFrame with prices converted to GBP where applicable.
-        Raises ValueError if missing FX rates are found.
-        Returns empty DataFrame on other errors.
+        DataFrame with a new 'Price' column converted to GBP where applicable.
+        Raises ValueError if missing FX rates are found for non-GBP instruments.
+        Returns empty DataFrame if 'df' is empty or errors occur.
     """
+    # Quick check
     if df.empty:
         logging.error("Empty DataFrame received.")
         return pd.DataFrame()
 
-    weekend_mask = df["Date"].apply(lambda x: x.weekday() >= 5)
-    if weekend_mask.any():
-        raise ValueError(f"{weekend_mask.sum()} data points are on weekends. This is an error.")
+    # 1) Separate equity rows vs. FX rows
+    equity_df = df[df["Type"] != "CURRENCY"].copy()
+    fx_df = df[df["Type"] == "CURRENCY"].copy()
 
-    if valid_currencies:  # Simplified check
+    # 2) Log day coverage mismatches
+    equity_days = set(equity_df["Date"])
+    fx_days = set(fx_df["Date"])
+    common_days = equity_days.intersection(fx_days)
+
+    unmatched_equity_days = equity_days - fx_days
+    unmatched_fx_days = fx_days - equity_days
+
+    logging.info(f"Equity total days: {len(equity_days)}")
+    logging.info(f"FX total days: {len(fx_days)}")
+    logging.info(f"Common days: {len(common_days)}")
+    logging.info(f"Equity-only days: {len(unmatched_equity_days)}")
+    logging.info(f"FX-only days: {len(unmatched_fx_days)}")
+
+    # 3) Optional check for valid currencies
+    if valid_currencies:
         invalid_currencies = df.loc[
             ~df["Original Currency"].isin(valid_currencies), "Original Currency"
         ].unique()
-        if invalid_currencies.size > 0:  # more efficient than .any()
+        if invalid_currencies.size > 0:
             logging.warning(f"Found rows with invalid currencies: {invalid_currencies}")
 
+    # 4) Build a minimal FX DataFrame -> 'FX Rate'
     exchange_rate_df = (
-        df[df["Type"] == "CURRENCY"]
-        .groupby(["Date", "Ticker"])["Old Price"]
-        .first()
+        fx_df.groupby(["Date", "Ticker"])["Old Price"]
+        .first()                     # one price per date+ticker
         .rename("FX Rate")
         .reset_index()
         .rename(columns={"Ticker": "FX Ticker"})
     )
 
-    df = df.copy()
-    df["FX Ticker"] = "-"
-    df = df.rename(columns={"Price": "Old Price"})
+    # 5) Work on a copy of the equity data to avoid mutating the original
+    equity_df = equity_df.copy()
 
-    non_gbp_mask = ~df["Original Currency"].isin(["GBP", "GBp"])
-    df.loc[non_gbp_mask, "FX Ticker"] = (
-        df.loc[non_gbp_mask, "Original Currency"] + "GBP=X"
+    # We'll rename 'Price' -> 'Old Price' so we can store a new 'Price'
+    equity_df = equity_df.rename(columns={"Price": "Old Price"})
+
+    # Prepare an 'FX Ticker' column for non-GBP
+    equity_df["FX Ticker"] = "-"
+    non_gbp_mask = ~equity_df["Original Currency"].isin(["GBP", "GBp"])
+    equity_df.loc[non_gbp_mask, "FX Ticker"] = (
+        equity_df.loc[non_gbp_mask, "Original Currency"] + "GBP=X"
     )
-    # Special case for USD
-    df.loc[df["Original Currency"] == "USD", "FX Ticker"] = "GBP=X"
 
-    df["FX Ticker"] = df["FX Ticker"].astype(str)
+    # Special case for USD => "GBP=X" (adjust if your logic differs)
+    equity_df.loc[equity_df["Original Currency"] == "USD", "FX Ticker"] = "GBP=X"
+
+    # Ensure data types match for merging
+    equity_df["FX Ticker"] = equity_df["FX Ticker"].astype(str)
     exchange_rate_df["FX Ticker"] = exchange_rate_df["FX Ticker"].astype(str)
 
-    df = pd.merge(df, exchange_rate_df, on=["Date", "FX Ticker"], how="left")
+    # 6) Merge the 'FX Rate' onto the equity rows
+    equity_df = pd.merge(
+        equity_df,
+        exchange_rate_df,
+        on=["Date", "FX Ticker"],
+        how="left"
+    )
 
-    # Special case for GBP and GBp - used vectorised assignment
-    gbp_mask = df["Original Currency"] == "GBP"
-    gbp_pence_mask = df["Original Currency"] == "GBp"
-    df.loc[gbp_mask, "FX Rate"] = 1.0
-    df.loc[gbp_pence_mask, "FX Rate"] = 0.01
+    # 7) Hard-code FX Rate for GBP & GBp
+    gbp_mask = equity_df["Original Currency"] == "GBP"
+    gbp_pence_mask = equity_df["Original Currency"] == "GBp"
+    equity_df.loc[gbp_mask, "FX Rate"] = 1.0
+    equity_df.loc[gbp_pence_mask, "FX Rate"] = 0.01
 
-    missing_fx_mask = df["FX Rate"].isna() & non_gbp_mask
+    # 8) Error if missing FX Rate for non-GBP
+    missing_fx_mask = equity_df["FX Rate"].isna() & non_gbp_mask
     if missing_fx_mask.any():
         missing_count = missing_fx_mask.sum()
         raise ValueError(
             f"{missing_count} rows have missing FX rates. This is an error."
         )
 
-    df["Price"] = df["Old Price"] * df["FX Rate"]
-    converted_count = df[~df["FX Ticker"].str.contains("-")].shape[0]
+    # 9) Calculate final Price in GBP
+    equity_df["Price"] = equity_df["Old Price"] * equity_df["FX Rate"]
+
+    # Log how many conversions happened (where 'FX Ticker' != '-')
+    converted_count = equity_df[~equity_df["FX Ticker"].str.contains("-")].shape[0]
     logging.info(f"{converted_count} prices successfully converted to GBP.")
 
-    # Final check for accuracy
-    df["Conversion Check"] = df.apply(
+    # 10) Optional: Validate floating-point multiplication
+    equity_df["Conversion Check"] = equity_df.apply(
         lambda row: (
             "Correct"
             if abs(row["FX Rate"] * row["Old Price"] - row["Price"]) < 1e-6
             else "Error"
-        ),  # 1e-6 is a tolerance to check if two floating-point numbers are "close enough" to be considered equal
+        ),
         axis=1,
     )
-
-    # Raise logging warning for and incorrect rows
-    incorrect_rows = df[df["Conversion Check"] == "Error"]
+    incorrect_rows = equity_df[equity_df["Conversion Check"] == "Error"]
     if not incorrect_rows.empty:
-        logging.warning(f"The following rows have conversion errors:\n{incorrect_rows}")  
+        logging.warning(f"The following rows have conversion errors:\n{incorrect_rows}")
 
+    # 11) Print a small "latest data" preview
     latest_data = (
-        df.sort_values("Date").groupby("Ticker").tail(1).copy()
-    )  # copy to avoid warnings
-
-    latest_data["Date"] = latest_data["Date"].dt.strftime("%d/%m/%Y")  # Format date
-
-    latest_data = latest_data.sort_values(
-        by=["Type", "FX Ticker", "Ticker"]
-    )  # sorts by Type then FX ticker then ticker
-
-    latest_data = latest_data.reset_index(drop=True)  # Reset the index 
+        equity_df.sort_values("Date").groupby("Ticker").tail(1).copy()
+    )
+    latest_data["Date"] = latest_data["Date"].dt.strftime("%d/%m/%Y")
+    latest_data = latest_data.sort_values(by=["Type", "FX Ticker", "Ticker"])
+    latest_data.reset_index(drop=True, inplace=True)
 
     print(f"\nLatest Data\n{latest_data}\n")
 
-    return df[["Ticker", "Price", "Date"]]
-
+    # 12) Return only essential columns (modify as needed)
+    return equity_df[["Ticker", "Price", "Date"]]
 
 def process_converted_prices(converted_df: pd.DataFrame) -> pd.DataFrame:
-    """Prepares the final DataFrame for CSV export.
+    """
+    Prepares the final DataFrame for CSV export.
 
     Args:
         converted_df: DataFrame with "Ticker", "Date", "Price"
@@ -1305,34 +1150,28 @@ def process_converted_prices(converted_df: pd.DataFrame) -> pd.DataFrame:
     """
 
     if converted_df.empty:
-        logging.warning(
-            "Input DataFrame is empty. Returning empty DataFrame."
-        )
-        return pd.DataFrame(
-            columns=["Ticker", "Price", "Date"]
-        )  # return empty dataframe with correct columns
+        logging.warning("Input DataFrame is empty. Returning empty DataFrame.")
+        return pd.DataFrame(columns=["Ticker", "Price", "Date"])
 
     try:
         output_csv = converted_df[["Ticker", "Price", "Date"]].copy()
 
-        output_csv["Date"] = output_csv["Date"].apply(panda_date)
+        # Ensure 'Date' is a proper datetime type
+        output_csv["Date"] = pd.to_datetime(output_csv["Date"], errors="coerce")
 
-        # Sort by descending date IN PLACE
+        # Sort by descending date (in place)
         output_csv.sort_values(by="Date", ascending=False, inplace=True)
 
-        # Format date as string using .dt.strftime()
+        # Format date as string using .dt.strftime() -> DD/MM/YYYY
         output_csv["Date"] = output_csv["Date"].dt.strftime("%d/%m/%Y")
 
         return output_csv
 
     except Exception as e:
-        logging.exception(
-            f"A critical error occurred: {e}"
-        )
+        logging.exception(f"A critical error occurred: {e}")
         sys.exit(1)  # Exit program
 
-
-@retry(Exception, config=config)
+@retry()
 def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
     """
     Saves the DataFrame to a CSV file without headers.
@@ -1375,7 +1214,7 @@ def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
 
 # Quicken GUI #################################
 
-@retry(exceptions=(RuntimeError, IOError), config=config)
+@retry()
 def import_data_file(config):
 
     try:
@@ -1409,7 +1248,7 @@ def import_data_file(config):
         raise
 
 
-@retry(exceptions=(Exception), config=config)
+@retry()
 def open_import_dialog():
 
     try:
@@ -1431,7 +1270,7 @@ def open_import_dialog():
         return False
 
 
-@retry(exceptions=(Exception,), config=config)
+@retry()
 def navigate_to_portfolio():
 
     try:
@@ -1456,7 +1295,7 @@ def navigate_to_portfolio():
         return False
 
 
-@retry(exceptions=(Exception,), config=config)
+@retry()
 def open_quicken(config):
 
     quicken_path = config["paths"]["quicken"]
@@ -1582,54 +1421,56 @@ def main():
     Main script execution.
     """
     try:
-        # Initialise
-        os.system("cls" if os.name == "nt" else "clear")
-        print("Starting script.\n")
 
-        # Call setup_logging early in the script
+        # 0) Initialise
+        os.system("cls" if os.name == "nt" else "clear")
+        print("Starting script\n")
+        print("sys.executable", sys.executable)
+        print("yfinance version:", yf.__version__,"\n")
+
+        # 0) Configure logging from YAML/ini settings
         setup_logging(config=config)
 
-        # Get elevation
+        # 2) Attempt to elevate privileges (if needed on Windows)
         run_as_admin()
 
-        # Get 'raw' tickers from YAML file
+        # 3) Read ticker config from your YAML
         tickers = config.get("tickers", [])
         if not tickers:
-            logging.error(
-                "No tickers found. Please update your configuration. Exiting."
-            )
+            logging.error("No tickers found. Please update your configuration. Exiting.")
             sys.exit(1)
 
-        # Validate and acquire metadata.
+        # 4) Validate and acquire ticker metadata
         valid_tickers = get_tickers(tickers)
         if not valid_tickers:
             logging.error("No valid tickers to process. Exiting.")
             sys.exit(1)
 
-        # Fetch historical data
+        # 5) Fetch historical data (daily)
         price_data = fetch_historical_data(valid_tickers, config=config)
 
-        if price_data is None or price_data.empty: #check for None as well
+        if price_data is None or price_data.empty:
             logging.error("No valid data fetched. Exiting.")
             sys.exit(1)
 
-        # Convert prices to GBP
+        # 6) Convert to GBP (and log mismatched days in the process)
+         # Convert prices to GBP
         processed_data = convert_prices(price_data)
 
-        # Process and create output DataFrame
+        # 7) Build the final output (e.g., pivoting, filtering, etc.)
         output_csv = process_converted_prices(processed_data)
 
-        # Save data to CSV
+        # 8) Save to CSV or your preferred data store
         save_to_csv(output_csv, config=config)
 
-        # Clean up cache
+        # 9) Clean up the cache if desired
         clean_cache(config=config)
 
-        # Quicken import sequence
+        # 10) Optionally automate an import sequence
         setup_pyautogui()
         quicken_import(config=config)
 
-        # Pause to allow reading of terminal
+        # End
         logging.info("Script completed successfully.")
         if is_elevated():
             input("\n\t Press Enter to exit...\n\t")
@@ -1639,7 +1480,6 @@ def main():
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}")
         logging.error(traceback.format_exc())
-
 
 if __name__ == "__main__":
 

@@ -2,7 +2,7 @@
 
 # Tickers to track
 tickers:
-  - 0P00013P6I.L
+  # - 0P00013P6I.L
   # - 0P00018XAP.L
   # - AMGN
   # - BZG25.NYM
@@ -19,7 +19,7 @@ tickers:
   # - IUIT.L
   # - SEE.L
   # - ^OEX
-  # - ^GSPC
+  - ^GSPC
   # - VHVG.L
   # - VNRX
   # - VUKG.L
