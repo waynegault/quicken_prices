@@ -43,7 +43,7 @@ import winreg  # Registry access
 import numpy as np
 from numpy import busday_count
 import pandas as pd
-from pandas import Timestamp, Timedelta
+from pandas import Timestamp, Timedelta, isna
 from pandas._libs.tslibs.nattype import NaTType
 import yaml
 import yfinance as yf
@@ -58,6 +58,11 @@ import pygetwindow as gw
 
 SECONDS_IN_A_DAY = 86400
 CACHE_COLUMNS = ("Ticker", "Old Price", "Date")
+PUBLIC_HOLIDAYS = {
+    "01-01",  # New Year's Day
+    "12-25",  # Christmas Day
+    "12-26",  # Boxing Day
+}
 DEFAULT_TRANSIENT_EXCEPTIONS = (
     requests.exceptions.ConnectionError,
     requests.exceptions.Timeout,
@@ -335,7 +340,7 @@ def run_as_admin():
         )
         if return_code == 5:
             # User rejected the elevation prompt
-            logging.info("Elevation request cancelled.")
+            logging.info("Elevation request cancelled")
         elif return_code == 42:
             # User accepted elevation prompt
             logging.info("Continuing elevated.")
@@ -415,21 +420,50 @@ def panda_date(
         logging.warning(f"Invalid date format: {date_obj}. Error: {e}")
         return pd.NaT
 
+def adjust_date(date: pd.Timestamp, direction: str) -> pd.Timestamp:
+    """
+    Adjusts a date to the nearest valid business day (avoiding weekends and public holidays).
 
-def adjust_weekend(date: pd.Timestamp, direction: str) -> pd.Timestamp:
-    """Adjusts a date to the nearest weekday."""
-    if date.weekday() >= 5:  # More efficient weekend check (5=Saturday, 6=Sunday)
-        if direction == "start":
-            days_to_add = (calendar.MONDAY - date.weekday()) % 7
-            date += pd.Timedelta(days=days_to_add)
-        elif direction == "end":
-            date -= pd.Timedelta(days=date.weekday() - calendar.FRIDAY)
+    Args:
+        date (pd.Timestamp): The initial date to adjust.
+        direction (str): "start" to move forwards, "end" to move backwards.
+
+    Returns:
+        pd.Timestamp: The adjusted date.
+    """
+    if direction not in {"start", "end"}:
+        raise ValueError("Direction must be 'start' or 'end'.")
+
+    while True:
+        # Adjust for weekends
+        if date.weekday() >= 5:  # Weekend check (5=Saturday, 6=Sunday)
+            if direction == "start":
+                days_to_add = (calendar.MONDAY - date.weekday()) % 7
+                date += pd.Timedelta(days=days_to_add)
+            elif direction == "end":
+                date -= pd.Timedelta(days=date.weekday() - calendar.FRIDAY)
         else:
-            raise ValueError("Direction must be 'start' or 'end'")
-    return date.floor('D') #added to remove time component
+            # Check for public holidays
+            if date.strftime("%m-%d") not in PUBLIC_HOLIDAYS:
+                break  # Valid date found
+            # Move the date if it's a holiday
+            if direction == "start":
+                date += pd.Timedelta(days=1)
+            elif direction == "end":
+                date -= pd.Timedelta(days=1)
+
+    return date.floor("D")  # Normalize to remove time component
 
 def get_date_range(config: dict) -> Tuple[pd.Timestamp, pd.Timestamp]:
-    """Calculates start and end dates, adjusting for weekends."""
+    """
+    Calculates start and end dates, avoiding weekends and public holidays.
+
+    Args:
+        config (dict): Configuration containing 'collection_period_years'.
+
+    Returns:
+        Tuple[pd.Timestamp, pd.Timestamp]: The adjusted start and end dates.
+    """
     if "collection_period_years" not in config:
         raise KeyError("Config is missing 'collection_period_years' key.")
 
@@ -437,29 +471,30 @@ def get_date_range(config: dict) -> Tuple[pd.Timestamp, pd.Timestamp]:
     if not isinstance(collection_period_years, (int, float)) or collection_period_years <= 0:
         raise ValueError("'collection_period_years' must be a positive number.")
 
+    # Calculate the number of days in the collection period
     collection_period_days = int(round(collection_period_years * 365.25))
 
+    # Get today's date in UTC and convert to naive format
     today_utc = pd.Timestamp.now(tz="UTC").normalize()
     today_naive = today_utc.replace(tzinfo=None)
     if pd.isna(today_naive):
         raise ValueError("Unable to determine today's date.")
 
+    # Calculate initial start and end dates
     end_date = today_naive
-    end_date = adjust_weekend(end_date, "end")
-    logging.debug(f"Calculated end_date (adjusted): {end_date}")
-
     start_date = end_date - pd.Timedelta(days=collection_period_days)
-    start_date = adjust_weekend(start_date, "start")
-    logging.debug(f"Calculated start_date (adjusted): {start_date}")
 
+    # Adjust for weekends and public holidays
+    end_date = adjust_date(end_date, direction="end")
+    start_date = adjust_date(start_date, direction="start")
 
-    # Calculate non-weekend days based on the *original* day count
-    original_start_date = end_date - pd.Timedelta(days=collection_period_days)
-    business_days_range = pd.bdate_range(original_start_date, end_date)
+    # Log the collection period details
+    business_days_range = pd.bdate_range(start_date, end_date)
     non_weekend_days = len(business_days_range)
 
     logging.info(
-        f"Collection period: {collection_period_years} years ({collection_period_days} days, {non_weekend_days} business days)."
+        f"Collection period: {collection_period_years} years "
+        f"({collection_period_days} days, {non_weekend_days} business days)"
     )
 
     return start_date, end_date
@@ -468,43 +503,39 @@ def get_date_range(config: dict) -> Tuple[pd.Timestamp, pd.Timestamp]:
 def find_missing_ranges(
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
-    first_cache: Optional[Union[pd.Timestamp, None]],
-    last_cache: Optional[Union[pd.Timestamp, None]],
+    first_cache: Optional[pd.Timestamp],
+    last_cache: Optional[pd.Timestamp],
 ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
-    """Finds missing date ranges, adjusting for weekends."""
+    """Finds missing date ranges, no longer adjusting for weekends."""
 
     if start_date > end_date:
         logging.warning("start_date is after end_date; no valid range.")
         return []
 
+    # If no cache data, just return the entire [start_date, end_date].
     if pd.isna(first_cache) or pd.isna(last_cache):
-        start_date = adjust_weekend(start_date, "start")
-        end_date = adjust_weekend(end_date, "end")
         return [(start_date, end_date)]
 
     if first_cache > last_cache:
         first_cache, last_cache = last_cache, first_cache
 
+    # If entire requested range is already in cache, no missing
     if start_date >= first_cache and end_date <= last_cache:
         return []
 
     missing_ranges = []
 
+    # If there's a portion before the cache
     if start_date < first_cache:
         missing_end = min(end_date, first_cache - pd.Timedelta(days=1))
         if start_date <= missing_end:
-            start_date = adjust_weekend(start_date, "start")
-            missing_end = adjust_weekend(missing_end, "end")
-            if start_date <= missing_end:
-                missing_ranges.append((start_date, missing_end))
+            missing_ranges.append((start_date, missing_end))
 
+    # If there's a portion after the cache
     if end_date > last_cache:
         missing_start = max(start_date, last_cache + pd.Timedelta(days=1))
         if missing_start <= end_date:
-            missing_start = adjust_weekend(missing_start, "start")
-            end_date = adjust_weekend(end_date, "end")
-            if missing_start <= end_date:
-                missing_ranges.append((missing_start, end_date))
+            missing_ranges.append((missing_start, end_date))
 
     return missing_ranges
 
@@ -570,7 +601,7 @@ def get_tickers(
         all_valid_tickers = valid_tickers
 
     logging.info(
-        f"Validated {len(all_valid_tickers)} {pluralise('ticker', len(all_valid_tickers))} in total.\n"
+        f"Validated {len(all_valid_tickers)} {pluralise('ticker', len(all_valid_tickers))} in total\n"
     )
     return all_valid_tickers
 
@@ -604,8 +635,6 @@ def validate_tickers(
         f"{'...' if len(valid_tickers) > max_show else ''}"
     )
     return valid_tickers
-
-
 
 
 def validate_ticker(ticker_symbol: str) -> Optional[Dict[str, Union[str, pd.Timestamp]]]:
@@ -744,7 +773,6 @@ def fetch_historical_data(
     logging.warning("No valid data fetched for any tickers.")
     return pd.DataFrame(columns=list(CACHE_COLUMNS) + ["Type", "Original Currency"])
 
-
 def fetch_ticker_data(
     ticker: str,
     start_date: pd.Timestamp,
@@ -755,88 +783,130 @@ def fetch_ticker_data(
     """
     Fetch historical data (daily) for a ticker using local cache + yfinance,
     only calling yfinance for missing date ranges.
-
-    Returns a DataFrame with no duplicate dates, sorted by Date.
+    Forward-fills missing dates if this is a CURRENCY ticker.
     """
 
-    # 0) Ensure dates in right format
-    
+    # 0) Ensure dates in the right format
     start_date = pd.to_datetime(start_date).tz_localize("UTC")
     end_date = pd.to_datetime(end_date).tz_localize("UTC")
 
     # 1) Load cache
     cache_dir = os.path.join(config["paths"]["base"], config["paths"]["cache"])
     os.makedirs(cache_dir, exist_ok=True)
-    cache_data = load_cache(ticker, cache_dir)
+    cache_data, cache_status = load_cache(ticker, cache_dir)
 
-    # 2) Identify missing date ranges
-    if cache_data is None:
-        logging.info(f"{ticker}: No cache. Will fetch entire range.")
+    needs_save = False  # Track whether the cache needs saving
+
+    # 2) Identify missing date ranges in cache
+    if cache_status == "not_found":
+        logging.info(f"{ticker}: No cache file found. Will fetch entire range.")
         first_cache, last_cache = None, None
-    elif cache_data.empty:
-        logging.info(f"{ticker}: Cache is empty. Will fetch entire range.")
+        cache_data = pd.DataFrame(columns=CACHE_COLUMNS)
+    elif cache_status == "empty":
+        logging.info(f"{ticker}: Cache file is empty. Will fetch entire range.")
         first_cache, last_cache = None, None
-    else:
-        # Make sure "Date" column is panda date format
-        cache_data["Date"] = pd.to_datetime(cache_data["Date"], errors="coerce")
-        # Convert to UTC 
-        cache_data['Date'] = cache_data['Date'].dt.tz_convert('UTC')
-        # Drop rows with missing dates (NaT)
-        cache_data.dropna(subset=["Date"], inplace=True)
+        cache_data = pd.DataFrame(columns=CACHE_COLUMNS)
+    elif cache_status == "loaded":
+        # Ensure 'Date' column is datetime and validate cache data
+        if "Date" in cache_data.columns:
+            cache_data["Date"] = pd.to_datetime(cache_data["Date"], errors="coerce", utc=True)
+            first_cache = cache_data["Date"].min()
+            last_cache = cache_data["Date"].max()
+            logging.info(
+                f"{ticker}: Cache loaded from {first_cache.strftime('%d/%m/%Y')} to {last_cache.strftime('%d/%m/%Y')} "
+                f"({len(cache_data)} {pluralise('day', len(cache_data))})"
+            )
+        else:
+            logging.error(f"{ticker}: Cache is missing 'Date' column. Will fetch entire range.")
+            first_cache, last_cache = None, None
+            cache_data = pd.DataFrame(columns=CACHE_COLUMNS)
 
-        first_cache = cache_data["Date"].min()
-        last_cache = cache_data["Date"].max()
-        logging.info(
-            f"{ticker}: Cache loaded from {first_cache.strftime('%d/%m/%Y')} to {last_cache.strftime('%d/%m/%Y')} "
-            f"({len(cache_data)} {pluralise("day", len(cache_data))})."
-        )
-
-    # 3) Determine missing date ranges (if no cache data, you'll get the full [start_date, end_date])
+    # 3) Determine missing date ranges
     missing_ranges = find_missing_ranges(start_date, end_date, first_cache, last_cache)
-   
+
     # 4) Download missing data via yfinance
     downloaded_data = pd.DataFrame()
     if missing_ranges:
         for rng_start, rng_end in missing_ranges:
-            partial_df = download_data(ticker, rng_start, rng_end)  
+            partial_df = download_data(ticker, rng_start, rng_end)
             if not (partial_df is None or partial_df.empty):
                 downloaded_data = pd.concat([downloaded_data, partial_df], ignore_index=True)
-
-    
+                
     # 5) Merge newly downloaded data with cache
-    if cache_data.empty and not downloaded_data.empty:
-        combined_data = downloaded_data.copy()
-    elif not cache_data.empty and downloaded_data.empty:
-        combined_data = cache_data.copy()
+
+    if cache_data is None or cache_data.empty:
+        combined_data= downloaded_data
+        needs_save = True  # Flag that new data is to be saved
+    elif downloaded_data is None or downloaded_data.empty:
+        combined_data = cache_data
     else:
         combined_data = pd.concat([cache_data, downloaded_data], ignore_index=True)
-    combined_data.drop_duplicates(subset=["Date"], keep="last", inplace=True)
-    combined_data.sort_values("Date", inplace=True)   
+        combined_data.drop_duplicates(subset=["Date"], keep="last", inplace=True)
+        needs_save = True  # Flag that merged data is to be saved
     
-    # 6) Save cache only if there is a change to cache
-    if not cache_data.equals(combined_data):
+    combined_data.sort_values("Date", inplace=True)
+
+    # 6) Save cache only if changes occurred (and before forwards-fill)
+    if needs_save:
         save_cache(ticker, combined_data, cache_dir)
 
-    # 7) Append latest price if todays closing not available 
+    # 7) Forward-fill logic (for FX tickers)
+    if "=X" in ticker.upper():
+        min_date = combined_data["Date"].min().normalize()
+        max_date = combined_data["Date"].max().normalize()
+        # Create full range of dates for every calendar day even if there are gaps in the original data
+        all_days = pd.date_range(min_date, max_date, freq="D")
+
+
+        # Create a full date range for each ticker where all calendar days are present, and missing data is covered by forward-filling the last known value.
+        # Get a list of all unique tickers in the dataset
+        all_tickers = combined_data["Ticker"].unique()
+        # create a MultiIndex that combines all dates and all tickers
+        all_ticker_dates = pd.MultiIndex.from_product(
+            [all_days, all_tickers], names=["Date", "Ticker"]
+        )
+        # Create a df where all calendar days are present for every ticker, and missing data is covered by forward-filling the last known value.
+        forward_filled_data = (
+            # Temporarily use Date and Ticker as a MultiIndex
+            combined_data.set_index(["Date", "Ticker"])
+            # Reindex to include every day in all_days, (adding rows missing in combined_data) filling any missing rows with the last available data (forward-filling).
+            .reindex(all_ticker_dates, method="ffill")
+            # Convert the MultiIndex back into regular columns.
+            .reset_index()
+        )
+
+        if not combined_data.equals(forward_filled_data):
+            logging.info(f"{ticker}: Forward-filled FX data ({len(all_days)} days)")
+            combined_data = forward_filled_data
+
+   # 8) Append latest price if today's closing not available
     max_date = combined_data["Date"].max()
-    today = pd.Timestamp.now(tz='UTC').normalize() # Get today's date at midnight UTC
+    today = pd.Timestamp.now(tz="UTC").normalize()
 
     if max_date.normalize() < today and isinstance(current_price, float) and current_price > 0:
-        new_row = pd.Series({"Ticker": ticker, "Old Price": current_price, "Date": today})
-        combined_data = pd.concat([combined_data, new_row.to_frame().T], ignore_index=True)
-        logging.info(f"{ticker}: Appended today's {today.strftime('%d/%m/%Y')} price = {current_price:.3f}")
+        #  Create new_row as a DataFrame with explicit dtypes
+        new_row = pd.DataFrame([{
+            "Ticker": ticker,
+            "Old Price": current_price,
+            "Date": pd.to_datetime(today, utc=True),  # Ensure Date is datetime64[ns, UTC]
+        }])
+        # Ensure combined_data['Date'] remains datetime64[ns, UTC]
+        combined_data["Date"] = pd.to_datetime(combined_data["Date"], utc=True)
 
+        # Concatenate new_row into combined_data
+        combined_data = pd.concat([combined_data, new_row], ignore_index=True)
+        logging.info(f"{ticker}: Appended today's {today.strftime('%d/%m/%Y')} latest price = {current_price:.3f}")
+    
 
-    # 8) Log final result
+    # 9) Final log
     logging.info(
-        f"{ticker}: Got {len(combined_data)} {pluralise("day", len(combined_data))} data from {combined_data['Date'].min().strftime('%d/%m/%Y')} to {combined_data['Date'].max().strftime('%d/%m/%Y')}\n"
+        f"{ticker}: Got {len(combined_data)} {pluralise('day', len(combined_data))} data "
+        f"from {combined_data['Date'].min().strftime('%d/%m/%Y')} to {combined_data['Date'].max().strftime('%d/%m/%Y')}\n"
     )
-
     return combined_data
 
-
 @retry()
-def load_cache(ticker: str, cache_dir: str) -> pd.DataFrame:
+def load_cache(ticker: str, cache_dir: str) -> Tuple[pd.DataFrame, str]:
     """
     Loads cached data for a specific ticker using pickle.
 
@@ -845,22 +915,36 @@ def load_cache(ticker: str, cache_dir: str) -> pd.DataFrame:
         cache_dir (str): Path to the cache directory.
 
     Returns:
-        pd.DataFrame: DataFrame containing cached data, or an empty DataFrame if the cache file is not found or cannot be read.
+        Tuple[pd.DataFrame, str]: A tuple containing:
+            - A DataFrame with cached data, or an empty DataFrame if the file is not found or empty.
+            - A string indicating the cache status: "not_found", "empty", or "loaded".
     """
     cache_file = os.path.join(cache_dir, f"{ticker}.pkl")
 
     if os.path.exists(cache_file):
         try:
-            # Use pickle.load to deserialize the data
+            # Check if the file is empty
+            if os.path.getsize(cache_file) == 0:
+                logging.warning(f"{ticker}: Cache file exists but is empty.")
+                return pd.DataFrame(columns=CACHE_COLUMNS), "empty"
+            
+            # File exists and is not empty, attempt to load
             with open(cache_file, "rb") as f:
                 data = pickle.load(f)
-            return data
-        except (FileNotFoundError, IOError) as e:
+            
+            # Ensure data is a DataFrame
+            if isinstance(data, pd.DataFrame):
+                return data, "loaded"
+            else:
+                logging.error(f"{ticker}: Cache file is invalid or corrupted.")
+                return pd.DataFrame(columns=CACHE_COLUMNS), "empty"
+        
+        except (FileNotFoundError, IOError, pickle.UnpicklingError) as e:
             logging.error(f"Failed to load cache for {ticker}: {e}")
-            return pd.DataFrame(columns=CACHE_COLUMNS)
+            return pd.DataFrame(columns=CACHE_COLUMNS), "empty"
     else:
-        logging.info(f"{ticker}: No cache found.")
-        return pd.DataFrame(columns=CACHE_COLUMNS)
+        return pd.DataFrame(columns=CACHE_COLUMNS), "not_found"
+
 
 @retry()
 def download_data(
@@ -973,7 +1057,7 @@ def clean_cache(config):
                         os.remove(entry.path)
                         deleted_files += 1
                         logging.info(
-                            f"Cache cleaning: {entry.name} deleted. Older than {config['cache']['max_age_days']} {pluralise('day', config['cache']['max_age_days'])}."
+                            f"Cache cleaning: {entry.name} deleted. Older than {config['cache']['max_age_days']} {pluralise('day', config['cache']['max_age_days'])}"
                         )
                     except Exception as remove_error:
                         logging.error(
@@ -981,11 +1065,11 @@ def clean_cache(config):
                         )
 
         logging.info(
-            f"Cache cleaning: {deleted_files} cache {pluralise('file', deleted_files)} deleted.\n"
+            f"Cache cleaning: {deleted_files} cache {pluralise('file', deleted_files)} deleted\n"
         )
     except Exception as e:
         logging.error(
-            f"Cache cleaning: Error with {cache_dir}: {e}. Check file permissions or existence of the directory."
+            f"Cache cleaning: Error with {cache_dir}: {e}. Check file permissions or existence of the directory"
         )
         return False
 
@@ -995,8 +1079,7 @@ def clean_cache(config):
 # Process Data ################################
 
 def convert_prices(
-    df: pd.DataFrame,
-    valid_currencies: Optional[List[str]] = None
+    df: pd.DataFrame
 ) -> pd.DataFrame:
     """
     Converts prices to GBP based on ticker type and currency (daily data),
@@ -1014,8 +1097,6 @@ def convert_prices(
     Args:
         df: DataFrame containing historical data. Must include columns:
             'Date', 'Type', 'Ticker', 'Old Price', 'Original Currency', 'Price'.
-        valid_currencies: Optional list of valid currency codes. If provided,
-            logs a warning for any unrecognised currencies.
 
     Returns:
         DataFrame with a new 'Price' column converted to GBP where applicable.
@@ -1026,33 +1107,30 @@ def convert_prices(
     if df.empty:
         logging.error("Empty DataFrame received.")
         return pd.DataFrame()
-
+    
+      
     # 1) Separate equity rows vs. FX rows
     equity_df = df[df["Type"] != "CURRENCY"].copy()
     fx_df = df[df["Type"] == "CURRENCY"].copy()
+
+
+    equity_df["Date"] = equity_df["Date"].dt.normalize()
+
+
+    fx_df["Date"] = fx_df["Date"].dt.normalize()
 
     # 2) Log day coverage mismatches
     equity_days = set(equity_df["Date"])
     fx_days = set(fx_df["Date"])
     common_days = equity_days.intersection(fx_days)
-
     unmatched_equity_days = equity_days - fx_days
     unmatched_fx_days = fx_days - equity_days
-
-    logging.info(f"Equity total days: {len(equity_days)}")
-    logging.info(f"FX total days: {len(fx_days)}")
-    logging.info(f"Common days: {len(common_days)}")
-    logging.info(f"Equity-only days: {len(unmatched_equity_days)}")
-    logging.info(f"FX-only days: {len(unmatched_fx_days)}")
-
-    # 3) Optional check for valid currencies
-    if valid_currencies:
-        invalid_currencies = df.loc[
-            ~df["Original Currency"].isin(valid_currencies), "Original Currency"
-        ].unique()
-        if invalid_currencies.size > 0:
-            logging.warning(f"Found rows with invalid currencies: {invalid_currencies}")
-
+    logging.info(f"Total equity {pluralise('day',len(equity_days))}: {len(equity_days)}")
+    logging.info(f"Total FX {pluralise('day',len(fx_days))}: {len(fx_days)}")
+    logging.info(f"Common {pluralise('day',len(common_days))}: {len(common_days)}")
+    logging.info(f"Equity-only {pluralise('day',len(unmatched_equity_days))}: {len(unmatched_equity_days)}")
+    logging.info(f"FX-only {pluralise('day',len(unmatched_fx_days))}: {len(unmatched_fx_days)}\n")
+   
     # 4) Build a minimal FX DataFrame -> 'FX Rate'
     exchange_rate_df = (
         fx_df.groupby(["Date", "Ticker"])["Old Price"]
@@ -1109,7 +1187,7 @@ def convert_prices(
 
     # Log how many conversions happened (where 'FX Ticker' != '-')
     converted_count = equity_df[~equity_df["FX Ticker"].str.contains("-")].shape[0]
-    logging.info(f"{converted_count} prices successfully converted to GBP.")
+    logging.info(f"{converted_count} prices successfully converted to GBP\n")
 
     # 10) Optional: Validate floating-point multiplication
     equity_df["Conversion Check"] = equity_df.apply(
@@ -1124,17 +1202,7 @@ def convert_prices(
     if not incorrect_rows.empty:
         logging.warning(f"The following rows have conversion errors:\n{incorrect_rows}")
 
-    # 11) Print a small "latest data" preview
-    latest_data = (
-        equity_df.sort_values("Date").groupby("Ticker").tail(1).copy()
-    )
-    latest_data["Date"] = latest_data["Date"].dt.strftime("%d/%m/%Y")
-    latest_data = latest_data.sort_values(by=["Type", "FX Ticker", "Ticker"])
-    latest_data.reset_index(drop=True, inplace=True)
-
-    print(f"\nLatest Data\n{latest_data}\n")
-
-    # 12) Return only essential columns (modify as needed)
+    # 11) Return only essential columns (modify as needed)
     return equity_df[["Ticker", "Price", "Date"]]
 
 def process_converted_prices(converted_df: pd.DataFrame) -> pd.DataFrame:
@@ -1203,7 +1271,7 @@ def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
 
         # Log the save location
         short_CSV_path = format_path(file_path)
-        logging.info(f"{short_CSV_path} saved successfully.\n")
+        logging.info(f"Data saved successfully to {short_CSV_path}\n")
 
         return True
 
@@ -1406,7 +1474,7 @@ def quicken_import(config):
             )
             short_CSV_path = format_path(file_path)
             logging.info(
-                f"Can't automate file import. Open Quicken and upload {short_CSV_path} manually."
+                f"Can't automate file import. Open Quicken and upload {short_CSV_path} manually"
             )
             return False
     except Exception as e:
@@ -1453,15 +1521,17 @@ def main():
             logging.error("No valid data fetched. Exiting.")
             sys.exit(1)
 
-        # 6) Convert to GBP (and log mismatched days in the process)
-         # Convert prices to GBP
+        # 6) Convert prices to GBP 
         processed_data = convert_prices(price_data)
+
 
         # 7) Build the final output (e.g., pivoting, filtering, etc.)
         output_csv = process_converted_prices(processed_data)
 
+
         # 8) Save to CSV or your preferred data store
         save_to_csv(output_csv, config=config)
+
 
         # 9) Clean up the cache if desired
         clean_cache(config=config)
@@ -1471,7 +1541,7 @@ def main():
         quicken_import(config=config)
 
         # End
-        logging.info("Script completed successfully.")
+        logging.info("Script completed successfully")
         if is_elevated():
             input("\n\t Press Enter to exit...\n\t")
 
