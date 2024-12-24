@@ -736,8 +736,10 @@ def fetch_historical_data(
     for ticker, earliest_date, ticker_type, currency, current_price in tickers:
 
         # Ensure earliest_date and end_date are directly comparable
-        if earliest_date.tzinfo != end_date.tzinfo:
-            earliest_date = earliest_date.tz_convert(end_date.tzinfo)  # Convert to the same timezone as end_date
+        if earliest_date is not None and earliest_date.tzinfo:
+
+            if earliest_date.tzinfo != end_date.tzinfo:
+                earliest_date = earliest_date.tz_convert(end_date.tzinfo)  # Convert to the same timezone as end_date
 
         # Skip tickers that began trading after our end_date
         if earliest_date and end_date < earliest_date:
