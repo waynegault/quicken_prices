@@ -464,7 +464,7 @@ def get_date_range(config: dict) -> Tuple[pd.Timestamp, pd.Timestamp]:
         config (dict): Configuration containing 'collection_period_years'.
 
     Returns:
-        Tuple[pd.Timestamp, pd.Timestamp]: The adjusted start and end dates.
+        Tuple[pd.Timestamp, pd.Timestamp]: The adjusted start and end dates, localized to UTC.
     """
     if "collection_period_years" not in config:
         raise KeyError("Config is missing 'collection_period_years' key.")
@@ -476,22 +476,19 @@ def get_date_range(config: dict) -> Tuple[pd.Timestamp, pd.Timestamp]:
     # Calculate the number of days in the collection period
     collection_period_days = int(round(collection_period_years * 365.25))
 
-    # Get today's date in UTC and convert to naive format
+    # Get today's date in UTC
     today_utc = pd.Timestamp.now(tz="UTC").normalize()
-    today_naive = today_utc.replace(tzinfo=None)
-    if pd.isna(today_naive):
-        raise ValueError("Unable to determine today's date.")
 
     # Calculate initial start and end dates
-    end_date = today_naive
+    end_date = today_utc
     start_date = end_date - pd.Timedelta(days=collection_period_days)
 
     # Adjust for weekends and public holidays
-    end_date = adjust_date(end_date, direction="end")
-    start_date = adjust_date(start_date, direction="start")
+    end_date = adjust_date(end_date.tz_localize(None), direction="end").tz_localize("UTC")
+    start_date = adjust_date(start_date.tz_localize(None), direction="start").tz_localize("UTC")
 
     # Log the collection period details
-    business_days_range = pd.bdate_range(start_date, end_date)
+    business_days_range = pd.bdate_range(start_date, end_date, tz="UTC")
     non_weekend_days = len(business_days_range)
 
     logging.info(
@@ -674,7 +671,7 @@ def validate_ticker(ticker_symbol: str) -> Optional[Dict[str, Union[str, pd.Time
         first_trade_date = info.get("firstTradeDateEpochUtc", None)
         if first_trade_date is not None:
             try:
-                earliest_date = pd.Timestamp(first_trade_date, unit="s")
+                earliest_date = pd.Timestamp(first_trade_date, unit="s").tz_localize("UTC")
             except (ValueError, OverflowError) as e:
                 logging.warning(
                     f"Failed to parse firstTradeDateEpochUtc={first_trade_date} for '{ticker_symbol}': {e}"
@@ -732,11 +729,16 @@ def fetch_historical_data(
         f"Seeking data from {start_date.strftime('%d/%m/%Y')} "
         f"to {end_date.strftime('%d/%m/%Y')}\n"
     )
-
     records = []
+
 
     # For each ticker, fetch data
     for ticker, earliest_date, ticker_type, currency, current_price in tickers:
+
+        # Ensure earliest_date and end_date are directly comparable
+        if earliest_date.tzinfo != end_date.tzinfo:
+            earliest_date = earliest_date.tz_convert(end_date.tzinfo)  # Convert to the same timezone as end_date
+
         # Skip tickers that began trading after our end_date
         if earliest_date and end_date < earliest_date:
             logging.warning(
@@ -746,6 +748,7 @@ def fetch_historical_data(
 
         # Only fetch from max(start_date, earliest_date)
         data_start_date = max(start_date, earliest_date or start_date)
+
 
         try:
             df = fetch_ticker_data(ticker, data_start_date, end_date, current_price, cache_dir)
@@ -792,10 +795,6 @@ def fetch_ticker_data(
     only calling yfinance for missing date ranges.
     Forward-fills missing dates if this is a CURRENCY ticker.
     """
-
-    # 0) Ensure dates in the right format
-    start_date = pd.to_datetime(start_date).tz_localize("UTC")
-    end_date = pd.to_datetime(end_date).tz_localize("UTC")
 
     # 1) Load cache
     os.makedirs(cache_dir, exist_ok=True)
@@ -1218,7 +1217,7 @@ def convert_prices(
 
     return combined_df
 
-def process_converted_prices(converted_df: pd.DataFrame) -> pd.DataFrame:
+def process_converted_prices(converted_df: pd.DataFrame, start_date: pd.Timestamp) -> pd.DataFrame:
     """
     Prepares the final DataFrame for CSV export.
 
@@ -1242,6 +1241,9 @@ def process_converted_prices(converted_df: pd.DataFrame) -> pd.DataFrame:
 
         # Sort by descending date (in place)
         output_csv.sort_values(by="Date", ascending=False, inplace=True)
+
+        # Filter rows to include only those with 'Date' >= start_date
+        output_csv = output_csv[output_csv["Date"] >= start_date]
 
         # Format date as string using .dt.strftime() -> DD/MM/YYYY
         output_csv["Date"] = output_csv["Date"].dt.strftime("%d/%m/%Y")
@@ -1310,10 +1312,9 @@ def import_data_file(config):
 
         # Wait to get to the price import success dialogue
         start_time = time.time()
-        while time.time() - start_time < 60:
+        while time.time() - start_time < 120:
             windows = gw.getWindowsWithTitle(
-                # "Quicken XG 2004 - Home - [Investing Centre]"
-                "Quicken 2004"
+                "Quicken XG 2004 - Home - [Investing Centre]"
             )
             if windows:
                 time.sleep(2)
@@ -1522,6 +1523,7 @@ def main():
             logging.error("No tickers found. Please update your configuration. Exiting.")
             sys.exit(1)
 
+
         # 4) Validate and acquire ticker metadata
         valid_tickers: List[Tuple[str, Optional[pd.Timestamp], str, str, float]] = []
         valid_tickers = get_tickers(tickers)
@@ -1529,8 +1531,8 @@ def main():
             logging.error("No valid tickers to process. Exiting.")
             sys.exit(1)
 
-
-        # 5) Fetch historical data (daily)
+  
+        # 5) Fetch historical data
 
         # Retrieve date range and cache_dir from config 
         start_date, end_date = get_date_range(config)
@@ -1541,12 +1543,13 @@ def main():
             logging.error("No valid data fetched. Exiting.")
             sys.exit(1)
 
+
         # 6) Convert prices to GBP 
         processed_data = convert_prices(price_data)
 
 
         # 7) Build the final output (e.g., pivoting, filtering, etc.)
-        output_csv = process_converted_prices(processed_data)
+        output_csv = process_converted_prices(processed_data, start_date)
 
 
         # 8) Save to CSV or your preferred data store
