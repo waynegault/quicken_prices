@@ -165,7 +165,6 @@ def find_quicken_via_registry() -> Optional[str]:
     """
     Locate Quicken executable path via Windows Registry.
     """
-
     registry_keys = [
         r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\qw.exe",
         r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{366CC735-543D-42CB-9C03-D7512314DE52}",
@@ -176,7 +175,8 @@ def find_quicken_via_registry() -> Optional[str]:
                 winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_READ
             ) as key:
                 if "App Paths" in key_path:
-                    quicken_path, _ = winreg.QueryValueEx(key, None)
+                    # Explicitly handle `None` as a valid argument
+                    quicken_path, _ = winreg.QueryValueEx(key, "")  # Use empty string for the default value
                 else:
                     install_location, _ = winreg.QueryValueEx(key, "InstallLocation")
                     quicken_path = os.path.join(install_location, "qw.exe")
@@ -228,7 +228,7 @@ config = load_configuration("configuration.yaml")
 
 def retry(
     exceptions: Union[Type[BaseException], Tuple[Type[BaseException], ...]] = Exception,
-    config: dict = None
+    config: Optional[Dict[str, Dict[str, float]]] = None
 ):
     """
     A decorator that retries a function call in case of specified exceptions.
@@ -246,14 +246,14 @@ def retry(
         The last exception if the maximum number of retries is reached.
     """
 
-    # If user didn't pass a custom config, fall back to DEFAULT_CONFIG
     if config is None:
         config = DEFAULT_CONFIG
 
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            tries = config["retries"]["max_retries"]
+            # Explicitly cast `max_retries` to int
+            tries = int(config["retries"]["max_retries"])
             delay = config["retries"]["retry_delay"]
             backoff = config["retries"]["backoff"]
 
@@ -420,6 +420,7 @@ def panda_date(
         logging.warning(f"Invalid date format: {date_obj}. Error: {e}")
         return pd.NaT
 
+
 def adjust_date(date: pd.Timestamp, direction: str) -> pd.Timestamp:
     """
     Adjusts a date to the nearest valid business day (avoiding weekends and public holidays).
@@ -453,6 +454,7 @@ def adjust_date(date: pd.Timestamp, direction: str) -> pd.Timestamp:
                 date -= pd.Timedelta(days=1)
 
     return date.floor("D")  # Normalize to remove time component
+
 
 def get_date_range(config: dict) -> Tuple[pd.Timestamp, pd.Timestamp]:
     """
@@ -553,7 +555,7 @@ def format_path(full_path):
 
 def get_tickers(
     tickers: List[str], max_show: int = 5
-) -> List[Tuple[str, Optional[pd.Timestamp], str, str]]:
+) -> List[Tuple[str, Optional[pd.Timestamp], str, str, float]]:
     """
     Get and validate stock and FX tickers.
 
@@ -572,7 +574,9 @@ def get_tickers(
     logging.info(
         f"Validating {len(tickers)} stock {pluralise('ticker', len(tickers))}..."
     )
-    valid_tickers = validate_tickers(tickers, max_show)
+    valid_tickers: List[Tuple[str, Optional[pd.Timestamp], str, str, float]] = validate_tickers(tickers, max_show)
+    
+
 
     if not valid_tickers:
         logging.error(
@@ -608,7 +612,7 @@ def get_tickers(
 
 def validate_tickers(
     tickers: List[str], max_show: int = 5
-) -> List[Tuple[str, Optional[pd.Timestamp], str, str]]:
+) -> List[Tuple[str, Optional[pd.Timestamp], str, str, float]]:
     valid_tickers = []
     for ticker_symbol in tickers:
         data = None
@@ -621,7 +625,7 @@ def validate_tickers(
                         data["earliest_date"],
                         data["type"],
                         data["currency"],
-                        data["current_price"]
+                        data["current_price"],
                     )
                 )
         except Exception as e:
@@ -637,7 +641,7 @@ def validate_tickers(
     return valid_tickers
 
 
-def validate_ticker(ticker_symbol: str) -> Optional[Dict[str, Union[str, pd.Timestamp]]]:
+def validate_ticker(ticker_symbol: str) -> Optional[Dict[str, Union[str, pd.Timestamp, float]]]:
     """
     Validate a ticker symbol and fetch metadata using yfinance.
 
@@ -645,7 +649,7 @@ def validate_ticker(ticker_symbol: str) -> Optional[Dict[str, Union[str, pd.Time
         ticker_symbol (str): The ticker symbol to validate.
 
     Returns:
-        Optional[Dict[str, Union[str, pd.Timestamp]]]: Metadata about the ticker, or None if invalid.
+        Optional[Dict[str, Union[str, pd.Timestamp, float]]]: Metadata about the ticker, or None if invalid.
     """
     if not isinstance(ticker_symbol, str):
         logging.error("Ticker must be a string.")
@@ -685,7 +689,7 @@ def validate_ticker(ticker_symbol: str) -> Optional[Dict[str, Union[str, pd.Time
             "earliest_date": earliest_date,
             "type": info.get("quoteType", "Unknown"),
             "currency": info.get("currency", "Unknown"),
-            "current_price": info.get("bid", "Unknown"),
+            "current_price": info.get("bid", float('nan'))
         }
 
         return data
@@ -696,9 +700,12 @@ def validate_ticker(ticker_symbol: str) -> Optional[Dict[str, Union[str, pd.Time
         return None
 
 # Get data ####################################
+
 def fetch_historical_data(
     tickers: List[Tuple[str, Optional[pd.Timestamp], str, str, float]],
-    config: Dict[str, Any],
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+    cache_dir: str
 ) -> pd.DataFrame:
     """
     Fetch historical data for a list of tickers using daily yfinance data
@@ -719,8 +726,7 @@ def fetch_historical_data(
         logging.info("No tickers provided. Returning empty DataFrame.")
         return pd.DataFrame(columns=list(CACHE_COLUMNS) + ["Type", "Original Currency"])
 
-    # Retrieve date range from config (updated version with no weekend logic)
-    start_date, end_date = get_date_range(config)
+    
 
     logging.info(
         f"Seeking data from {start_date.strftime('%d/%m/%Y')} "
@@ -742,7 +748,7 @@ def fetch_historical_data(
         data_start_date = max(start_date, earliest_date or start_date)
 
         try:
-            df = fetch_ticker_data(ticker, data_start_date, end_date, current_price, config)
+            df = fetch_ticker_data(ticker, data_start_date, end_date, current_price, cache_dir)
             if df is None or df.empty:
                 logging.warning(f"No data found for ticker {ticker}. Skipping.")
                 continue
@@ -773,12 +779,13 @@ def fetch_historical_data(
     logging.warning("No valid data fetched for any tickers.")
     return pd.DataFrame(columns=list(CACHE_COLUMNS) + ["Type", "Original Currency"])
 
+
 def fetch_ticker_data(
     ticker: str,
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
     current_price: float,
-    config: Dict[str, any]
+    cache_dir: str
 ) -> pd.DataFrame:
     """
     Fetch historical data (daily) for a ticker using local cache + yfinance,
@@ -791,10 +798,8 @@ def fetch_ticker_data(
     end_date = pd.to_datetime(end_date).tz_localize("UTC")
 
     # 1) Load cache
-    cache_dir = os.path.join(config["paths"]["base"], config["paths"]["cache"])
     os.makedirs(cache_dir, exist_ok=True)
     cache_data, cache_status = load_cache(ticker, cache_dir)
-
     needs_save = False  # Track whether the cache needs saving
 
     # 2) Identify missing date ranges in cache
@@ -957,6 +962,11 @@ def download_data(
     Returns a DataFrame with columns including "Date".
     """
     try:
+        # dont collect data if start is today
+        today = pd.Timestamp.now(tz="UTC").normalize()
+        if today==rng_start:
+            return pd.DataFrame()
+
         # Make range end inclusive
         rng_end = rng_end + pd.Timedelta(days=1)
         ticker=yf.Ticker(ticker_symbol)
@@ -1112,11 +1122,7 @@ def convert_prices(
     # 1) Separate equity rows vs. FX rows
     equity_df = df[df["Type"] != "CURRENCY"].copy()
     fx_df = df[df["Type"] == "CURRENCY"].copy()
-
-
     equity_df["Date"] = equity_df["Date"].dt.normalize()
-
-
     fx_df["Date"] = fx_df["Date"].dt.normalize()
 
     # 2) Log day coverage mismatches
@@ -1131,7 +1137,7 @@ def convert_prices(
     logging.info(f"Equity-only {pluralise('day',len(unmatched_equity_days))}: {len(unmatched_equity_days)}")
     logging.info(f"FX-only {pluralise('day',len(unmatched_fx_days))}: {len(unmatched_fx_days)}\n")
    
-    # 4) Build a minimal FX DataFrame -> 'FX Rate'
+    # 3) Build a minimal FX DataFrame -> 'FX Rate'
     exchange_rate_df = (
         fx_df.groupby(["Date", "Ticker"])["Old Price"]
         .first()                     # one price per date+ticker
@@ -1140,7 +1146,7 @@ def convert_prices(
         .rename(columns={"Ticker": "FX Ticker"})
     )
 
-    # 5) Work on a copy of the equity data to avoid mutating the original
+    # 4) Work on a copy of the equity data to avoid mutating the original
     equity_df = equity_df.copy()
 
     # We'll rename 'Price' -> 'Old Price' so we can store a new 'Price'
@@ -1160,7 +1166,7 @@ def convert_prices(
     equity_df["FX Ticker"] = equity_df["FX Ticker"].astype(str)
     exchange_rate_df["FX Ticker"] = exchange_rate_df["FX Ticker"].astype(str)
 
-    # 6) Merge the 'FX Rate' onto the equity rows
+    # 5) Merge the 'FX Rate' onto the equity rows
     equity_df = pd.merge(
         equity_df,
         exchange_rate_df,
@@ -1168,13 +1174,13 @@ def convert_prices(
         how="left"
     )
 
-    # 7) Hard-code FX Rate for GBP & GBp
+    # 6) Hard-code FX Rate for GBP & GBp
     gbp_mask = equity_df["Original Currency"] == "GBP"
     gbp_pence_mask = equity_df["Original Currency"] == "GBp"
     equity_df.loc[gbp_mask, "FX Rate"] = 1.0
     equity_df.loc[gbp_pence_mask, "FX Rate"] = 0.01
 
-    # 8) Error if missing FX Rate for non-GBP
+    # 7) Error if missing FX Rate for non-GBP
     missing_fx_mask = equity_df["FX Rate"].isna() & non_gbp_mask
     if missing_fx_mask.any():
         missing_count = missing_fx_mask.sum()
@@ -1182,14 +1188,14 @@ def convert_prices(
             f"{missing_count} rows have missing FX rates. This is an error."
         )
 
-    # 9) Calculate final Price in GBP
+    # 8) Calculate final Price in GBP
     equity_df["Price"] = equity_df["Old Price"] * equity_df["FX Rate"]
 
     # Log how many conversions happened (where 'FX Ticker' != '-')
     converted_count = equity_df[~equity_df["FX Ticker"].str.contains("-")].shape[0]
     logging.info(f"{converted_count} prices successfully converted to GBP\n")
 
-    # 10) Optional: Validate floating-point multiplication
+    # 9) Validate floating-point multiplication
     equity_df["Conversion Check"] = equity_df.apply(
         lambda row: (
             "Correct"
@@ -1202,8 +1208,15 @@ def convert_prices(
     if not incorrect_rows.empty:
         logging.warning(f"The following rows have conversion errors:\n{incorrect_rows}")
 
-    # 11) Return only essential columns (modify as needed)
-    return equity_df[["Ticker", "Price", "Date"]]
+    # 10) merge equity and fx df's with "Ticker", "Price", "Date" cols
+    equity_df = equity_df[["Ticker", "Price", "Date"]]
+    fx_df = fx_df.rename(columns={"Old Price": "Price"})
+    fx_df= fx_df[["Ticker", "Price", "Date"]]
+    combined_df = pd.concat([equity_df, fx_df])
+    # Sort by Date then Ticker and reset index
+    combined_df = combined_df.sort_values(by=["Date", "Ticker"]).reset_index(drop=True)
+
+    return combined_df
 
 def process_converted_prices(converted_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -1297,9 +1310,10 @@ def import_data_file(config):
 
         # Wait to get to the price import success dialogue
         start_time = time.time()
-        while time.time() - start_time < 10:
+        while time.time() - start_time < 60:
             windows = gw.getWindowsWithTitle(
-                "Quicken XG 2004 - Home - [Investing Centre]"
+                # "Quicken XG 2004 - Home - [Investing Centre]"
+                "Quicken 2004"
             )
             if windows:
                 time.sleep(2)
@@ -1509,13 +1523,19 @@ def main():
             sys.exit(1)
 
         # 4) Validate and acquire ticker metadata
+        valid_tickers: List[Tuple[str, Optional[pd.Timestamp], str, str, float]] = []
         valid_tickers = get_tickers(tickers)
         if not valid_tickers:
             logging.error("No valid tickers to process. Exiting.")
             sys.exit(1)
 
+
         # 5) Fetch historical data (daily)
-        price_data = fetch_historical_data(valid_tickers, config=config)
+
+        # Retrieve date range and cache_dir from config 
+        start_date, end_date = get_date_range(config)
+        cache_dir = os.path.join(config["paths"]["base"], config["paths"]["cache"])
+        price_data = fetch_historical_data(valid_tickers, start_date, end_date, cache_dir)
 
         if price_data is None or price_data.empty:
             logging.error("No valid data fetched. Exiting.")
