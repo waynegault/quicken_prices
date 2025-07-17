@@ -1183,14 +1183,14 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
       1) Separate equity rows (Type != "CURRENCY") from FX rows (Type == "CURRENCY").
       2) Log how many dates appear in equity vs. FX vs. both (mismatched days).
       3) For currency rows, group by (Date, Ticker) to build an 'FX Rate'.
-      4) Merge 'FX Rate' into equity rows on (Date, FX Ticker).
+      4) Merge 'FX Rate' into equity rows on (Date, FX Ticker) using merge_asof.
       5) Set FX Rate = 1.0 or 0.01 for GBP or GBp rows respectively.
       6) Raise an error if non-GBP rows have missing FX rates.
       7) Compute final Price in GBP and return the result.
 
     Args:
         df: DataFrame containing historical data. Must include columns:
-            'Date', 'Type', 'Ticker', 'Old Price', 'Original Currency', 'Price'.
+            'Date', 'Type', 'Ticker', 'Old Price', 'Original Currency'.
 
     Returns:
         DataFrame with a new 'Price' column converted to GBP where applicable.
@@ -1239,7 +1239,8 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     equity_df = equity_df.copy()
 
     # We'll rename 'Price' -> 'Old Price' so we can store a new 'Price'
-    equity_df = equity_df.rename(columns={"Price": "Old Price"})
+    if "Price" in equity_df.columns:
+        equity_df = equity_df.rename(columns={"Price": "Old Price"})
 
     # Prepare an 'FX Ticker' column for non-GBP
     equity_df["FX Ticker"] = "-"
@@ -1255,9 +1256,14 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     equity_df["FX Ticker"] = equity_df["FX Ticker"].astype(str)
     exchange_rate_df["FX Ticker"] = exchange_rate_df["FX Ticker"].astype(str)
 
-    # 5) Merge the 'FX Rate' onto the equity rows
-    equity_df = pd.merge(
-        equity_df, exchange_rate_df, on=["Date", "FX Ticker"], how="left"
+    # 5) Merge the 'FX Rate' onto the equity rows using merge_asof
+    # This requires sorting by the 'on' key ('Date')
+    equity_df = pd.merge_asof(
+        equity_df.sort_values("Date"),
+        exchange_rate_df.sort_values("Date"),
+        on="Date",
+        by="FX Ticker",
+        direction="backward",  # Use the last known FX rate
     )
 
     # 6) Hard-code FX Rate for GBP & GBp
@@ -1269,9 +1275,10 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     # 7) Error if missing FX Rate for non-GBP
     missing_fx_mask = equity_df["FX Rate"].isna() & non_gbp_mask
     if missing_fx_mask.any():
-        missing_count = missing_fx_mask.sum()
+        missing_rows = equity_df[missing_fx_mask]
+        logging.warning(f"The following rows have conversion errors:\n{missing_rows}")
         raise ValueError(
-            f"{missing_count} rows have missing FX rates. This is an error."
+            f"{missing_fx_mask.sum()} rows have missing FX rates. This is an error."
         )
 
     # 8) Calculate final Price in GBP
@@ -1285,7 +1292,8 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     equity_df["Conversion Check"] = equity_df.apply(
         lambda row: (
             "Correct"
-            if abs(row["FX Rate"] * row["Old Price"] - row["Price"]) < 1e-6
+            if pd.isna(row["Price"])
+            or abs(row["FX Rate"] * row["Old Price"] - row["Price"]) < 1e-6
             else "Error"
         ),
         axis=1,
@@ -1472,44 +1480,42 @@ def navigate_to_portfolio():
 
 @retry()
 def open_quicken(config):
-
+    """
+    Opens the Quicken application, ensuring no other instances are running.
+    """
     quicken_path = config["paths"]["quicken"]
     try:
-        # Check if Quicken is already open
-        windows = gw.getWindowsWithTitle("Quicken XG 2004")
-        if len(windows) > 0:
-            quicken_window = windows[0]
-            quicken_window.activate()  # Bring the existing Quicken window to the foreground
-            logging.info("Quicken is already open.")
-            return True
+        # Forcefully close any existing Quicken processes to ensure a clean start
+        logging.info("Checking for and closing existing Quicken processes...")
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "qw.exe"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1)  # Give the OS a moment to close the process
 
         # If not open, launch Quicken
         logging.info("Launching Quicken...")
         process = subprocess.Popen([quicken_path], shell=True)
         if process.poll() is not None:
-            raise RuntimeError(
-                f"Failed to launch Quicken. Process terminated immediately."
-            )
+            logging.error("Failed to start Quicken process.")
+            return False
 
         # Wait for the Quicken window to appear
         start_time = time.time()
-        while time.time() - start_time < 30:
+        while time.time() - start_time < 30:  # 30-second timeout
             windows = gw.getWindowsWithTitle("Quicken XG 2004")
-            if windows:
+            if len(windows) > 0:
                 logging.info("Quicken window found.")
+                windows[0].activate()
                 return True
-            time.sleep(1)
+            time.sleep(0.5)
 
         logging.error("Quicken window did not appear within the expected time.")
         return False
-
-    except FileNotFoundError:
-        logging.error(
-            f"Quicken executable not found at {quicken_path}. Please check the path."
-        )
-        return False
     except Exception as e:
-        logging.error(f"Failed to open Quicken: {e}")
+        logging.error(f"An unexpected error occurred while opening Quicken: {e}")
         return False
 
 
