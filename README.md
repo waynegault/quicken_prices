@@ -2,7 +2,7 @@
 
 ## Overview
 
-QuickenPrices is a Python automation script that fetches historical stock price data from Yahoo Finance and automatically imports it into Quicken Premier. The script handles multi-currency portfolios by converting all prices to a home currency (GBP by default) and provides a seamless end-to-end workflow from data collection to Quicken import.
+QuickenPrices is a Python automation script that fetches historical stock price data from Yahoo Finance and automatically imports it into Quicken 2004. The script handles multi-currency portfolios by converting all prices to a home currency (GBP by default) and provides a seamless end-to-end workflow from data collection to Quicken import.
 
 **Key Features:**
 - 📈 Fetches historical price data for stocks, ETFs, indices, and commodities
@@ -23,6 +23,18 @@ This script was developed to automate the tedious process of manually updating s
 - **Regular Updates**: Set up scheduled runs to keep Quicken data current
 - **Data Consistency**: Ensure all prices come from a single, reliable source (Yahoo Finance)
 
+## Project Files
+
+**Core Files:**
+- `QuickenPrices.py` - Main automation script (1750+ lines)
+- `configuration.yaml` - User configuration file with tickers and settings
+- `requirements.txt` - Python package dependencies for easy installation
+
+**Generated Files:**
+- `data.csv` - Price data output file for Quicken import
+- `prices.log` - Detailed execution logs with rotation
+- `cache/` - Directory containing cached price data (`.pkl` files)
+
 ## User Instructions
 
 ### Prerequisites
@@ -36,6 +48,11 @@ This script was developed to automate the tedious process of manually updating s
 
 1. **Clone or download** the project to your local machine
 2. **Install required Python packages**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+   
+   **Alternative**: Install packages individually:
    ```bash
    pip install pandas yfinance pyautogui pygetwindow pyyaml requests numpy
    ```
@@ -309,6 +326,11 @@ def validate_ticker(ticker_symbol: str):
 #### Regular Maintenance Tasks
 
 1. **Update Dependencies** (Monthly):
+   ```bash
+   pip install --upgrade -r requirements.txt
+   ```
+   
+   **Alternative**: Update specific packages:
    ```bash
    pip install --upgrade yfinance pandas pyautogui
    ```

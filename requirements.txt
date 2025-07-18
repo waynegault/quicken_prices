@@ -1,0 +1,23 @@
+# QuickenPrices.py Requirements File
+# Install with: pip install -r requirements.txt
+
+# Financial Data API
+yfinance>=0.2.18
+
+# Data Processing and Analysis
+pandas>=1.5.0
+numpy>=1.24.0
+
+# Web Requests
+requests>=2.28.0
+
+# Configuration Management
+PyYAML>=6.0
+
+# GUI Automation (Windows)
+pyautogui>=0.9.54
+pygetwindow>=0.0.9
+
+# Note: Standard library modules are included with Python and do not need installation:
+# concurrent.futures, ctypes, datetime, logging, msvcrt, os, pickle, subprocess, 
+# sys, time, traceback, winreg, calendar, functools, pathlib, typing
