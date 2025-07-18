@@ -21,37 +21,35 @@ MIT Licence
 
 # Standard Library Imports
 import concurrent.futures
-import time
-import calendar
+import ctypes
+import datetime
+import logging
+import msvcrt
 import os
-import sys
 import pickle
 import subprocess
-import ctypes
-import winreg
-import datetime
-import inspect
-import logging
+import sys
+import time
 import traceback
-import warnings
+import winreg
+import calendar
 from functools import wraps
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
-import requests
 
 # Third-Party Data and Scientific Computing Imports
-import numpy as np
-from numpy import busday_count
 import pandas as pd
-from pandas import Timestamp, Timedelta, isna
-from pandas._libs.tslibs.nattype import NaTType
+import pygetwindow as gw
+import pyautogui
+import requests
 import yaml
 import yfinance as yf
+from numpy import busday_count
+from pandas import Timedelta, Timestamp, isna
+from pandas._libs.tslibs.nattype import NaTType
 
 # GUI and Automation Imports
-import pyautogui
-import pygetwindow as gw
 
 
 # Constants ###################################
@@ -342,21 +340,36 @@ def run_as_admin():
     """
     Re-runs the script with administrative privileges if not already elevated.
     """
-    if not is_elevated():
+    elevated = is_elevated()
+    logging.info(
+        f"Current elevation status: {'Elevated' if elevated else 'Not elevated'}"
+    )
+
+    if not elevated:
         # Re-run the script as admin
-        return_code = ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", sys.executable, __file__, None, 1
-        )
-        if return_code == 5:
-            # User rejected the elevation prompt
-            logging.info("Elevation request cancelled")
-        elif return_code == 42:
-            # User accepted elevation prompt
-            logging.info("Continuing elevated.")
-            exit(0)
-        else:
-            logging.warning(f"Unknown elevation situation. Code: {return_code}")
-            exit(0)
+        try:
+            logging.info("Attempting to re-run with administrative privileges...")
+            return_code = ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, __file__, None, 1
+            )
+            if return_code > 32:
+                logging.info(
+                    "Successfully launched elevated process. Exiting current process."
+                )
+                sys.exit(0)  # Exit the non-elevated process
+            else:
+                # See ShellExecuteW documentation for error codes
+                logging.error(
+                    f"Failed to elevate privileges. ShellExecuteW returned code: {return_code}"
+                )
+                logging.error(
+                    "Script will continue without elevation, but Quicken automation may fail."
+                )
+                # Do not exit here, allow the script to continue without elevation
+        except Exception as e:
+            logging.error(f"An error occurred while trying to elevate privileges: {e}")
+    else:
+        logging.info("Script is running with administrative privileges.")
 
 
 def is_elevated():
@@ -1272,14 +1285,37 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     equity_df.loc[gbp_mask, "FX Rate"] = 1.0
     equity_df.loc[gbp_pence_mask, "FX Rate"] = 0.01
 
-    # 7) Error if missing FX Rate for non-GBP
+    # 7) Handle missing FX rates more gracefully
     missing_fx_mask = equity_df["FX Rate"].isna() & non_gbp_mask
     if missing_fx_mask.any():
         missing_rows = equity_df[missing_fx_mask]
-        logging.warning(f"The following rows have conversion errors:\n{missing_rows}")
-        raise ValueError(
-            f"{missing_fx_mask.sum()} rows have missing FX rates. This is an error."
-        )
+        logging.warning(f"The following rows have missing FX rates:\n{missing_rows}")
+
+        # Try to fill missing FX rates using forward-fill and backward-fill by FX Ticker
+        for ticker in missing_rows["FX Ticker"].unique():
+            ticker_mask = equity_df["FX Ticker"] == ticker
+            ticker_data = equity_df[ticker_mask].copy().sort_values("Date")
+
+            # Apply forward fill and backward fill to the FX Rate column
+            ticker_data["FX Rate"] = ticker_data["FX Rate"].ffill().bfill()
+
+            # Update the original dataframe
+            equity_df.loc[ticker_mask, "FX Rate"] = ticker_data["FX Rate"].values
+
+        # Check again for any remaining missing rates
+        remaining_missing = equity_df["FX Rate"].isna() & non_gbp_mask
+        if remaining_missing.any():
+            remaining_rows = equity_df[remaining_missing]
+            logging.error(
+                f"Could not resolve FX rates for the following rows:\n{remaining_rows}"
+            )
+            raise ValueError(
+                f"{remaining_missing.sum()} rows still have missing FX rates after forward/backward fill."
+            )
+        else:
+            logging.info(
+                "Successfully filled missing FX rates using forward/backward fill."
+            )
 
     # 8) Calculate final Price in GBP
     equity_df["Price"] = equity_df["Old Price"] * equity_df["FX Rate"]
@@ -1519,6 +1555,27 @@ def open_quicken(config):
         return False
 
 
+def close_quicken():
+    """
+    Closes the Quicken application.
+    """
+    try:
+        logging.info("Closing Quicken...")
+        # Use taskkill to forcefully close Quicken
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "qw.exe"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1)  # Give the OS a moment to process
+        logging.info("Quicken closed successfully.")
+        return True
+    except Exception as e:
+        logging.error(f"An error occurred while closing Quicken: {e}")
+        return False
+
+
 def execute_import_sequence(config):
     """
     Execute the sequence of steps for importing data.
@@ -1662,7 +1719,12 @@ def main():
 
         # End
         logging.info("Script completed successfully")
+
+        # Close Quicken and start countdown only if elevated
         if is_elevated():
+            close_quicken()
+            countdown_exit()
+        else:
             input("\n\t Press Enter to exit...\n\t")
 
     except KeyboardInterrupt:
@@ -1670,6 +1732,22 @@ def main():
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}")
         logging.error(traceback.format_exc())
+
+
+def countdown_exit(seconds: int = 5):
+    """
+    Waits for a specified number of seconds before exiting,
+    allowing the user to interrupt by pressing Enter.
+    """
+    logging.info(f"Window will close in {seconds} seconds. Press Enter to cancel.")
+    end_time = time.time() + seconds
+    while time.time() < end_time:
+        if msvcrt.kbhit() and msvcrt.getwche() == "\r":
+            logging.info("Auto-close cancelled by user.")
+            input("\n\t Press Enter to exit...\n\t")
+            return
+        time.sleep(0.1)
+    logging.info("Exiting.")
 
 
 if __name__ == "__main__":
