@@ -35,6 +35,7 @@ import winreg
 import calendar
 from functools import wraps
 from logging.handlers import RotatingFileHandler
+from numbers import Real
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
@@ -76,6 +77,11 @@ DEFAULT_CONFIG = {
     "paths": {"data_file": "data.csv", "log_file": "prices.log", "cache": "cache"},
     "cache": {"max_age_days": 30},
 }
+
+QUICKEN_SESSION_STARTED = False
+QUICKEN_MAIN_WINDOW_TITLE = "Quicken XG 2004"
+QUICKEN_PORTFOLIO_WINDOW_TITLE = "Quicken XG 2004 - Home - [Investing Centre]"
+QUICKEN_IMPORT_DIALOG_TITLE = "Import Price Data"
 
 
 # Configuration ###############################
@@ -121,11 +127,27 @@ def load_configuration(config_file: str = "configuration.yaml") -> Dict[str, Any
     # Add base path to paths in the config
     final_config.setdefault("paths", {}).setdefault("base", str(base_path))
 
-    # Validate Quicken path
-    quicken_path = validate_quicken_path()
+    # Validate Quicken path, but honour an explicit configuration override.
+    configured_quicken_path = final_config.get("paths", {}).get("quicken")
+    if configured_quicken_path:
+        configured_quicken_path = os.path.expanduser(
+            os.path.expandvars(configured_quicken_path)
+        )
+
+    quicken_path = None
+    if configured_quicken_path and os.path.isfile(configured_quicken_path):
+        quicken_path = configured_quicken_path
+        logging.info(f"Using Quicken path from configuration: {quicken_path}")
+    else:
+        if configured_quicken_path:
+            logging.warning(
+                f"Configured Quicken path was not found: {configured_quicken_path}. Falling back to auto-detection."
+            )
+        quicken_path = validate_quicken_path()
+
     if quicken_path:
         final_config["paths"]["quicken"] = quicken_path
-        logging.info(f"Using Quicken found at: {quicken_path}")
+        logging.info(f"Using Quicken at: {quicken_path}")
     else:
         quicken_not_found_error()
 
@@ -142,13 +164,24 @@ def load_configuration(config_file: str = "configuration.yaml") -> Dict[str, Any
 def apply_defaults(
     defaults: Dict[str, Any], settings: Dict[str, Any]
 ) -> Dict[str, Any]:
+    if not isinstance(settings, dict):
+        settings = {}
 
+    merged_settings: Dict[str, Any] = {}
     for key, value in defaults.items():
+        current_value = settings.get(key)
         if isinstance(value, dict):
-            settings[key] = apply_defaults(value, settings.get(key, {}))
+            merged_settings[key] = apply_defaults(
+                value, current_value if isinstance(current_value, dict) else {}
+            )
         else:
-            settings.setdefault(key, value)
-    return settings
+            merged_settings[key] = value if current_value is None else current_value
+
+    for key, value in settings.items():
+        if key not in merged_settings:
+            merged_settings[key] = value
+
+    return merged_settings
 
 
 def validate_quicken_path() -> Optional[str]:
@@ -288,21 +321,12 @@ def setup_logging(config: Dict[str, Any]) -> None:
     Sets up logging configuration.
     """
 
-    base_path = config["paths"]["base"]
+    base_path = Path(config["paths"]["base"])
     file_log_level = config["logging_level"]["file"].upper()
     terminal_log_level = config["logging_level"]["terminal"].upper()
 
-    # Determine the log directory based on the operating system
-    if os.name == "nt":  # Windows
-        log_dir = os.path.join(os.getenv("APPDATA", base_path), "YourApp", "logs")
-    else:  # Linux/macOS
-        log_dir = os.path.join(os.path.expanduser("~"), ".your_app", "logs")
-
-    # Ensure the logs directory exists
-    os.makedirs(log_dir, exist_ok=True)
-
-    # Use the log file path from the configuration or default to the generated log directory
-    log_file_path = os.path.join(base_path, config["paths"]["log_file"])
+    log_file_path = base_path / config["paths"]["log_file"]
+    log_file_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Create a rotating file handler with a simpler format for readability
     file_handler = RotatingFileHandler(
@@ -336,9 +360,13 @@ def setup_logging(config: Dict[str, Any]) -> None:
 # Initialisation ##############################
 
 
-def run_as_admin():
+def run_as_admin() -> bool:
     """
     Re-runs the script with administrative privileges if not already elevated.
+
+    Returns:
+        bool: True when a new elevated process was launched and the current
+        process should stop after notifying the user.
     """
     elevated = is_elevated()
     logging.info(
@@ -348,15 +376,19 @@ def run_as_admin():
     if not elevated:
         # Re-run the script as admin
         try:
+            script_path = str(Path(__file__).resolve())
             logging.info("Attempting to re-run with administrative privileges...")
             return_code = ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", sys.executable, __file__, None, 1
+                None,
+                "runas",
+                sys.executable,
+                f"\"{script_path}\"",
+                str(Path(script_path).parent),
+                1,
             )
             if return_code > 32:
-                logging.info(
-                    "Successfully launched elevated process. Exiting current process."
-                )
-                sys.exit(0)  # Exit the non-elevated process
+                logging.info("Successfully launched elevated process in a new window.")
+                return True
             else:
                 # See ShellExecuteW documentation for error codes
                 logging.error(
@@ -371,6 +403,7 @@ def run_as_admin():
     else:
         logging.info("Script is running with administrative privileges.")
 
+    return False
 
 def is_elevated():
     """
@@ -379,7 +412,7 @@ def is_elevated():
 
     try:
         return ctypes.windll.shell32.IsUserAnAdmin()
-    except:
+    except Exception:
         return False
 
 
@@ -570,10 +603,10 @@ def find_missing_ranges(
 
 def format_path(full_path):
     """Format a file path to show the last parent directory and filename."""
-    path_parts = full_path.split("\\")
-    if len(path_parts) > 1:
-        return "\\" + "\\".join(path_parts[-2:])  # Show parent dir and filename
-    return "\\" + full_path  # Just in case there's no parent directory
+    path = Path(full_path)
+    if path.parent == Path("."):
+        return f"\\{path.name}"
+    return f"\\{path.parent.name}\\{path.name}"
 
 
 # Validate tickers ############################
@@ -624,8 +657,14 @@ def get_tickers(
         logging.info(
             f"Validating {len(fx_tickers)} FX {pluralise('ticker', len(fx_tickers))}..."
         )
-        valid_fx_tickers = validate_tickers(list(fx_tickers), max_show)
-        all_valid_tickers = list(set(valid_tickers + valid_fx_tickers))
+        valid_fx_tickers = validate_tickers(sorted(fx_tickers), max_show)
+        all_valid_tickers = []
+        seen_tickers = set()
+        for ticker_info in valid_tickers + valid_fx_tickers:
+            if ticker_info[0] in seen_tickers:
+                continue
+            seen_tickers.add(ticker_info[0])
+            all_valid_tickers.append(ticker_info)
     else:
         logging.info("No new FX tickers required.")
         all_valid_tickers = valid_tickers
@@ -639,7 +678,7 @@ def get_tickers(
 def validate_tickers(
     tickers: List[str], max_show: int = 5
 ) -> List[Tuple[str, Optional[pd.Timestamp], str, str, float]]:
-    valid_tickers = []
+    validated_by_symbol: Dict[str, Tuple[str, Optional[pd.Timestamp], str, str, float]] = {}
     # Use a ThreadPoolExecutor for concurrent validation
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         # Map each ticker to the validate_ticker function
@@ -656,19 +695,27 @@ def validate_tickers(
                     and data["type"] != "Unknown"
                     and data["currency"] != "Unknown"
                 ):
-                    valid_tickers.append(
-                        (
-                            data["ticker"],
-                            data["earliest_date"],
-                            data["type"],
-                            data["currency"],
-                            data["current_price"],
-                        )
+                    ticker_key = str(data["ticker"]).upper()
+                    current_price = data["current_price"]
+                    validated_by_symbol[ticker_key] = (
+                        ticker_key,
+                        data["earliest_date"],
+                        str(data["type"]),
+                        str(data["currency"]),
+                        float(current_price)
+                        if isinstance(current_price, Real) and not pd.isna(current_price)
+                        else float("nan"),
                     )
             except Exception as e:
                 logging.error(
                     f"An unexpected error occurred processing ticker '{ticker_symbol}': {e}"
                 )
+
+    valid_tickers = []
+    for ticker_symbol in tickers:
+        normalized_symbol = ticker_symbol.upper()
+        if normalized_symbol in validated_by_symbol:
+            valid_tickers.append(validated_by_symbol[normalized_symbol])
 
     logging.info(
         f"{len(valid_tickers)} {pluralise('ticker', len(valid_tickers))} validated: "
@@ -804,24 +851,26 @@ def fetch_historical_data(
 
     # For each ticker, fetch data
     for ticker, earliest_date, ticker_type, currency, current_price in tickers:
+        normalized_earliest_date = (
+            earliest_date if earliest_date is not None and not pd.isna(earliest_date) else None
+        )
 
         # Ensure earliest_date and end_date are directly comparable
-        if earliest_date is not None and earliest_date.tzinfo:
-
-            if earliest_date.tzinfo != end_date.tzinfo:
-                earliest_date = earliest_date.tz_convert(
+        if normalized_earliest_date is not None and getattr(normalized_earliest_date, "tzinfo", None):
+            if normalized_earliest_date.tzinfo != end_date.tzinfo:
+                normalized_earliest_date = normalized_earliest_date.tz_convert(
                     end_date.tzinfo
                 )  # Convert to the same timezone as end_date
 
         # Skip tickers that began trading after our end_date
-        if earliest_date and end_date < earliest_date:
+        if normalized_earliest_date is not None and end_date < normalized_earliest_date:
             logging.warning(
                 f"Skipping {ticker}: Requested period ends before ticker existed."
             )
             continue
 
         # Only fetch from max(start_date, earliest_date)
-        data_start_date = max(start_date, earliest_date or start_date)
+        data_start_date = max(start_date, normalized_earliest_date) if normalized_earliest_date is not None else start_date
 
         try:
             df = fetch_ticker_data(
@@ -886,20 +935,35 @@ def fetch_ticker_data(
         first_cache, last_cache = None, None
         cache_data = pd.DataFrame(columns=CACHE_COLUMNS)
     elif cache_status == "loaded":
-        # Ensure 'Date' column is datetime and validate cache data
-        if "Date" in cache_data.columns:
+        # Ensure cache data has the expected schema and usable rows.
+        if all(column in cache_data.columns for column in CACHE_COLUMNS):
+            cache_data = cache_data[list(CACHE_COLUMNS)].copy()
             cache_data["Date"] = pd.to_datetime(
                 cache_data["Date"], errors="coerce", utc=True
             )
+            cache_data["Old Price"] = pd.to_numeric(
+                cache_data["Old Price"], errors="coerce"
+            )
+            cache_data = (
+                cache_data.dropna(subset=["Date", "Ticker", "Old Price"])
+                .drop_duplicates(subset=["Date"], keep="last")
+                .sort_values("Date")
+                .reset_index(drop=True)
+            )
             first_cache = cache_data["Date"].min()
             last_cache = cache_data["Date"].max()
-            logging.info(
-                f"{ticker}: Cache loaded from {first_cache.strftime('%d/%m/%Y')} to {last_cache.strftime('%d/%m/%Y')} "
-                f"({len(cache_data)} {pluralise('day', len(cache_data))})"
-            )
+            if cache_data.empty or pd.isna(first_cache) or pd.isna(last_cache):
+                logging.info(f"{ticker}: Cache contained no usable rows. Will fetch range.")
+                first_cache, last_cache = None, None
+                cache_data = pd.DataFrame(columns=CACHE_COLUMNS)
+            else:
+                logging.info(
+                    f"{ticker}: Cache loaded from {first_cache.strftime('%d/%m/%Y')} to {last_cache.strftime('%d/%m/%Y')} "
+                    f"({len(cache_data)} {pluralise('day', len(cache_data))})"
+                )
         else:
             logging.error(
-                f"{ticker}: Cache is missing 'Date' column. Will fetch entire range."
+                f"{ticker}: Cache is missing required columns. Will fetch entire range."
             )
             first_cache, last_cache = None, None
             cache_data = pd.DataFrame(columns=CACHE_COLUMNS)
@@ -929,7 +993,21 @@ def fetch_ticker_data(
         combined_data.drop_duplicates(subset=["Date"], keep="last", inplace=True)
         needs_save = True  # Flag that merged data is to be saved
 
-    combined_data.sort_values("Date", inplace=True)
+    if combined_data is None or combined_data.empty:
+        logging.warning(f"{ticker}: No price data available after cache and download checks.")
+        return pd.DataFrame(columns=CACHE_COLUMNS)
+
+    combined_data["Date"] = pd.to_datetime(combined_data["Date"], errors="coerce", utc=True)
+    combined_data["Old Price"] = pd.to_numeric(combined_data["Old Price"], errors="coerce")
+    combined_data = (
+        combined_data.dropna(subset=["Date", "Ticker", "Old Price"])
+        .drop_duplicates(subset=["Date"], keep="last")
+        .sort_values("Date")
+        .reset_index(drop=True)
+    )
+    if combined_data.empty:
+        logging.warning(f"{ticker}: No usable price rows were found.")
+        return pd.DataFrame(columns=CACHE_COLUMNS)
 
     # 6) Save cache only if changes occurred (and before forwards-fill)
     if needs_save:
@@ -968,8 +1046,10 @@ def fetch_ticker_data(
     today = pd.Timestamp.now(tz="UTC").normalize()
 
     if (
-        max_date.normalize() < today
-        and isinstance(current_price, float)
+        pd.notna(max_date)
+        and max_date.normalize() < today
+        and isinstance(current_price, Real)
+        and not pd.isna(current_price)
         and current_price > 0
     ):
         #  Create new_row as a DataFrame with explicit dtypes
@@ -989,6 +1069,8 @@ def fetch_ticker_data(
 
         # Concatenate new_row into combined_data
         combined_data = pd.concat([combined_data, new_row], ignore_index=True)
+        combined_data.drop_duplicates(subset=["Date"], keep="last", inplace=True)
+        combined_data.sort_values("Date", inplace=True)
         logging.info(
             f"{ticker}: Appended today's {today.strftime('%d/%m/%Y')} latest price = {current_price:.3f}"
         )
@@ -1079,8 +1161,10 @@ def download_data(
         raw_df.rename(columns={"Close": "Old Price"}, inplace=True)
         raw_df["Ticker"] = ticker_symbol
 
-        # Make sure "Date" column is in correct format
-        raw_df["Date"] = raw_df["Date"].dt.tz_convert("UTC")
+        # Make sure the date and price columns are normalized consistently.
+        raw_df["Date"] = pd.to_datetime(raw_df["Date"], utc=True).dt.normalize()
+        raw_df["Old Price"] = pd.to_numeric(raw_df["Old Price"], errors="coerce")
+        raw_df.dropna(subset=["Date", "Old Price"], inplace=True)
 
         # Select columns
         raw_df = raw_df[list(CACHE_COLUMNS)]
@@ -1215,11 +1299,21 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
         logging.error("Empty DataFrame received.")
         return pd.DataFrame()
 
+    required_columns = {"Date", "Type", "Ticker", "Old Price", "Original Currency"}
+    missing_columns = required_columns.difference(df.columns)
+    if missing_columns:
+        logging.error(f"Missing required columns for conversion: {sorted(missing_columns)}")
+        return pd.DataFrame()
+
     # 1) Separate equity rows vs. FX rows
     equity_df = df[df["Type"] != "CURRENCY"].copy()
     fx_df = df[df["Type"] == "CURRENCY"].copy()
-    equity_df["Date"] = equity_df["Date"].dt.normalize()
-    fx_df["Date"] = fx_df["Date"].dt.normalize()
+    equity_df["Date"] = pd.to_datetime(equity_df["Date"], utc=True, errors="coerce").dt.normalize()
+    fx_df["Date"] = pd.to_datetime(fx_df["Date"], utc=True, errors="coerce").dt.normalize()
+    equity_df["Old Price"] = pd.to_numeric(equity_df["Old Price"], errors="coerce")
+    fx_df["Old Price"] = pd.to_numeric(fx_df["Old Price"], errors="coerce")
+    equity_df.dropna(subset=["Date", "Ticker", "Old Price"], inplace=True)
+    fx_df.dropna(subset=["Date", "Ticker", "Old Price"], inplace=True)
 
     # 2) Log day coverage mismatches
     equity_days = set(equity_df["Date"])
@@ -1255,8 +1349,13 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     if "Price" in equity_df.columns:
         equity_df = equity_df.rename(columns={"Price": "Old Price"})
 
+    if equity_df.empty:
+        fx_only_df = fx_df.rename(columns={"Old Price": "Price"})[["Ticker", "Price", "Date"]]
+        return fx_only_df.sort_values(by=["Date", "Ticker"]).reset_index(drop=True)
+
     # Prepare an 'FX Ticker' column for non-GBP
     equity_df["FX Ticker"] = "-"
+    equity_df["Original Currency"] = equity_df["Original Currency"].astype(str)
     non_gbp_mask = ~equity_df["Original Currency"].isin(["GBP", "GBp"])
     equity_df.loc[non_gbp_mask, "FX Ticker"] = (
         equity_df.loc[non_gbp_mask, "Original Currency"] + "GBP=X"
@@ -1269,19 +1368,44 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     equity_df["FX Ticker"] = equity_df["FX Ticker"].astype(str)
     exchange_rate_df["FX Ticker"] = exchange_rate_df["FX Ticker"].astype(str)
 
-    # 5) Merge the 'FX Rate' onto the equity rows using merge_asof
-    # This requires sorting by the 'on' key ('Date')
-    equity_df = pd.merge_asof(
-        equity_df.sort_values("Date"),
-        exchange_rate_df.sort_values("Date"),
-        on="Date",
-        by="FX Ticker",
-        direction="backward",  # Use the last known FX rate
+    # 5) Merge the 'FX Rate' onto the equity rows using merge_asof.
+    # Pandas requires the merge key to be sorted, so do the asof merge
+    # ticker-by-ticker instead of one global multi-key merge.
+    equity_df = equity_df.reset_index().rename(columns={"index": "_row_order"})
+    merged_groups = []
+    for fx_ticker, equity_group in equity_df.groupby("FX Ticker", sort=False):
+        equity_group = equity_group.sort_values("Date").copy()
+        fx_group = (
+            exchange_rate_df.loc[
+                exchange_rate_df["FX Ticker"] == fx_ticker, ["Date", "FX Rate"]
+            ]
+            .sort_values("Date")
+            .reset_index(drop=True)
+        )
+
+        if fx_group.empty:
+            equity_group["FX Rate"] = pd.NA
+        else:
+            equity_group = pd.merge_asof(
+                equity_group,
+                fx_group,
+                on="Date",
+                direction="backward",  # Use the last known FX rate
+            )
+
+        merged_groups.append(equity_group)
+
+    equity_df = (
+        pd.concat(merged_groups, ignore_index=True)
+        .sort_values("_row_order")
+        .drop(columns="_row_order")
+        .reset_index(drop=True)
     )
 
     # 6) Hard-code FX Rate for GBP & GBp
     gbp_mask = equity_df["Original Currency"] == "GBP"
     gbp_pence_mask = equity_df["Original Currency"] == "GBp"
+    non_gbp_mask = ~equity_df["Original Currency"].isin(["GBP", "GBp"])
     equity_df.loc[gbp_mask, "FX Rate"] = 1.0
     equity_df.loc[gbp_pence_mask, "FX Rate"] = 0.01
 
@@ -1321,20 +1445,15 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     equity_df["Price"] = equity_df["Old Price"] * equity_df["FX Rate"]
 
     # Log how many conversions happened (where 'FX Ticker' != '-')
-    converted_count = equity_df[~equity_df["FX Ticker"].str.contains("-")].shape[0]
+    converted_count = int((equity_df["FX Ticker"] != "-").sum())
     logging.info(f"{converted_count} prices successfully converted to GBP\n")
 
     # 9) Validate floating-point multiplication
-    equity_df["Conversion Check"] = equity_df.apply(
-        lambda row: (
-            "Correct"
-            if pd.isna(row["Price"])
-            or abs(row["FX Rate"] * row["Old Price"] - row["Price"]) < 1e-6
-            else "Error"
-        ),
-        axis=1,
+    conversion_error_mask = (
+        equity_df["Price"].notna()
+        & (equity_df["FX Rate"] * equity_df["Old Price"] - equity_df["Price"]).abs().gt(1e-6)
     )
-    incorrect_rows = equity_df[equity_df["Conversion Check"] == "Error"]
+    incorrect_rows = equity_df[conversion_error_mask]
     if not incorrect_rows.empty:
         logging.warning(f"The following rows have conversion errors:\n{incorrect_rows}")
 
@@ -1402,6 +1521,9 @@ def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
         True if saved successfully, False otherwise.
     """
 
+    file_path = os.path.join(config["paths"]["base"], config["paths"]["data_file"])
+    short_CSV_path = format_path(file_path)
+
     try:
         if df.empty:
             logging.error("No data to save. Check earlier steps for errors.")
@@ -1412,9 +1534,6 @@ def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
                 f"Missing required columns {required_columns} in data. Cannot save CSV. Exiting"
             )
             sys.exit(1)
-
-        # Build the output file path
-        file_path = os.path.join(config["paths"]["base"], config["paths"]["data_file"])
 
         # Save the DataFrame to CSV without headers
         df.to_csv(file_path, index=False, header=False)
@@ -1441,6 +1560,10 @@ def import_data_file(config):
         base_path = config["paths"]["base"]
         filename = os.path.join(base_path, output_file_name)
 
+        if not activate_window_by_title(QUICKEN_IMPORT_DIALOG_TITLE, timeout=5):
+            logging.error("Import Price Data dialog is not available for file entry.")
+            return False
+
         # Type the file name into the dialog
         pyautogui.typewrite(filename, interval=0.01)
         time.sleep(0.5)  # Small delay before hitting enter for stability
@@ -1449,10 +1572,7 @@ def import_data_file(config):
         # Wait to get to the price import success dialogue
         start_time = time.time()
         while time.time() - start_time < 120:
-            windows = gw.getWindowsWithTitle(
-                "Quicken XG 2004 - Home - [Investing Centre]"
-            )
-            if windows:
+            if activate_window_by_title(QUICKEN_PORTFOLIO_WINDOW_TITLE, timeout=0.5):
                 time.sleep(2)
                 pyautogui.press("enter")
                 logging.info(
@@ -1461,6 +1581,9 @@ def import_data_file(config):
                 time.sleep(0.5)
                 return True
             time.sleep(0.5)
+
+        logging.error("Timed out waiting for the Quicken import confirmation window.")
+        return False
 
     except Exception as e:
         logging.error(f"Failed to import data file: {e} ({type(e).__name__})")
@@ -1471,19 +1594,23 @@ def import_data_file(config):
 def open_import_dialog():
 
     try:
+        if not activate_window_by_title(QUICKEN_PORTFOLIO_WINDOW_TITLE, timeout=5):
+            logging.error("Quicken portfolio window is not active for opening import dialog.")
+            return False
+
         with pyautogui.hold("alt"):
             pyautogui.press(["f", "i", "i"])
 
         # Wait to get to the price import dialogue box
         start_time = time.time()
         while time.time() - start_time < 10:
-            windows = gw.getWindowsWithTitle("Import Price Data")
-            if windows:
+            if activate_window_by_title(QUICKEN_IMPORT_DIALOG_TITLE, timeout=0.5):
                 time.sleep(0.5)
                 return True
             time.sleep(0.5)
 
-        return True
+        logging.error("Timed out waiting for the Import Price Data dialog.")
+        return False
     except Exception as e:
         logging.error(f"Failed to open price import dialogue box: {e}")
         return False
@@ -1493,15 +1620,16 @@ def open_import_dialog():
 def navigate_to_portfolio():
 
     try:
+        if not activate_window_by_title(QUICKEN_MAIN_WINDOW_TITLE, timeout=5):
+            logging.error("Quicken window is not active for portfolio navigation.")
+            return False
+
         pyautogui.hotkey("ctrl", "u")
 
         # Wait to get to the investing portfolio page
         start_time = time.time()
         while time.time() - start_time < 30:
-            windows = gw.getWindowsWithTitle(
-                "Quicken XG 2004 - Home - [Investing Centre]"
-            )
-            if windows:
+            if activate_window_by_title(QUICKEN_PORTFOLIO_WINDOW_TITLE, timeout=0.5):
                 time.sleep(0.5)
                 return True
             time.sleep(0.5)
@@ -1517,34 +1645,34 @@ def navigate_to_portfolio():
 @retry()
 def open_quicken(config):
     """
-    Opens the Quicken application, ensuring no other instances are running.
+    Opens the Quicken application, reusing an existing window when available.
     """
+    global QUICKEN_SESSION_STARTED
+
     quicken_path = config["paths"]["quicken"]
     try:
-        # Forcefully close any existing Quicken processes to ensure a clean start
-        logging.info("Checking for and closing existing Quicken processes...")
-        subprocess.run(
-            ["taskkill", "/F", "/IM", "qw.exe"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        time.sleep(1)  # Give the OS a moment to close the process
+        if not os.path.isfile(quicken_path):
+            logging.error(f"Quicken executable not found: {quicken_path}")
+            return False
 
-        # If not open, launch Quicken
+        windows = gw.getWindowsWithTitle(QUICKEN_MAIN_WINDOW_TITLE)
+        if windows:
+            activate_window_by_title(QUICKEN_MAIN_WINDOW_TITLE, timeout=1)
+            logging.info("Quicken is already open.")
+            QUICKEN_SESSION_STARTED = False
+            return True
+
         logging.info("Launching Quicken...")
-        process = subprocess.Popen([quicken_path], shell=True)
+        process = subprocess.Popen([quicken_path], shell=False)
         if process.poll() is not None:
             logging.error("Failed to start Quicken process.")
             return False
 
-        # Wait for the Quicken window to appear
         start_time = time.time()
-        while time.time() - start_time < 30:  # 30-second timeout
-            windows = gw.getWindowsWithTitle("Quicken XG 2004")
-            if len(windows) > 0:
+        while time.time() - start_time < 30:
+            if activate_window_by_title(QUICKEN_MAIN_WINDOW_TITLE, timeout=0.5):
                 logging.info("Quicken window found.")
-                windows[0].activate()
+                QUICKEN_SESSION_STARTED = True
                 return True
             time.sleep(0.5)
 
@@ -1557,23 +1685,51 @@ def open_quicken(config):
 
 def close_quicken():
     """
-    Closes the Quicken application.
+    Closes Quicken only when this script launched it.
     """
+    global QUICKEN_SESSION_STARTED
+
+    if not QUICKEN_SESSION_STARTED:
+        logging.info("Leaving existing Quicken session open.")
+        return True
+
     try:
         logging.info("Closing Quicken...")
-        # Use taskkill to forcefully close Quicken
         subprocess.run(
             ["taskkill", "/F", "/IM", "qw.exe"],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        time.sleep(1)  # Give the OS a moment to process
+        time.sleep(1)
+        QUICKEN_SESSION_STARTED = False
         logging.info("Quicken closed successfully.")
         return True
     except Exception as e:
         logging.error(f"An error occurred while closing Quicken: {e}")
         return False
+
+
+def activate_window_by_title(window_title: str, timeout: float = 5.0) -> bool:
+    """
+    Bring a window matching the supplied title to the foreground.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        windows = gw.getWindowsWithTitle(window_title)
+        if windows:
+            window = windows[0]
+            try:
+                if getattr(window, "isMinimized", False):
+                    window.restore()
+                    time.sleep(0.2)
+                window.activate()
+                time.sleep(0.2)
+                return True
+            except Exception as e:
+                logging.debug(f"Could not activate '{window_title}': {e}")
+        time.sleep(0.2)
+    return False
 
 
 def execute_import_sequence(config):
@@ -1635,6 +1791,8 @@ def quicken_import(config):
         bool: True if the import process completes successfully.
     """
 
+    logging.info("\nImport to Quicken 2004")
+
     try:
         if is_elevated():
             return execute_import_sequence(config)
@@ -1643,9 +1801,11 @@ def quicken_import(config):
                 config["paths"]["base"], config["paths"]["data_file"]
             )
             short_CSV_path = format_path(file_path)
-            logging.info(
-                f"Can't automate file import. Open Quicken and upload {short_CSV_path} manually"
-            )
+            logging.info("Quicken cannot be opened from here.\n")
+            logging.info("Instead:")
+            logging.info("1. Close this window.")
+            logging.info("2. Click the Quicken 'Update Prices' shortcut.")
+            logging.info(f"3. If needed, import {short_CSV_path} manually.")
             return False
     except Exception as e:
         logging.error(f"Error during Quicken import: {e}")
@@ -1659,6 +1819,9 @@ def main():
     """
     Main script execution.
     """
+    exit_prompt = "\n\t Press Enter to exit...\n\t"
+    should_pause_before_exit = True
+
     try:
 
         # 0) Initialise
@@ -1671,7 +1834,9 @@ def main():
         setup_logging(config=config)
 
         # 2) Attempt to elevate privileges (if needed on Windows)
-        run_as_admin()
+        if run_as_admin():
+            should_pause_before_exit = False
+            return
 
         # 3) Read ticker config from your YAML
         tickers = config.get("tickers", [])
@@ -1720,18 +1885,26 @@ def main():
         # End
         logging.info("Script completed successfully")
 
-        # Close Quicken and start countdown only if elevated
+        # Close Quicken if needed, but always keep the terminal open for review
         if is_elevated():
             close_quicken()
-            countdown_exit()
-        else:
-            input("\n\t Press Enter to exit...\n\t")
 
     except KeyboardInterrupt:
         logging.warning("Script interrupted by user.")
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}")
         logging.error(traceback.format_exc())
+    finally:
+        if should_pause_before_exit:
+            pause_before_exit(exit_prompt)
+
+def pause_before_exit(prompt: str = "\n\t Press Enter to exit...\n\t") -> None:
+    """Keep the terminal open so the user can review the output."""
+    try:
+        input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        logging.debug("No interactive terminal available for exit prompt.")
+
 
 
 def countdown_exit(seconds: int = 5):
@@ -1744,7 +1917,7 @@ def countdown_exit(seconds: int = 5):
     while time.time() < end_time:
         if msvcrt.kbhit() and msvcrt.getwche() == "\r":
             logging.info("Auto-close cancelled by user.")
-            input("\n\t Press Enter to exit...\n\t")
+            pause_before_exit()
             return
         time.sleep(0.1)
     logging.info("Exiting.")
