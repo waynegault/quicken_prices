@@ -26,6 +26,7 @@ tickers:
   - EURGBP=X
   - MCHI
   - KAP.IL
+  - SWDA.L
 
 home_currency: GBP
 
