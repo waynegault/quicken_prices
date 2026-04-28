@@ -21,6 +21,7 @@ MIT Licence
 
 # Standard Library Imports
 import concurrent.futures
+import copy
 import ctypes
 import datetime
 import logging
@@ -29,6 +30,7 @@ import os
 import pickle
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import winreg
@@ -47,8 +49,6 @@ import requests
 import yaml
 import yfinance as yf
 from numpy import busday_count
-from pandas import Timedelta, Timestamp, isna
-from pandas._libs.tslibs.nattype import NaTType
 
 # GUI and Automation Imports
 
@@ -77,6 +77,9 @@ DEFAULT_CONFIG = {
     "paths": {"data_file": "data.csv", "log_file": "prices.log", "cache": "cache"},
     "cache": {"max_age_days": 30},
 }
+
+# Keep a safe default config at import-time; runtime config is loaded in main().
+config: Dict[str, Any] = copy.deepcopy(DEFAULT_CONFIG)
 
 QUICKEN_SESSION_STARTED = False
 QUICKEN_MAIN_WINDOW_TITLE = "Quicken XG 2004"
@@ -149,7 +152,10 @@ def load_configuration(config_file: str = "configuration.yaml") -> Dict[str, Any
         final_config["paths"]["quicken"] = quicken_path
         logging.info(f"Using Quicken at: {quicken_path}")
     else:
-        quicken_not_found_error()
+        final_config["paths"]["quicken"] = ""
+        logging.warning(
+            "Quicken executable not found. CSV generation will continue, but GUI import automation is unavailable."
+        )
 
     # Validate tickers
     if not final_config["tickers"]:
@@ -254,10 +260,6 @@ def quicken_not_found_error():
     sys.exit(1)
 
 
-# Load the configuration after all config related functions loaded
-config = load_configuration("configuration.yaml")
-
-
 # Note: yfinance now handles its own session internally, no custom session needed
 
 # Coding utilities ############################
@@ -283,16 +285,26 @@ def retry(
         The last exception if the maximum number of retries is reached.
     """
 
-    if retry_config is None:
-        retry_config = config  # Use the loaded config instead of DEFAULT_CONFIG
-
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
+            active_retry_config = retry_config if retry_config is not None else config
+
+            retries_section = active_retry_config.get("retries", {})
             # Explicitly cast `max_retries` to int
-            tries = int(retry_config["retries"]["max_retries"])
-            delay = retry_config["retries"]["retry_delay"]
-            backoff = retry_config["retries"]["backoff"]
+            tries = int(
+                retries_section.get(
+                    "max_retries", DEFAULT_CONFIG["retries"]["max_retries"]
+                )
+            )
+            delay = float(
+                retries_section.get(
+                    "retry_delay", DEFAULT_CONFIG["retries"]["retry_delay"]
+                )
+            )
+            backoff = float(
+                retries_section.get("backoff", DEFAULT_CONFIG["retries"]["backoff"])
+            )
 
             for attempt in range(1, tries + 1):
                 try:
@@ -355,6 +367,84 @@ def setup_logging(config: Dict[str, Any]) -> None:
     logging.getLogger().setLevel(logging.DEBUG)
 
     logging.info(f"Log at: {log_file_path}")
+
+
+def run_startup_self_check(config: Dict[str, Any]) -> bool:
+    """
+    Run a fast startup self-check to catch configuration and core data regressions early.
+    """
+
+    logging.info("Running startup self-check...")
+
+    required_top_level = ["tickers", "paths", "retries", "cache", "collection_period_years"]
+    missing_top_level = [key for key in required_top_level if key not in config]
+    if missing_top_level:
+        logging.error(f"Startup self-check failed: missing config keys: {missing_top_level}")
+        return False
+
+    required_paths = ["base", "cache", "data_file", "log_file"]
+    path_config = config.get("paths", {})
+    missing_paths = [key for key in required_paths if key not in path_config]
+    if missing_paths:
+        logging.error(f"Startup self-check failed: missing paths config keys: {missing_paths}")
+        return False
+
+    tickers = config.get("tickers", [])
+    if not isinstance(tickers, list) or not tickers:
+        logging.error("Startup self-check failed: 'tickers' must be a non-empty list.")
+        return False
+
+    try:
+        start_date, end_date = get_date_range(config)
+        if start_date >= end_date:
+            logging.error(
+                f"Startup self-check failed: invalid date range ({start_date} >= {end_date})."
+            )
+            return False
+    except Exception as e:
+        logging.error(f"Startup self-check failed while validating date range: {e}")
+        return False
+
+    cache_dir = os.path.join(config["paths"]["base"], config["paths"]["cache"])
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        probe_path = os.path.join(cache_dir, ".startup_probe")
+        with open(probe_path, "w", encoding="utf-8") as probe_file:
+            probe_file.write("ok")
+        os.remove(probe_path)
+    except OSError as e:
+        logging.error(f"Startup self-check failed: cache directory is not writable: {e}")
+        return False
+
+    try:
+        with tempfile.TemporaryDirectory() as temp_cache_dir:
+            sample_data = pd.DataFrame(
+                [
+                    {
+                        "Ticker": "SELFTEST",
+                        "Old Price": 1.0,
+                        "Date": pd.Timestamp("2026-01-01", tz="UTC"),
+                    },
+                    {
+                        "Ticker": "SELFTEST",
+                        "Old Price": 1.1,
+                        "Date": pd.Timestamp("2026-01-02", tz="UTC"),
+                    },
+                ]
+            )
+            save_cache("SELFTEST", sample_data, temp_cache_dir)
+            loaded_data, status = load_cache("SELFTEST", temp_cache_dir)
+            if status != "loaded" or loaded_data.empty:
+                logging.error(
+                    f"Startup self-check failed: cache round-trip returned status={status}."
+                )
+                return False
+    except Exception as e:
+        logging.error(f"Startup self-check failed during cache helper validation: {e}")
+        return False
+
+    logging.info("Startup self-check passed.")
+    return True
 
 
 # Initialisation ##############################
@@ -425,9 +515,9 @@ def pluralise(title: str, quantity: int) -> str:
 
 def panda_date(
     date_obj: Union[
-        str, datetime.date, datetime.datetime, pd.Timestamp, int, float, NaTType, None
+        str, datetime.date, datetime.datetime, pd.Timestamp, int, float, None
     ],
-) -> Union[pd.Timestamp, NaTType]:
+) -> Any:
     """Converts a date-like object to a UTC midnight pandas Timestamp.
 
     Handles strings, datetime objects, pandas Timestamps, and Unix epoch
@@ -1649,9 +1739,9 @@ def open_quicken(config):
     """
     global QUICKEN_SESSION_STARTED
 
-    quicken_path = config["paths"]["quicken"]
+    quicken_path = config["paths"].get("quicken", "")
     try:
-        if not os.path.isfile(quicken_path):
+        if not quicken_path or not os.path.isfile(quicken_path):
             logging.error(f"Quicken executable not found: {quicken_path}")
             return False
 
@@ -1823,6 +1913,8 @@ def main():
     should_pause_before_exit = True
 
     try:
+        global config
+        config = load_configuration("configuration.yaml")
 
         # 0) Initialise
         os.system("cls" if os.name == "nt" else "clear")
@@ -1830,15 +1922,20 @@ def main():
         print("sys.executable", sys.executable)
         print("yfinance version:", yf.__version__, "\n")
 
-        # 0) Configure logging from YAML/ini settings
+        # 1) Configure logging from YAML/ini settings
         setup_logging(config=config)
 
-        # 2) Attempt to elevate privileges (if needed on Windows)
+        # 2) Quick startup checks to catch obvious regressions before network/UI work
+        if not run_startup_self_check(config):
+            logging.error("Startup checks failed. Exiting.")
+            sys.exit(1)
+
+        # 3) Attempt to elevate privileges (if needed on Windows)
         if run_as_admin():
             should_pause_before_exit = False
             return
 
-        # 3) Read ticker config from your YAML
+        # 4) Read ticker config from your YAML
         tickers = config.get("tickers", [])
         if not tickers:
             logging.error(
@@ -1846,14 +1943,14 @@ def main():
             )
             sys.exit(1)
 
-        # 4) Validate and acquire ticker metadata
+        # 5) Validate and acquire ticker metadata
         valid_tickers: List[Tuple[str, Optional[pd.Timestamp], str, str, float]] = []
         valid_tickers = get_tickers(tickers)
         if not valid_tickers:
             logging.error("No valid tickers to process. Exiting.")
             sys.exit(1)
 
-        # 5) Fetch historical data
+        # 6) Fetch historical data
 
         # Retrieve date range and cache_dir from config
         start_date, end_date = get_date_range(config)
@@ -1866,19 +1963,19 @@ def main():
             logging.error("No valid data fetched. Exiting.")
             sys.exit(1)
 
-        # 6) Convert prices to GBP
+        # 7) Convert prices to GBP
         processed_data = convert_prices(price_data)
 
-        # 7) Build the final output (e.g., pivoting, filtering, etc.)
+        # 8) Build the final output (e.g., pivoting, filtering, etc.)
         output_csv = process_converted_prices(processed_data, start_date)
 
-        # 8) Save to CSV or your preferred data store
+        # 9) Save to CSV or your preferred data store
         save_to_csv(output_csv, config=config)
 
-        # 9) Clean up the cache if desired
+        # 10) Clean up the cache if desired
         clean_cache(config=config)
 
-        # 10) Optionally automate an import sequence
+        # 11) Optionally automate an import sequence
         setup_pyautogui()
         quicken_import(config=config)
 
