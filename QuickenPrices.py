@@ -25,7 +25,6 @@ import copy
 import ctypes
 import datetime
 import logging
-import msvcrt
 import os
 import pickle
 import subprocess
@@ -48,7 +47,6 @@ import pyautogui
 import requests
 import yaml
 import yfinance as yf
-from numpy import busday_count
 
 # GUI and Automation Imports
 
@@ -138,7 +136,7 @@ def load_configuration(config_file: str = "configuration.yaml") -> Dict[str, Any
         )
 
     quicken_path = None
-    if configured_quicken_path and os.path.isfile(configured_quicken_path):
+    if configured_quicken_path and Path(configured_quicken_path).is_file():
         quicken_path = configured_quicken_path
         logging.info(f"Using Quicken path from configuration: {quicken_path}")
     else:
@@ -241,23 +239,6 @@ def locate_quicken_in_standard_paths() -> Optional[str]:
             logging.info(f"Quicken executable found at: {path}")
             return path
     return None
-
-
-def quicken_not_found_error():
-    """
-    Handle the case where the Quicken executable cannot be located.
-    """
-    logging.error(
-        "\n❌ Critical Error: Quicken executable could not be located.\n"
-        "✅ Suggestions:\n"
-        "  1. Ensure Quicken is installed on your system.\n"
-        "  2. Verify installation paths:\n"
-        "     - C:\\Program Files (x86)\\Quicken\\qw.exe\n"
-        "     - C:\\Program Files\\Quicken\\qw.exe\n"
-        "  3. If using an older version, confirm proper installation.\n"
-        "\n⚠️ Manually specify the Quicken path in configuration.yaml if needed.\n"
-    )
-    sys.exit(1)
 
 
 # Note: yfinance now handles its own session internally, no custom session needed
@@ -405,13 +386,13 @@ def run_startup_self_check(config: Dict[str, Any]) -> bool:
         logging.error(f"Startup self-check failed while validating date range: {e}")
         return False
 
-    cache_dir = os.path.join(config["paths"]["base"], config["paths"]["cache"])
+    cache_dir = Path(config["paths"]["base"]) / config["paths"]["cache"]
     try:
-        os.makedirs(cache_dir, exist_ok=True)
-        probe_path = os.path.join(cache_dir, ".startup_probe")
-        with open(probe_path, "w", encoding="utf-8") as probe_file:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        probe_path = cache_dir / ".startup_probe"
+        with probe_path.open("w", encoding="utf-8") as probe_file:
             probe_file.write("ok")
-        os.remove(probe_path)
+        probe_path.unlink()
     except OSError as e:
         logging.error(f"Startup self-check failed: cache directory is not writable: {e}")
         return False
@@ -513,57 +494,15 @@ def pluralise(title: str, quantity: int) -> str:
     return title if quantity == 1 else title + "s"
 
 
-def panda_date(
-    date_obj: Union[
-        str, datetime.date, datetime.datetime, pd.Timestamp, int, float, None
-    ],
-) -> Any:
-    """Converts a date-like object to a UTC midnight pandas Timestamp.
+def native_currencies(home_currency: str) -> set:
+    """Currency codes already denominated in the home currency (no FX needed).
 
-    Handles strings, datetime objects, pandas Timestamps, and Unix epoch
-    timestamps (seconds or milliseconds). Assumes UTC for naive datetimes.
-    Returns pd.NaT for invalid input.
-
-    Args:
-        date_obj: The date object to convert.
-
-    Returns:
-        A UTC midnight pandas Timestamp, or pd.NaT if the input is invalid.
+    Includes the pence variant yfinance reports for some GBP-listed securities.
     """
-    if pd.isna(date_obj):  # Explicitly handle None or NaN
-        return pd.NaT
-
-    try:
-        if isinstance(date_obj, (int, float)):
-            # Handle epoch timestamps
-            date_obj = abs(date_obj)  # Handle negative epoch timestamps
-            unit = "s" if date_obj < 10**10 else "ms"  # Determine units
-            date_obj = pd.Timestamp(date_obj, unit=unit, tz="UTC").floor("D")
-            logging.debug(f"Converted epoch to UTC: {date_obj}")
-
-        elif isinstance(date_obj, (datetime.datetime, datetime.date, pd.Timestamp)):
-            # Handle datetime-like objects
-            date_obj = pd.to_datetime(date_obj)  # Ensure it's a pandas Timestamp
-            if date_obj.tz is None:  # Localise naive datetimes
-                date_obj = date_obj.tz_localize("UTC")
-            else:  # Convert timezone-aware to UTC
-                date_obj = date_obj.tz_convert("UTC")
-            date_obj = date_obj.floor("D")  # Floor to midnight
-            logging.debug(f"Normalized datetime: {date_obj}")
-
-        elif isinstance(date_obj, str):  # Handle strings
-            date_obj = pd.to_datetime(date_obj, utc=True, dayfirst=True).floor("D")
-            logging.debug(f"Parsed string date: {date_obj}")
-
-        else:
-            logging.warning(f"Unhandled date type: {type(date_obj)}")
-            return pd.NaT
-
-        return date_obj
-
-    except (ValueError, TypeError) as e:
-        logging.warning(f"Invalid date format: {date_obj}. Error: {e}")
-        return pd.NaT
+    native = {home_currency}
+    if home_currency == "GBP":
+        native.add("GBp")
+    return native
 
 
 def adjust_date(date: pd.Timestamp, direction: str) -> pd.Timestamp:
@@ -703,7 +642,7 @@ def format_path(full_path):
 
 
 def get_tickers(
-    tickers: List[str], max_show: int = 5
+    tickers: List[str], max_show: int = 5, home_currency: str = "GBP"
 ) -> List[Tuple[str, Optional[pd.Timestamp], str, str, float]]:
     """
     Get and validate stock and FX tickers.
@@ -711,6 +650,7 @@ def get_tickers(
     Args:
         tickers: A list of ticker symbols to validate.
         max_show: Maximum number of tickers to display in logs.
+        home_currency: The target currency for price conversion (e.g. "GBP").
 
     Returns:
         List of valid tickers with metadata.
@@ -734,10 +674,10 @@ def get_tickers(
         sys.exit(1)
 
     # Generate FX tickers based on the currencies in valid_tickers
-    currencies = {t[3] for t in valid_tickers if t[3] not in ["GBP", "GBp"]}
-    fx_tickers = {
-        f"{currency}GBP=X" if currency != "USD" else "GBP=X" for currency in currencies
+    currencies = {
+        t[3] for t in valid_tickers if t[3] not in native_currencies(home_currency)
     }
+    fx_tickers = {f"{currency}{home_currency}=X" for currency in currencies}
 
     # Exclude tickers from fx_tickers that might already be in valid_tickers
     valid_ticker_strings = {ticker[0] for ticker in valid_tickers}
@@ -770,7 +710,8 @@ def validate_tickers(
 ) -> List[Tuple[str, Optional[pd.Timestamp], str, str, float]]:
     validated_by_symbol: Dict[str, Tuple[str, Optional[pd.Timestamp], str, str, float]] = {}
     # Use a ThreadPoolExecutor for concurrent validation
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    max_workers = max(1, min(10, len(tickers)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Map each ticker to the validate_ticker function
         future_to_ticker = {
             executor.submit(validate_ticker, ticker): ticker for ticker in tickers
@@ -842,8 +783,7 @@ def validate_ticker(
         # Let yfinance handle its own session (no longer accepts custom sessions)
         ticker = yf.Ticker(ticker_symbol)
 
-        # In yfinance 2.x, ticker.info is now a method, so we must call it:
-        info = ticker.info
+        info = ticker.get_info()
 
         if not info or info.get("symbol") is None:
             logging.error(
@@ -902,6 +842,7 @@ def validate_ticker(
             return None
     except Exception as e:
         logging.error(f"An unexpected error occurred fetching {ticker_symbol}: {e}")
+        logging.debug("Full traceback:\n%s", traceback.format_exc())
         return None
 
 
@@ -921,8 +862,9 @@ def fetch_historical_data(
     Args:
         tickers: A list of tuples containing:
             (ticker_symbol, earliest_date, ticker_type, currency, current_price).
-        config: A dictionary with necessary configuration values
-            (e.g., for cache paths, date ranges, etc.).
+        start_date: Start of the requested data period (inclusive).
+        end_date: End of the requested data period (inclusive).
+        cache_dir: Directory used for per-ticker cache files.
 
     Returns:
         A combined DataFrame with columns in CACHE_COLUMNS plus 'Type'
@@ -982,6 +924,7 @@ def fetch_historical_data(
             logging.error(f"Error fetching data for {ticker}: {e}")
         except Exception as e:
             logging.error(f"Unexpected error fetching data for {ticker}: {e}")
+            logging.debug("Full traceback:\n%s", traceback.format_exc())
 
     # Combine records
     valid_records = [df for df in records if not df.empty and df is not None]
@@ -1011,7 +954,7 @@ def fetch_ticker_data(
     """
 
     # 1) Load cache
-    os.makedirs(cache_dir, exist_ok=True)
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
     cache_data, cache_status = load_cache(ticker, cache_dir)
     needs_save = False  # Track whether the cache needs saving
 
@@ -1173,7 +1116,6 @@ def fetch_ticker_data(
     return combined_data
 
 
-@retry()
 def load_cache(ticker: str, cache_dir: str) -> Tuple[pd.DataFrame, str]:
     """
     Loads cached data for a specific ticker using pickle.
@@ -1187,16 +1129,18 @@ def load_cache(ticker: str, cache_dir: str) -> Tuple[pd.DataFrame, str]:
             - A DataFrame with cached data, or an empty DataFrame if the file is not found or empty.
             - A string indicating the cache status: "not_found", "empty", or "loaded".
     """
-    cache_file = os.path.join(cache_dir, f"{ticker}.pkl")
+    cache_file = Path(cache_dir) / f"{ticker}.pkl"
 
-    if os.path.exists(cache_file):
+    if cache_file.exists():
         try:
             # Check if the file is empty
-            if os.path.getsize(cache_file) == 0:
+            if cache_file.stat().st_size == 0:
                 logging.warning(f"{ticker}: Cache file exists but is empty.")
                 return pd.DataFrame(columns=CACHE_COLUMNS), "empty"
 
-            # File exists and is not empty, attempt to load
+            # File exists and is not empty, attempt to load.
+            # NOTE: unpickling is only safe because the cache directory is
+            # user-owned and not writable by untrusted users.
             with open(cache_file, "rb") as f:
                 data = pickle.load(f)
 
@@ -1214,7 +1158,6 @@ def load_cache(ticker: str, cache_dir: str) -> Tuple[pd.DataFrame, str]:
         return pd.DataFrame(columns=CACHE_COLUMNS), "not_found"
 
 
-@retry()
 def download_data(
     ticker_symbol: str,
     rng_start: pd.Timestamp,
@@ -1272,10 +1215,10 @@ def download_data(
         logging.error(
             f"Failed to download data for {ticker_symbol} from {rng_start} to {rng_end}: {e}"
         )
+        logging.debug("Full traceback:\n%s", traceback.format_exc())
         return pd.DataFrame()
 
 
-@retry()
 def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
     """
     Save cache for a specific ticker using pickle.
@@ -1284,9 +1227,9 @@ def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
         ticker (str): The ticker symbol.
         data (pd.DataFrame): DataFrame containing data to cache.
     """
-    cache_file = os.path.join(cache_dir, f"{ticker}.pkl")  # Use .pkl extension
+    cache_file = Path(cache_dir) / f"{ticker}.pkl"  # Use .pkl extension
     try:
-        os.makedirs(cache_dir, exist_ok=True)
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
 
         # Filter to ensure only valid columns are saved
         if "Ticker" not in data.columns:
@@ -1308,9 +1251,9 @@ def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
         )
     except Exception as e:
         logging.error(f"Failed to save cache for {ticker}: {e}")
+        logging.debug("Full traceback:\n%s", traceback.format_exc())
 
 
-@retry()
 def clean_cache(config):
     """
     Cleans up cache files older than the configured maximum age.
@@ -1322,29 +1265,28 @@ def clean_cache(config):
         bool: True if cleaning completes successfully, False otherwise.
     """
 
-    cache_dir = os.path.join(config["paths"]["base"], config["paths"]["cache"])
+    cache_dir = Path(config["paths"]["base"]) / config["paths"]["cache"]
     max_age_seconds = config["cache"]["max_age_days"] * SECONDS_IN_A_DAY
     now = time.time()
 
-    if not os.path.exists(cache_dir) or not os.path.isdir(cache_dir):
+    if not cache_dir.is_dir():
         logging.warning(f"Cache cleaning: can't find {cache_dir}")
         return False
 
     deleted_files = 0
     try:
-        with os.scandir(cache_dir) as it:
-            for entry in it:
-                if entry.is_file() and (now - entry.stat().st_mtime) > max_age_seconds:
-                    try:
-                        os.remove(entry.path)
-                        deleted_files += 1
-                        logging.info(
-                            f"Cache cleaning: {entry.name} deleted. Older than {config['cache']['max_age_days']} {pluralise('day', config['cache']['max_age_days'])}"
-                        )
-                    except Exception as remove_error:
-                        logging.error(
-                            f"Cache cleaning: Failed to delete file {entry.path}: {remove_error}"
-                        )
+        for entry in cache_dir.iterdir():
+            if entry.is_file() and (now - entry.stat().st_mtime) > max_age_seconds:
+                try:
+                    entry.unlink()
+                    deleted_files += 1
+                    logging.info(
+                        f"Cache cleaning: {entry.name} deleted. Older than {config['cache']['max_age_days']} {pluralise('day', config['cache']['max_age_days'])}"
+                    )
+                except Exception as remove_error:
+                    logging.error(
+                        f"Cache cleaning: Failed to delete file {entry}: {remove_error}"
+                    )
 
         logging.info(
             f"Cache cleaning: {deleted_files} cache {pluralise('file', deleted_files)} deleted\n"
@@ -1353,6 +1295,7 @@ def clean_cache(config):
         logging.error(
             f"Cache cleaning: Error with {cache_dir}: {e}. Check file permissions or existence of the directory"
         )
+        logging.debug("Full traceback:\n%s", traceback.format_exc())
         return False
 
     return True
@@ -1361,27 +1304,28 @@ def clean_cache(config):
 # Process Data ################################
 
 
-def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
+def convert_prices(df: pd.DataFrame, home_currency: str = "GBP") -> pd.DataFrame:
     """
-    Converts prices to GBP based on ticker type and currency (daily data),
-    while also logging mismatched days between equity and FX.
+    Converts prices to the home currency based on ticker type and currency
+    (daily data), while also logging mismatched days between equity and FX.
 
     Logic Overview:
       1) Separate equity rows (Type != "CURRENCY") from FX rows (Type == "CURRENCY").
       2) Log how many dates appear in equity vs. FX vs. both (mismatched days).
       3) For currency rows, group by (Date, Ticker) to build an 'FX Rate'.
       4) Merge 'FX Rate' into equity rows on (Date, FX Ticker) using merge_asof.
-      5) Set FX Rate = 1.0 or 0.01 for GBP or GBp rows respectively.
-      6) Raise an error if non-GBP rows have missing FX rates.
-      7) Compute final Price in GBP and return the result.
+      5) Set FX Rate = 1.0 (or 0.01 for the GBP pence variant).
+      6) Raise an error if non-home rows have missing FX rates.
+      7) Compute final Price in the home currency and return the result.
 
     Args:
         df: DataFrame containing historical data. Must include columns:
             'Date', 'Type', 'Ticker', 'Old Price', 'Original Currency'.
+        home_currency: The target currency for conversion (e.g. "GBP").
 
     Returns:
-        DataFrame with a new 'Price' column converted to GBP where applicable.
-        Raises ValueError if missing FX rates are found for non-GBP instruments.
+        DataFrame with a new 'Price' column converted to the home currency.
+        Raises ValueError if missing FX rates are found for non-home instruments.
         Returns empty DataFrame if 'df' is empty or errors occur.
     """
     # Quick check
@@ -1412,15 +1356,15 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
     unmatched_equity_days = equity_days - fx_days
     unmatched_fx_days = fx_days - equity_days
     logging.info(
-        f"Total equity {pluralise('day',len(equity_days))}: {len(equity_days)}"
+        f"Total equity {pluralise('day', len(equity_days))}: {len(equity_days)}"
     )
-    logging.info(f"Total FX {pluralise('day',len(fx_days))}: {len(fx_days)}")
-    logging.info(f"Common {pluralise('day',len(common_days))}: {len(common_days)}")
+    logging.info(f"Total FX {pluralise('day', len(fx_days))}: {len(fx_days)}")
+    logging.info(f"Common {pluralise('day', len(common_days))}: {len(common_days)}")
     logging.info(
-        f"Equity-only {pluralise('day',len(unmatched_equity_days))}: {len(unmatched_equity_days)}"
+        f"Equity-only {pluralise('day', len(unmatched_equity_days))}: {len(unmatched_equity_days)}"
     )
     logging.info(
-        f"FX-only {pluralise('day',len(unmatched_fx_days))}: {len(unmatched_fx_days)}\n"
+        f"FX-only {pluralise('day', len(unmatched_fx_days))}: {len(unmatched_fx_days)}\n"
     )
 
     # 3) Build a minimal FX DataFrame -> 'FX Rate'
@@ -1443,16 +1387,14 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
         fx_only_df = fx_df.rename(columns={"Old Price": "Price"})[["Ticker", "Price", "Date"]]
         return fx_only_df.sort_values(by=["Date", "Ticker"]).reset_index(drop=True)
 
-    # Prepare an 'FX Ticker' column for non-GBP
+    # Prepare an 'FX Ticker' column for non-home currencies
     equity_df["FX Ticker"] = "-"
     equity_df["Original Currency"] = equity_df["Original Currency"].astype(str)
-    non_gbp_mask = ~equity_df["Original Currency"].isin(["GBP", "GBp"])
-    equity_df.loc[non_gbp_mask, "FX Ticker"] = (
-        equity_df.loc[non_gbp_mask, "Original Currency"] + "GBP=X"
+    native = native_currencies(home_currency)
+    non_home_mask = ~equity_df["Original Currency"].isin(native)
+    equity_df.loc[non_home_mask, "FX Ticker"] = (
+        equity_df.loc[non_home_mask, "Original Currency"] + f"{home_currency}=X"
     )
-
-    # Special case for USD => "GBP=X" (adjust if your logic differs)
-    equity_df.loc[equity_df["Original Currency"] == "USD", "FX Ticker"] = "GBP=X"
 
     # Ensure data types match for merging
     equity_df["FX Ticker"] = equity_df["FX Ticker"].astype(str)
@@ -1492,15 +1434,15 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index(drop=True)
     )
 
-    # 6) Hard-code FX Rate for GBP & GBp
-    gbp_mask = equity_df["Original Currency"] == "GBP"
-    gbp_pence_mask = equity_df["Original Currency"] == "GBp"
-    non_gbp_mask = ~equity_df["Original Currency"].isin(["GBP", "GBp"])
-    equity_df.loc[gbp_mask, "FX Rate"] = 1.0
-    equity_df.loc[gbp_pence_mask, "FX Rate"] = 0.01
+    # 6) Hard-code FX Rate for the home currency and its pence variant
+    home_mask = equity_df["Original Currency"] == home_currency
+    non_home_mask = ~equity_df["Original Currency"].isin(native)
+    equity_df.loc[home_mask, "FX Rate"] = 1.0
+    if home_currency == "GBP":
+        equity_df.loc[equity_df["Original Currency"] == "GBp", "FX Rate"] = 0.01
 
     # 7) Handle missing FX rates more gracefully
-    missing_fx_mask = equity_df["FX Rate"].isna() & non_gbp_mask
+    missing_fx_mask = equity_df["FX Rate"].isna() & non_home_mask
     if missing_fx_mask.any():
         missing_rows = equity_df[missing_fx_mask]
         logging.warning(f"The following rows have missing FX rates:\n{missing_rows}")
@@ -1517,7 +1459,7 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
             equity_df.loc[ticker_mask, "FX Rate"] = ticker_data["FX Rate"].values
 
         # Check again for any remaining missing rates
-        remaining_missing = equity_df["FX Rate"].isna() & non_gbp_mask
+        remaining_missing = equity_df["FX Rate"].isna() & non_home_mask
         if remaining_missing.any():
             remaining_rows = equity_df[remaining_missing]
             logging.error(
@@ -1531,12 +1473,12 @@ def convert_prices(df: pd.DataFrame) -> pd.DataFrame:
                 "Successfully filled missing FX rates using forward/backward fill."
             )
 
-    # 8) Calculate final Price in GBP
+    # 8) Calculate final Price in the home currency
     equity_df["Price"] = equity_df["Old Price"] * equity_df["FX Rate"]
 
     # Log how many conversions happened (where 'FX Ticker' != '-')
     converted_count = int((equity_df["FX Ticker"] != "-").sum())
-    logging.info(f"{converted_count} prices successfully converted to GBP\n")
+    logging.info(f"{converted_count} prices successfully converted to {home_currency}\n")
 
     # 9) Validate floating-point multiplication
     conversion_error_mask = (
@@ -1569,7 +1511,7 @@ def process_converted_prices(
 
     Returns:
         Processed DataFrame ready to be saved as CSV, or an empty DataFrame if input is empty.
-        Exits if a critical error occurs.
+        Raises if a critical error occurs.
     """
 
     if converted_df.empty:
@@ -1595,10 +1537,9 @@ def process_converted_prices(
 
     except Exception as e:
         logging.exception(f"A critical error occurred: {e}")
-        sys.exit(1)  # Exit program
+        raise
 
 
-@retry()
 def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
     """
     Saves the DataFrame to a CSV file without headers.
@@ -1611,7 +1552,7 @@ def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
         True if saved successfully, False otherwise.
     """
 
-    file_path = os.path.join(config["paths"]["base"], config["paths"]["data_file"])
+    file_path = Path(config["paths"]["base"]) / config["paths"]["data_file"]
     short_CSV_path = format_path(file_path)
 
     try:
@@ -1621,9 +1562,9 @@ def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
         required_columns = ["Ticker", "Price", "Date"]
         if not all(col in df.columns for col in required_columns):
             logging.error(
-                f"Missing required columns {required_columns} in data. Cannot save CSV. Exiting"
+                f"Missing required columns {required_columns} in data. Cannot save CSV."
             )
-            sys.exit(1)
+            return False
 
         # Save the DataFrame to CSV without headers
         df.to_csv(file_path, index=False, header=False)
@@ -1642,13 +1583,12 @@ def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
 # Quicken GUI #################################
 
 
-@retry()
 def import_data_file(config):
 
     try:
         output_file_name = config["paths"]["data_file"]
         base_path = config["paths"]["base"]
-        filename = os.path.join(base_path, output_file_name)
+        filename = str(Path(base_path) / output_file_name)
 
         if not activate_window_by_title(QUICKEN_IMPORT_DIALOG_TITLE, timeout=5):
             logging.error("Import Price Data dialog is not available for file entry.")
@@ -1680,7 +1620,6 @@ def import_data_file(config):
         raise
 
 
-@retry()
 def open_import_dialog():
 
     try:
@@ -1703,10 +1642,10 @@ def open_import_dialog():
         return False
     except Exception as e:
         logging.error(f"Failed to open price import dialogue box: {e}")
+        logging.debug("Full traceback:\n%s", traceback.format_exc())
         return False
 
 
-@retry()
 def navigate_to_portfolio():
 
     try:
@@ -1729,10 +1668,10 @@ def navigate_to_portfolio():
 
     except Exception as e:
         logging.error(f"Failed to navigate to portfolio: {e}")
+        logging.debug("Full traceback:\n%s", traceback.format_exc())
         return False
 
 
-@retry()
 def open_quicken(config):
     """
     Opens the Quicken application, reusing an existing window when available.
@@ -1741,7 +1680,7 @@ def open_quicken(config):
 
     quicken_path = config["paths"].get("quicken", "")
     try:
-        if not quicken_path or not os.path.isfile(quicken_path):
+        if not quicken_path or not Path(quicken_path).is_file():
             logging.error(f"Quicken executable not found: {quicken_path}")
             return False
 
@@ -1770,6 +1709,7 @@ def open_quicken(config):
         return False
     except Exception as e:
         logging.error(f"An unexpected error occurred while opening Quicken: {e}")
+        logging.debug("Full traceback:\n%s", traceback.format_exc())
         return False
 
 
@@ -1887,9 +1827,7 @@ def quicken_import(config):
         if is_elevated():
             return execute_import_sequence(config)
         else:
-            file_path = os.path.join(
-                config["paths"]["base"], config["paths"]["data_file"]
-            )
+            file_path = Path(config["paths"]["base"]) / config["paths"]["data_file"]
             short_CSV_path = format_path(file_path)
             logging.info("Quicken cannot be opened from here.\n")
             logging.info("Instead:")
@@ -1899,6 +1837,7 @@ def quicken_import(config):
             return False
     except Exception as e:
         logging.error(f"Error during Quicken import: {e}")
+        logging.debug("Full traceback:\n%s", traceback.format_exc())
         return False
 
 
@@ -1944,8 +1883,9 @@ def main():
             sys.exit(1)
 
         # 5) Validate and acquire ticker metadata
+        home_currency = config.get("home_currency", "GBP")
         valid_tickers: List[Tuple[str, Optional[pd.Timestamp], str, str, float]] = []
-        valid_tickers = get_tickers(tickers)
+        valid_tickers = get_tickers(tickers, home_currency=home_currency)
         if not valid_tickers:
             logging.error("No valid tickers to process. Exiting.")
             sys.exit(1)
@@ -1954,7 +1894,7 @@ def main():
 
         # Retrieve date range and cache_dir from config
         start_date, end_date = get_date_range(config)
-        cache_dir = os.path.join(config["paths"]["base"], config["paths"]["cache"])
+        cache_dir = Path(config["paths"]["base"]) / config["paths"]["cache"]
         price_data = fetch_historical_data(
             valid_tickers, start_date, end_date, cache_dir
         )
@@ -1963,14 +1903,25 @@ def main():
             logging.error("No valid data fetched. Exiting.")
             sys.exit(1)
 
-        # 7) Convert prices to GBP
-        processed_data = convert_prices(price_data)
+        # Drop cached rows that predate the requested collection period. They
+        # would otherwise be converted (with missing FX rates for freshly-added
+        # FX tickers) and then discarded by process_converted_prices anyway.
+        price_data["Date"] = pd.to_datetime(price_data["Date"], utc=True, errors="coerce")
+        price_data = price_data[price_data["Date"] >= start_date]
+        if price_data.empty:
+            logging.error("No data within the requested period. Exiting.")
+            sys.exit(1)
+
+        # 7) Convert prices to the home currency
+        processed_data = convert_prices(price_data, home_currency=home_currency)
 
         # 8) Build the final output (e.g., pivoting, filtering, etc.)
         output_csv = process_converted_prices(processed_data, start_date)
 
         # 9) Save to CSV or your preferred data store
-        save_to_csv(output_csv, config=config)
+        if not save_to_csv(output_csv, config=config):
+            logging.error("CSV save failed; skipping cache cleanup and Quicken import.")
+            return
 
         # 10) Clean up the cache if desired
         clean_cache(config=config)
@@ -2001,23 +1952,6 @@ def pause_before_exit(prompt: str = "\n\t Press Enter to exit...\n\t") -> None:
         input(prompt)
     except (EOFError, KeyboardInterrupt):
         logging.debug("No interactive terminal available for exit prompt.")
-
-
-
-def countdown_exit(seconds: int = 5):
-    """
-    Waits for a specified number of seconds before exiting,
-    allowing the user to interrupt by pressing Enter.
-    """
-    logging.info(f"Window will close in {seconds} seconds. Press Enter to cancel.")
-    end_time = time.time() + seconds
-    while time.time() < end_time:
-        if msvcrt.kbhit() and msvcrt.getwche() == "\r":
-            logging.info("Auto-close cancelled by user.")
-            pause_before_exit()
-            return
-        time.sleep(0.1)
-    logging.info("Exiting.")
 
 
 if __name__ == "__main__":

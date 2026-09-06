@@ -19,5 +19,5 @@ pyautogui>=0.9.54
 pygetwindow>=0.0.9
 
 # Note: Standard library modules are included with Python and do not need installation:
-# concurrent.futures, ctypes, datetime, logging, msvcrt, os, pickle, subprocess, 
+# concurrent.futures, ctypes, datetime, logging, os, pickle, subprocess,
 # sys, time, traceback, winreg, calendar, functools, pathlib, typing

@@ -26,7 +26,7 @@ This script was developed to automate the tedious process of manually updating s
 ## Project Files
 
 **Core Files:**
-- `QuickenPrices.py` - Main automation script (1750+ lines)
+- `QuickenPrices.py` - Main automation script (2000+ lines)
 - `configuration.yaml` - User configuration file with tickers and settings
 - `requirements.txt` - Python package dependencies for easy installation
 
@@ -113,7 +113,7 @@ python QuickenPrices.py
 4. **Currency Conversion**: Converts non-home currency prices using FX rates
 5. **Data Export**: Saves processed data to `data.csv`
 6. **Quicken Automation**: 
-   - Opens Quicken Premier
+   - Opens Quicken XG 2004
    - Navigates to Portfolio view
    - Opens import dialog
    - Imports the CSV file
@@ -188,10 +188,6 @@ The script follows a modular design with clear separation of concerns:
 - Safely terminates Quicken processes
 - Uses Windows taskkill for reliable closure
 
-**`countdown_exit(seconds: int = 5)`**
-- Provides user-friendly auto-exit with cancellation option
-- Uses msvcrt for real-time keyboard input detection
-
 #### Utility Functions
 
 **`setup_logging(config)`**
@@ -209,9 +205,9 @@ The script follows a modular design with clear separation of concerns:
 #### Core Dependencies
 ```python
 # Data Processing
-pandas>=1.5.0          # DataFrame operations and data manipulation
-numpy>=1.21.0           # Numerical operations
-yfinance>=0.2.18        # Yahoo Finance API client
+pandas>=2.2.0,<4        # DataFrame operations and data manipulation
+numpy>=1.26.0,<3        # Numerical operations
+yfinance>=0.2.54        # Yahoo Finance API client
 
 # GUI Automation  
 pyautogui>=0.9.54       # GUI automation for Quicken interaction
@@ -228,7 +224,6 @@ requests>=2.28.0        # HTTP requests and API calls
 os, sys, subprocess     # Operating system interface
 ctypes                  # Windows API access for UAC
 winreg                  # Windows registry access
-msvcrt                  # Microsoft Visual C Runtime
 
 # Data & Time
 datetime, time          # Date/time operations

@@ -1,19 +1,12 @@
 @echo off
 setlocal
 
-set "PROJECT_DIR=C:\Users\wayne\GitHub\Python\Projects\quicken_prices"
-set "PYTHON_EXE=C:\Users\wayne\AppData\Local\Programs\Python\Python314\python.exe"
+set "PROJECT_DIR=%~dp0"
+set "VENV_PYTHON=%PROJECT_DIR%.venv\Scripts\python.exe"
 
-if not exist "%PROJECT_DIR%\QuickenPrices.py" (
+if not exist "%PROJECT_DIR%QuickenPrices.py" (
     echo [ERROR] Could not find QuickenPrices.py at:
     echo         %PROJECT_DIR%
-    pause
-    exit /b 1
-)
-
-if not exist "%PYTHON_EXE%" (
-    echo [ERROR] Python executable not found at:
-    echo         %PYTHON_EXE%
     pause
     exit /b 1
 )
@@ -25,7 +18,11 @@ pushd "%PROJECT_DIR%" || (
     exit /b 1
 )
 
-"%PYTHON_EXE%" "QuickenPrices.py"
+if exist "%VENV_PYTHON%" (
+    "%VENV_PYTHON%" "QuickenPrices.py"
+) else (
+    py -3 "QuickenPrices.py"
+)
 set "EXIT_CODE=%ERRORLEVEL%"
 
 popd

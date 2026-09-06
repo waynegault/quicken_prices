@@ -9,16 +9,6 @@
       "console": "integratedTerminal",
       "justMyCode": true,
       "python": "${command:python.interpreterPath}"
-    },
-    {
-      "name": "Python: Specific Version",
-      "type": "python",
-      "request": "launch",
-      "program": "${file}",
-      "console": "integratedTerminal",
-      "justMyCode": true,
-      // Replace this path with your specific Python path
-      "python": "C:\\Programs\\Python\\Python312\\python.exe"
     }
   ]
 }
