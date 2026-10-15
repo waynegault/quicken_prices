@@ -35,7 +35,7 @@ is a defect or that all technical debt can be eliminated.
 
 ## P1 — structural complexity and duplication
 
-- [ ] **Monolithic module / mixed responsibilities** — `QuickenPrices.py`
+- [ ] **Monolithic module / mixed responsibilities** — `quicken_prices.py`
   (about 1,960 lines) combines configuration, network access, caching,
   conversion, CSV output, Windows elevation, and GUI automation. Split along
   stable boundaries and remove circular imports rather than layering wrappers.
@@ -68,6 +68,9 @@ is a defect or that all technical debt can be eliminated.
   VS Code run configuration now require `.venv\Scripts\python.exe`, the UAC
   relaunch explicitly selects that interpreter, and `main` verifies it before
   running.
+- [x] **Poorly named executable files** — renamed `QuickenPrices.py` and
+  `quickenprice.bat` to `quicken_prices.py` and `quicken_prices.bat` and updated
+  imports, launchers, and documentation without compatibility aliases.
 - [ ] **Tests cover a narrow subset** — 12 unit tests cover date ranges,
   cache/fetch basics, one FX conversion, and CSV preparation. Add regression
   tests for strict config validation, retries/failure propagation, cache
@@ -97,13 +100,13 @@ is a defect or that all technical debt can be eliminated.
   default merging and silent parse fallback, and added regression tests for
   model defaults, invalid types/keys, and missing-file non-creation.
   `.\.venv\Scripts\python.exe -m unittest -v` — 15 tests passed;
-  `.\.venv\Scripts\python.exe -m compileall -q QuickenPrices.py settings.py
+  `.\.venv\Scripts\python.exe -m compileall -q quicken_prices.py settings.py
   test_quicken_prices.py` — passed. Pending commit.
 - **Safe cache format** — replaced pickle reads/writes with schema-checked CSV,
   atomic writes, and explicit corrupt/invalid-cache errors. Added tests for the
   format and invalid file/data cases. `.\.venv\Scripts\python.exe -m unittest
   -v` — 17 tests passed; `.\.venv\Scripts\python.exe -m compileall -q
-  QuickenPrices.py settings.py test_quicken_prices.py` — passed. Pending commit.
+  quicken_prices.py settings.py test_quicken_prices.py` — passed. Pending commit.
 - **FX rate direction** — removed the backward-fill of exchange rates and fail
   when an equity price has no same-day-or-prior FX rate. Added a regression
   test showing that a future quote is never applied. `.\.venv\Scripts\python.exe
@@ -132,3 +135,7 @@ is a defect or that all technical debt can be eliminated.
   with the typed APIs, and added an immutability/idempotence regression test.
   `.\.venv\Scripts\python.exe -m unittest -v` — 26 tests passed; compileall and
   `git diff --check` passed. Pending commit.
+- **Entry-point naming** — renamed the main script and Windows launcher to
+  consistent snake_case names, updated references, and removed stale pickle
+  dependency comments. `.\.venv\Scripts\python.exe -m unittest -v` — 26 tests
+  passed; compileall and `git diff --check` passed. Pending commit.

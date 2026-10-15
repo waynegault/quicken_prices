@@ -1,5 +1,6 @@
-# QuickenPrices.py Requirements File
-# Install with: pip install -r requirements.txt
+# QuickenPrices requirements
+# Install into the repository environment:
+# .venv\Scripts\python.exe -m pip install -r requirements.txt
 
 # Financial Data API
 yfinance>=0.2.54
@@ -19,6 +20,4 @@ pydantic>=2.7,<3
 pyautogui>=0.9.54
 pygetwindow>=0.0.9
 
-# Note: Standard library modules are included with Python and do not need installation:
-# concurrent.futures, ctypes, datetime, logging, os, pickle, subprocess,
-# sys, time, traceback, winreg, calendar, functools, pathlib, typing
+# The application uses the repository's .venv\Scripts\python.exe interpreter.

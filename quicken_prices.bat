@@ -4,8 +4,8 @@ setlocal
 set "PROJECT_DIR=%~dp0"
 set "VENV_PYTHON=%PROJECT_DIR%.venv\Scripts\python.exe"
 
-if not exist "%PROJECT_DIR%QuickenPrices.py" (
-    echo [ERROR] Could not find QuickenPrices.py at:
+if not exist "%PROJECT_DIR%quicken_prices.py" (
+    echo [ERROR] Could not find quicken_prices.py at:
     echo         %PROJECT_DIR%
     pause
     exit /b 1
@@ -26,7 +26,7 @@ pushd "%PROJECT_DIR%" || (
     exit /b 1
 )
 
-"%VENV_PYTHON%" "QuickenPrices.py"
+"%VENV_PYTHON%" "quicken_prices.py"
 set "EXIT_CODE=%ERRORLEVEL%"
 
 popd

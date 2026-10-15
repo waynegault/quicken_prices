@@ -6,7 +6,7 @@ from unittest import mock
 import pandas as pd
 from pydantic import ValidationError
 
-import QuickenPrices as qp
+import quicken_prices as qp
 from market_models import TickerMetadata
 
 

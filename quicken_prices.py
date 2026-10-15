@@ -3,7 +3,7 @@
 # Shebang and coding declaration.
 
 """
-QuickenPrices.py
+quicken_prices.py
 
 This script fetches historical price data for a list of tickers specified in 'configuration.yaml' and saves the data to a CSV file.
 

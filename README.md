@@ -26,7 +26,7 @@ This script was developed to automate the tedious process of manually updating s
 ## Project Files
 
 **Core Files:**
-- `QuickenPrices.py` - Main automation script
+- `quicken_prices.py` - Main automation script
 - `configuration.yaml` - User configuration file with tickers and settings
 - `requirements.txt` - Python package dependencies for easy installation
 
@@ -83,7 +83,7 @@ This script was developed to automate the tedious process of manually updating s
 ### Running the Script
 
 #### Method 1: Windows launcher (Recommended)
-1. **Double-click** `quickenprice.bat` in Windows Explorer
+1. **Double-click** `quicken_prices.bat` in Windows Explorer
 2. **Allow UAC elevation** when prompted
 3. **Wait for completion** - the script will:
    - Fetch and validate all tickers
@@ -95,7 +95,7 @@ This script was developed to automate the tedious process of manually updating s
 
 #### Method 2: Command Line
 ```bash
-.\.venv\Scripts\python.exe QuickenPrices.py
+.\.venv\Scripts\python.exe quicken_prices.py
 ```
 
 #### Method 3: From VS Code
@@ -291,10 +291,10 @@ def validate_ticker(ticker_symbol: str):
 
 **Sample Log Output:**
 ```
-2025-07-17 17:11:33,369 - INFO - [QuickenPrices.py:344] - Current elevation status: Not elevated
-2025-07-17 17:11:33,369 - INFO - [QuickenPrices.py:349] - Attempting to re-run with administrative privileges...
-2025-07-17 17:11:38,142 - INFO - [QuickenPrices.py:669] - 24 tickers validated: ['AAPL', 'MSFT.L', ...]
-2025-07-17 17:11:38,750 - INFO - [QuickenPrices.py:1317] - 2016 prices successfully converted to GBP
+2025-07-17 17:11:33,369 - INFO - [quicken_prices.py:364] - Current elevation status: Not elevated
+2025-07-17 17:11:33,369 - INFO - [quicken_prices.py:374] - Attempting to re-run with administrative privileges...
+2025-07-17 17:11:38,142 - INFO - [quicken_prices.py:670] - 24 tickers validated: ['AAPL', 'MSFT.L', ...]
+2025-07-17 17:11:38,750 - INFO - [quicken_prices.py:1330] - 2016 prices successfully converted to GBP
 ```
 
 ### Performance Optimizations
