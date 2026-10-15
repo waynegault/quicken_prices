@@ -227,6 +227,62 @@ class TestQuickenPricesPureData(unittest.TestCase):
                 processing.convert_prices(data)
         self.assertIn("Missing historical FX rates", captured.output[0])
 
+    def test_convert_prices_rejects_missing_input_columns(self):
+        with self.assertRaisesRegex(ValueError, "Missing required columns"):
+            processing.convert_prices(pd.DataFrame({"Ticker": ["TEST"]}))
+
+    def test_convert_prices_uses_old_price_when_output_price_is_present(self):
+        data = pd.DataFrame(
+            [
+                {
+                    "Ticker": "AAPL",
+                    "Old Price": 100.0,
+                    "Price": 999.0,
+                    "Date": pd.Timestamp("2026-01-02", tz="UTC"),
+                    "Type": "EQUITY",
+                    "Original Currency": "USD",
+                },
+                {
+                    "Ticker": "USDGBP=X",
+                    "Old Price": 0.8,
+                    "Date": pd.Timestamp("2026-01-02", tz="UTC"),
+                    "Type": "CURRENCY",
+                    "Original Currency": "USD",
+                },
+            ]
+        )
+        original = data.copy(deep=True)
+
+        result = processing.convert_prices(data)
+
+        self.assertEqual(
+            result.loc[result["Ticker"] == "AAPL", "Price"].iloc[0], 80.0
+        )
+        pd.testing.assert_frame_equal(data, original)
+
+    def test_convert_prices_preserves_currency_rows_without_equities(self):
+        fx_only = pd.DataFrame(
+            [
+                {
+                    "Ticker": "USDGBP=X",
+                    "Old Price": 0.8,
+                    "Date": pd.Timestamp("2026-01-02", tz="UTC"),
+                    "Type": "CURRENCY",
+                    "Original Currency": "USD",
+                }
+            ]
+        )
+
+        result = processing.convert_prices(fx_only)
+
+        self.assertEqual(result.to_dict("records"), [
+            {
+                "Ticker": "USDGBP=X",
+                "Price": 0.8,
+                "Date": pd.Timestamp("2026-01-02", tz="UTC"),
+            }
+        ])
+
     def test_cache_helpers_round_trip(self):
         sample = pd.DataFrame(
             [
@@ -384,6 +440,13 @@ class TestQuickenPricesPureData(unittest.TestCase):
             result["Date"].tolist(),
             ["05/01/2026", "03/01/2026", "01/01/2026"],
         )
+
+    def test_process_converted_prices_rejects_missing_columns(self):
+        with self.assertRaisesRegex(ValueError, "missing columns"):
+            processing.process_converted_prices(
+                pd.DataFrame({"Ticker": ["TEST"]}),
+                pd.Timestamp("2026-01-01", tz="UTC"),
+            )
 
     def test_fetch_ticker_data_downloads_when_cache_missing(self):
         ticker = "TEST"
