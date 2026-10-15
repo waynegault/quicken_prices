@@ -278,7 +278,7 @@ def setup_logging(config: Dict[str, Any]) -> None:
         backupCount=config["log_file"]["backup_count"],
         encoding="utf-8",
     )
-    file_handler.setLevel(getattr(logging, file_log_level, logging.DEBUG))
+    file_handler.setLevel(getattr(logging, file_log_level))
     file_formatter = logging.Formatter(
         "%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s"
     )
@@ -286,7 +286,7 @@ def setup_logging(config: Dict[str, Any]) -> None:
 
     # Create a console handler with the same format
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(getattr(logging, terminal_log_level, logging.DEBUG))
+    console_handler.setLevel(getattr(logging, terminal_log_level))
     console_formatter = logging.Formatter(
         "%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s"
     )
@@ -302,83 +302,61 @@ def setup_logging(config: Dict[str, Any]) -> None:
 
 def run_startup_self_check(config: Dict[str, Any]) -> bool:
     """
-    Run a fast startup self-check to catch configuration and core data regressions early.
+    Run deterministic date and cache checks without touching user data.
     """
 
     logging.info("Running startup self-check...")
+    start_date, end_date = get_date_range(config)
+    if start_date >= end_date:
+        raise ValueError(
+            f"Startup self-check failed: invalid date range ({start_date} >= {end_date})."
+        )
 
-    required_top_level = ["tickers", "paths", "retries", "cache", "collection_period_years"]
-    missing_top_level = [key for key in required_top_level if key not in config]
-    if missing_top_level:
-        logging.error(f"Startup self-check failed: missing config keys: {missing_top_level}")
-        return False
-
-    required_paths = ["base", "cache", "data_file", "log_file"]
-    path_config = config.get("paths", {})
-    missing_paths = [key for key in required_paths if key not in path_config]
-    if missing_paths:
-        logging.error(f"Startup self-check failed: missing paths config keys: {missing_paths}")
-        return False
-
-    tickers = config.get("tickers", [])
-    if not isinstance(tickers, list) or not tickers:
-        logging.error("Startup self-check failed: 'tickers' must be a non-empty list.")
-        return False
-
-    try:
-        start_date, end_date = get_date_range(config)
-        if start_date >= end_date:
-            logging.error(
-                f"Startup self-check failed: invalid date range ({start_date} >= {end_date})."
+    with tempfile.TemporaryDirectory() as temp_cache_dir:
+        sample_data = pd.DataFrame(
+            [
+                {
+                    "Ticker": "SELFTEST",
+                    "Old Price": 1.0,
+                    "Date": pd.Timestamp("2026-01-01", tz="UTC"),
+                },
+                {
+                    "Ticker": "SELFTEST",
+                    "Old Price": 1.1,
+                    "Date": pd.Timestamp("2026-01-02", tz="UTC"),
+                },
+            ]
+        )
+        save_cache("SELFTEST", sample_data, temp_cache_dir)
+        loaded_data, status = load_cache("SELFTEST", temp_cache_dir)
+        if status != "loaded" or loaded_data.empty:
+            raise RuntimeError(
+                f"Startup self-check failed: cache round-trip returned status={status}."
             )
-            return False
-    except Exception as e:
-        logging.error(f"Startup self-check failed while validating date range: {e}")
-        return False
-
-    cache_dir = Path(config["paths"]["base"]) / config["paths"]["cache"]
-    try:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        probe_path = cache_dir / ".startup_probe"
-        with probe_path.open("w", encoding="utf-8") as probe_file:
-            probe_file.write("ok")
-        probe_path.unlink()
-    except OSError as e:
-        logging.error(f"Startup self-check failed: cache directory is not writable: {e}")
-        return False
-
-    try:
-        with tempfile.TemporaryDirectory() as temp_cache_dir:
-            sample_data = pd.DataFrame(
-                [
-                    {
-                        "Ticker": "SELFTEST",
-                        "Old Price": 1.0,
-                        "Date": pd.Timestamp("2026-01-01", tz="UTC"),
-                    },
-                    {
-                        "Ticker": "SELFTEST",
-                        "Old Price": 1.1,
-                        "Date": pd.Timestamp("2026-01-02", tz="UTC"),
-                    },
-                ]
-            )
-            save_cache("SELFTEST", sample_data, temp_cache_dir)
-            loaded_data, status = load_cache("SELFTEST", temp_cache_dir)
-            if status != "loaded" or loaded_data.empty:
-                logging.error(
-                    f"Startup self-check failed: cache round-trip returned status={status}."
-                )
-                return False
-    except Exception as e:
-        logging.error(f"Startup self-check failed during cache helper validation: {e}")
-        return False
 
     logging.info("Startup self-check passed.")
     return True
 
 
 # Initialisation ##############################
+
+
+def project_python() -> Path:
+    """Return the only supported application interpreter for this checkout."""
+    return Path(__file__).resolve().parent / ".venv" / "Scripts" / "python.exe"
+
+
+def ensure_project_python() -> None:
+    interpreter = project_python()
+    if not interpreter.is_file():
+        raise FileNotFoundError(
+            f"Project virtual environment not found: {interpreter}. "
+            "Create it with 'py -3 -m venv .venv'."
+        )
+    if Path(sys.executable).resolve() != interpreter.resolve():
+        raise RuntimeError(
+            f"Run QuickenPrices with the project interpreter: {interpreter}"
+        )
 
 
 def run_as_admin() -> bool:
@@ -398,11 +376,16 @@ def run_as_admin() -> bool:
         # Re-run the script as admin
         try:
             script_path = str(Path(__file__).resolve())
+            interpreter = project_python()
+            if not interpreter.is_file():
+                raise FileNotFoundError(
+                    f"Project virtual environment not found: {interpreter}"
+                )
             logging.info("Attempting to re-run with administrative privileges...")
             return_code = ctypes.windll.shell32.ShellExecuteW(
                 None,
                 "runas",
-                sys.executable,
+                str(interpreter),
                 f"\"{script_path}\"",
                 str(Path(script_path).parent),
                 1,
@@ -431,10 +414,7 @@ def is_elevated():
     Checks if the script is running with administrative privileges.
     """
 
-    try:
-        return ctypes.windll.shell32.IsUserAnAdmin()
-    except Exception:
-        return False
+    return bool(ctypes.windll.shell32.IsUserAnAdmin())
 
 
 # Helper functions ############################
@@ -1723,6 +1703,7 @@ def main():
 
     try:
         global config
+        ensure_project_python()
         config = load_configuration("configuration.yaml")
 
         # 0) Initialise

@@ -424,8 +424,19 @@ class TestQuickenPricesPureData(unittest.TestCase):
             mock.patch.object(qp, "load_configuration", side_effect=RuntimeError("bad config")),
             mock.patch.object(qp, "pause_before_exit"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "bad config"):
-                qp.main()
+            with self.assertLogs(level="ERROR") as captured:
+                with self.assertRaisesRegex(RuntimeError, "bad config"):
+                    qp.main()
+        self.assertIn("An unexpected error occurred", captured.output[0])
+
+    def test_startup_self_check_does_not_touch_user_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = qp.DEFAULT_CONFIG.copy()
+            config["paths"] = {**qp.DEFAULT_CONFIG["paths"], "base": temp_dir}
+            config["collection_period_years"] = 0.1
+
+            self.assertTrue(qp.run_startup_self_check(config))
+            self.assertFalse((Path(temp_dir) / "cache").exists())
 
 
 if __name__ == "__main__":

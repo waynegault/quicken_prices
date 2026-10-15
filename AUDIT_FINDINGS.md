@@ -25,10 +25,9 @@ is a defect or that all technical debt can be eliminated.
   `run_startup_self_check`, and individual functions. `settings.py` now defines
   strict Pydantic v2 models; config parsing rejects unknown keys, wrong types,
   malformed YAML, and missing files instead of silently changing behavior.
-- [ ] **Startup mutates project state** — `run_startup_self_check` creates the
-  cache directory and a probe. Configuration loading no longer creates a
-  missing YAML file; make the remaining operational preflight repeatable and
-  isolate tests from user files.
+- [x] **Startup mutates project state** — configuration loading no longer
+  creates a missing YAML file, and startup self-checks only use a temporary
+  cache directory; operational cache creation occurs only when fetching data.
 - [x] **Main path hides failure status** — `main` logs unexpected exceptions
   with tracebacks and re-raises them, so CLI failures produce a nonzero status.
   CSV validation and write errors also propagate; cache and output CSVs share
@@ -63,10 +62,10 @@ is a defect or that all technical debt can be eliminated.
 
 ## P2 — launcher, tests, and maintainability
 
-- [ ] **Launcher bypasses the project environment** — `quickenprice.bat`
-  falls back to `py -3` if `.venv` is missing; the UAC relaunch uses
-  `sys.executable`. Ensure all application launches use the repository
-  `.venv` and report a missing environment directly.
+- [x] **Launcher bypasses the project environment** — the batch launcher and
+  VS Code run configuration now require `.venv\Scripts\python.exe`, the UAC
+  relaunch explicitly selects that interpreter, and `main` verifies it before
+  running.
 - [ ] **Tests cover a narrow subset** — 12 unit tests cover date ranges,
   cache/fetch basics, one FX conversion, and CSV preparation. Add regression
   tests for strict config validation, retries/failure propagation, cache
@@ -113,3 +112,10 @@ is a defect or that all technical debt can be eliminated.
   data or I/O failures. Added regression tests for provider errors, repeatable
   output, write failure, and main error propagation. `.\.venv\Scripts\python.exe
   -m unittest -v` — 21 tests passed; compileall passed. Pending commit.
+- **Startup isolation and interpreter enforcement** — removed startup writes
+  to the configured cache, made the cache self-check temporary, disallowed
+  Python executable fallbacks, enforced the project venv in the CLI/UAC path,
+  and updated launcher/VS Code/installation docs. Added a test proving the
+  self-check leaves the configured cache absent. `.\.venv\Scripts\python.exe
+  -m unittest -v` — 22 tests passed; compileall and `git diff --check` passed.
+  Pending commit.

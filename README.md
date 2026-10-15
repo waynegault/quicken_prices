@@ -26,36 +26,33 @@ This script was developed to automate the tedious process of manually updating s
 ## Project Files
 
 **Core Files:**
-- `QuickenPrices.py` - Main automation script (2000+ lines)
+- `QuickenPrices.py` - Main automation script
 - `configuration.yaml` - User configuration file with tickers and settings
 - `requirements.txt` - Python package dependencies for easy installation
 
 **Generated Files:**
 - `data.csv` - Price data output file for Quicken import
 - `prices.log` - Detailed execution logs with rotation
-- `cache/` - Directory containing cached price data (`.pkl` files)
+- `cache/` - Directory containing schema-checked CSV price caches
 
 ## User Instructions
 
 ### Prerequisites
 
 1. **Windows OS** (required for Quicken automation)
-2. **Python 3.8+** installed
+2. **Python 3.10+** installed
 3. **Quicken 2004** installed and configured
 4. **Administrator privileges** (required for GUI automation)
 
 ### Installation
 
 1. **Clone or download** the project to your local machine
-2. **Install required Python packages**:
+2. **Create and install the project virtual environment**:
    ```bash
-   pip install -r requirements.txt
+   py -3 -m venv .venv
+   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
    ```
-   
-   **Alternative**: Install packages individually:
-   ```bash
-   pip install pandas yfinance pyautogui pygetwindow pyyaml requests numpy
-   ```
+   Application and test commands must use `.venv\Scripts\python.exe`.
 
 ### Configuration
 
@@ -85,8 +82,8 @@ This script was developed to automate the tedious process of manually updating s
 
 ### Running the Script
 
-#### Method 1: Direct Execution (Recommended)
-1. **Double-click** `QuickenPrices.py` in Windows Explorer
+#### Method 1: Windows launcher (Recommended)
+1. **Double-click** `quickenprice.bat` in Windows Explorer
 2. **Allow UAC elevation** when prompted
 3. **Wait for completion** - the script will:
    - Fetch and validate all tickers
@@ -94,11 +91,11 @@ This script was developed to automate the tedious process of manually updating s
    - Convert currencies if needed
    - Open Quicken automatically
    - Import the data
-   - Close Quicken and exit after 5 seconds
+   - Close Quicken and wait for the exit prompt
 
 #### Method 2: Command Line
 ```bash
-python QuickenPrices.py
+.\.venv\Scripts\python.exe QuickenPrices.py
 ```
 
 #### Method 3: From VS Code
@@ -118,7 +115,7 @@ python QuickenPrices.py
    - Opens import dialog
    - Imports the CSV file
    - Closes Quicken
-7. **Auto-exit**: Script closes automatically after 5 seconds (press Enter to cancel)
+7. **Exit**: The terminal waits for Enter so you can review the log output.
 
 ### Output Files
 
@@ -144,7 +141,7 @@ The script follows a modular design with clear separation of concerns:
          ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
          │    Logging &    │    │   Caching       │    │   Quicken       │
          │    Error        │────│   System        │────│   Automation    │
-         │    Handling     │    │   (Pickle)      │    │   (PyAutoGUI)   │
+         │    Handling     │    │   (CSV)         │    │   (PyAutoGUI)   │
          └─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
@@ -216,6 +213,7 @@ pygetwindow>=0.0.9      # Window management and detection
 # Configuration & Utilities
 pyyaml>=6.0             # YAML configuration file parsing
 requests>=2.28.0        # HTTP requests and API calls
+pydantic>=2.7,<3        # Strict configuration validation
 ```
 
 #### Standard Library
@@ -235,7 +233,6 @@ logging                 # Comprehensive logging system
 traceback              # Error traceback handling
 
 # Data Storage
-pickle                  # Cache serialization
 pathlib                # Modern path handling
 ```
 
@@ -246,9 +243,9 @@ The script implements a sophisticated caching mechanism:
 **Cache Structure:**
 ```
 cache/
-├── AAPL.pkl           # Individual ticker cache files
-├── MSFT.L.pkl         # Stored as pickle for fast I/O
-├── GBP=X.pkl          # FX rates cached separately
+├── AAPL.csv           # Individual ticker cache files
+├── MSFT.L.csv         # Schema-checked CSV data
+├── GBP=X.csv          # FX rates cached separately
 └── ...
 ```
 
@@ -309,7 +306,7 @@ def validate_ticker(ticker_symbol: str):
 **Intelligent Caching:**
 - Avoid redundant API calls for recent data
 - Smart date range calculations for partial updates
-- Pickle serialization for fast cache I/O
+- Schema-checked CSV serialization with atomic replacement
 
 **Memory Management:**
 - Processes data in chunks to handle large datasets

@@ -11,6 +11,14 @@ if not exist "%PROJECT_DIR%QuickenPrices.py" (
     exit /b 1
 )
 
+if not exist "%VENV_PYTHON%" (
+    echo [ERROR] Project virtual environment is missing:
+    echo         %VENV_PYTHON%
+    echo Create it with: py -3 -m venv .venv
+    pause
+    exit /b 1
+)
+
 pushd "%PROJECT_DIR%" || (
     echo [ERROR] Failed to switch to project directory:
     echo         %PROJECT_DIR%
@@ -18,11 +26,7 @@ pushd "%PROJECT_DIR%" || (
     exit /b 1
 )
 
-if exist "%VENV_PYTHON%" (
-    "%VENV_PYTHON%" "QuickenPrices.py"
-) else (
-    py -3 "QuickenPrices.py"
-)
+"%VENV_PYTHON%" "QuickenPrices.py"
 set "EXIT_CODE=%ERRORLEVEL%"
 
 popd
