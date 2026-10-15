@@ -246,10 +246,40 @@ class TestQuickenPricesPureData(unittest.TestCase):
                     }
                 ]
             )
-            with self.assertRaisesRegex(ValueError, "contains tickers"):
+            with self.assertRaisesRegex(ValueError, "unexpected tickers"):
                 qp.save_cache("TEST", wrong_ticker, temp_dir)
 
             self.assertFalse((Path(temp_dir) / "TEST.csv").exists())
+
+    def test_cache_normalization_is_idempotent_and_does_not_mutate_input(self):
+        source = pd.DataFrame(
+            [
+                {
+                    "Ticker": "test",
+                    "Old Price": "1.0",
+                    "Date": "2026-01-01",
+                },
+                {
+                    "Ticker": "TEST",
+                    "Old Price": "1.1",
+                    "Date": "2026-01-01",
+                },
+                {
+                    "Ticker": "TEST",
+                    "Old Price": "2.0",
+                    "Date": "2026-01-02",
+                },
+            ]
+        )
+        original = source.copy(deep=True)
+
+        normalized = qp.normalize_cache_data("TEST", source)
+
+        pd.testing.assert_frame_equal(source, original)
+        pd.testing.assert_frame_equal(
+            normalized, qp.normalize_cache_data("TEST", normalized)
+        )
+        self.assertEqual(normalized["Old Price"].tolist(), [1.1, 2.0])
 
 
     def test_find_missing_ranges_returns_empty_when_fully_covered(self):

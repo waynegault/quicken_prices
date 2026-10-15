@@ -825,92 +825,56 @@ def fetch_ticker_data(
     """
 
     # 1) Load cache
-    Path(cache_dir).mkdir(parents=True, exist_ok=True)
     cache_data, cache_status = load_cache(ticker, cache_dir)
-    needs_save = False  # Track whether the cache needs saving
 
     # 2) Identify missing date ranges in cache
     if cache_status == "not_found":
         logging.info(f"{ticker}: No cache file found. Will fetch entire range.")
         first_cache, last_cache = None, None
-        cache_data = pd.DataFrame(columns=CACHE_COLUMNS)
-    elif cache_status == "loaded":
-        # Ensure cache data has the expected schema and usable rows.
-        if all(column in cache_data.columns for column in CACHE_COLUMNS):
-            cache_data = cache_data[list(CACHE_COLUMNS)].copy()
-            cache_data["Date"] = pd.to_datetime(
-                cache_data["Date"], errors="coerce", utc=True
-            )
-            cache_data["Old Price"] = pd.to_numeric(
-                cache_data["Old Price"], errors="coerce"
-            )
-            cache_data = (
-                cache_data.dropna(subset=["Date", "Ticker", "Old Price"])
-                .drop_duplicates(subset=["Date"], keep="last")
-                .sort_values("Date")
-                .reset_index(drop=True)
-            )
-            first_cache = cache_data["Date"].min()
-            last_cache = cache_data["Date"].max()
-            if cache_data.empty or pd.isna(first_cache) or pd.isna(last_cache):
-                logging.info(f"{ticker}: Cache contained no usable rows. Will fetch range.")
-                first_cache, last_cache = None, None
-                cache_data = pd.DataFrame(columns=CACHE_COLUMNS)
-            else:
-                logging.info(
-                    f"{ticker}: Cache loaded from {first_cache.strftime('%d/%m/%Y')} to {last_cache.strftime('%d/%m/%Y')} "
-                    f"({len(cache_data)} {pluralise('day', len(cache_data))})"
-                )
-        else:
-            logging.error(
-                f"{ticker}: Cache is missing required columns. Will fetch entire range."
-            )
+    else:
+        first_cache = cache_data["Date"].min()
+        last_cache = cache_data["Date"].max()
+        if cache_data.empty or pd.isna(first_cache) or pd.isna(last_cache):
+            logging.info(f"{ticker}: Cache contained no usable rows. Will fetch range.")
             first_cache, last_cache = None, None
-            cache_data = pd.DataFrame(columns=CACHE_COLUMNS)
+        else:
+            logging.info(
+                f"{ticker}: Cache loaded from {first_cache.strftime('%d/%m/%Y')} to "
+                f"{last_cache.strftime('%d/%m/%Y')} "
+                f"({len(cache_data)} {pluralise('day', len(cache_data))})"
+            )
 
     # 3) Determine missing date ranges
     missing_ranges = find_missing_ranges(start_date, end_date, first_cache, last_cache)
 
     # 4) Download missing data via yfinance
-    downloaded_data = pd.DataFrame()
+    downloaded_frames = []
     if missing_ranges:
         for rng_start, rng_end in missing_ranges:
-            partial_df = download_data(ticker, rng_start, rng_end)
-            if not (partial_df is None or partial_df.empty):
-                downloaded_data = pd.concat(
-                    [downloaded_data, partial_df], ignore_index=True
-                )
+            partial_data = download_data(ticker, rng_start, rng_end)
+            if not partial_data.empty:
+                downloaded_frames.append(partial_data)
+    downloaded_data = (
+        normalize_cache_data(ticker, pd.concat(downloaded_frames, ignore_index=True))
+        if downloaded_frames
+        else pd.DataFrame(columns=CACHE_COLUMNS)
+    )
 
     # 5) Merge newly downloaded data with cache
-
-    if cache_data is None or cache_data.empty:
+    if cache_data.empty:
         combined_data = downloaded_data
-        needs_save = True  # Flag that new data is to be saved
-    elif downloaded_data is None or downloaded_data.empty:
+    elif downloaded_data.empty:
         combined_data = cache_data
     else:
         combined_data = pd.concat([cache_data, downloaded_data], ignore_index=True)
-        combined_data.drop_duplicates(subset=["Date"], keep="last", inplace=True)
-        needs_save = True  # Flag that merged data is to be saved
 
-    if combined_data is None or combined_data.empty:
-        logging.warning(f"{ticker}: No price data available after cache and download checks.")
-        return pd.DataFrame(columns=CACHE_COLUMNS)
-
-    combined_data["Date"] = pd.to_datetime(combined_data["Date"], errors="coerce", utc=True)
-    combined_data["Old Price"] = pd.to_numeric(combined_data["Old Price"], errors="coerce")
-    combined_data = (
-        combined_data.dropna(subset=["Date", "Ticker", "Old Price"])
-        .drop_duplicates(subset=["Date"], keep="last")
-        .sort_values("Date")
-        .reset_index(drop=True)
-    )
+    combined_data = normalize_cache_data(ticker, combined_data)
     if combined_data.empty:
-        logging.warning(f"{ticker}: No usable price rows were found.")
-        return pd.DataFrame(columns=CACHE_COLUMNS)
+        logging.warning(f"{ticker}: No price data available after cache and download checks.")
+        return combined_data
 
     # 6) Save cache only if changes occurred (and before forwards-fill)
-    if needs_save:
+    if not downloaded_data.empty:
         save_cache(ticker, combined_data, cache_dir)
 
     # 7) Forward-fill logic (for FX tickers)
@@ -952,25 +916,17 @@ def fetch_ticker_data(
         and not pd.isna(current_price)
         and current_price > 0
     ):
-        #  Create new_row as a DataFrame with explicit dtypes
         new_row = pd.DataFrame(
             [
                 {
                     "Ticker": ticker,
                     "Old Price": current_price,
-                    "Date": pd.to_datetime(
-                        today, utc=True
-                    ),  # Ensure Date is datetime64[ns, UTC]
+                    "Date": today,
                 }
             ]
         )
-        # Ensure combined_data['Date'] remains datetime64[ns, UTC]
-        combined_data["Date"] = pd.to_datetime(combined_data["Date"], utc=True)
-
-        # Concatenate new_row into combined_data
         combined_data = pd.concat([combined_data, new_row], ignore_index=True)
-        combined_data.drop_duplicates(subset=["Date"], keep="last", inplace=True)
-        combined_data.sort_values("Date", inplace=True)
+        combined_data = normalize_cache_data(ticker, combined_data)
         logging.info(
             f"{ticker}: Appended today's {today.strftime('%d/%m/%Y')} latest price = {current_price:.3f}"
         )
@@ -981,6 +937,34 @@ def fetch_ticker_data(
         f"from {combined_data['Date'].min().strftime('%d/%m/%Y')} to {combined_data['Date'].max().strftime('%d/%m/%Y')}\n"
     )
     return combined_data
+
+
+def normalize_cache_data(ticker: str, data: pd.DataFrame) -> pd.DataFrame:
+    """Normalize one ticker's rows identically for load, merge, and save."""
+    missing_columns = set(CACHE_COLUMNS).difference(data.columns)
+    if missing_columns:
+        raise ValueError(
+            f"{ticker}: Price data is missing columns {sorted(missing_columns)}."
+        )
+
+    normalized = data.loc[:, CACHE_COLUMNS].copy()
+    normalized = normalized.dropna(subset=["Ticker"])
+    normalized["Ticker"] = normalized["Ticker"].astype(str).str.upper()
+    normalized["Date"] = pd.to_datetime(normalized["Date"], errors="coerce", utc=True)
+    normalized["Old Price"] = pd.to_numeric(normalized["Old Price"], errors="coerce")
+    normalized = (
+        normalized.dropna(subset=["Date", "Old Price"])
+        .drop_duplicates(subset=["Date"], keep="last")
+        .sort_values("Date")
+        .reset_index(drop=True)
+    )
+    cached_tickers = set(normalized["Ticker"])
+    if cached_tickers and cached_tickers != {ticker.upper()}:
+        raise ValueError(
+            f"{ticker}: Price data contains unexpected tickers "
+            f"{sorted(cached_tickers)}."
+        )
+    return normalized
 
 
 def load_cache(ticker: str, cache_dir: str) -> Tuple[pd.DataFrame, str]:
@@ -1004,14 +988,8 @@ def load_cache(ticker: str, cache_dir: str) -> Tuple[pd.DataFrame, str]:
     if cache_file.stat().st_size == 0:
         raise ValueError(f"{ticker}: Cache file is empty: {cache_file}")
 
-    data = pd.read_csv(cache_file)
-    missing_columns = set(CACHE_COLUMNS).difference(data.columns)
-    if missing_columns:
-        raise ValueError(
-            f"{ticker}: Cache file {cache_file} is missing columns "
-            f"{sorted(missing_columns)}."
-        )
-    return data.loc[:, CACHE_COLUMNS], "loaded"
+    data = normalize_cache_data(ticker, pd.read_csv(cache_file))
+    return data, "loaded"
 
 
 def download_data(
@@ -1101,24 +1079,9 @@ def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
             f"{sorted(missing_columns)}."
         )
 
-    cache_data = data.loc[:, CACHE_COLUMNS].copy()
-    cache_data["Date"] = pd.to_datetime(cache_data["Date"], errors="coerce", utc=True)
-    cache_data["Old Price"] = pd.to_numeric(cache_data["Old Price"], errors="coerce")
-    cache_data = (
-        cache_data.dropna(subset=CACHE_COLUMNS)
-        .drop_duplicates(subset=["Date"], keep="last")
-        .sort_values("Date")
-        .reset_index(drop=True)
-    )
+    cache_data = normalize_cache_data(ticker, data)
     if cache_data.empty:
         raise ValueError(f"Cannot save an empty cache for {ticker}.")
-    cached_tickers = set(cache_data["Ticker"].astype(str).str.upper())
-    if cached_tickers != {ticker.upper()}:
-        raise ValueError(
-            f"Cannot save cache for {ticker}; data contains tickers "
-            f"{sorted(cached_tickers)}."
-        )
-
     write_csv_atomically(cache_data, cache_file, index=False, header=True)
 
     logging.info(

@@ -44,9 +44,9 @@ is a defect or that all technical debt can be eliminated.
   price insertion; `convert_prices` validates, reports coverage, merges FX,
   imputes rates, converts, and formats. Extract cohesive transformations with
   contracts and focused tests.
-- [ ] **Duplicated cache/DataFrame cleanup** — cache rows are normalized in
-  `fetch_ticker_data`, then normalized again after merging; consolidate this
-  into one normalization path.
+- [x] **Duplicated cache/DataFrame cleanup** — `normalize_cache_data` now owns
+  cache load/merge/save schema cleanup, numeric/date normalization, sorting,
+  and deduplication. It is idempotent and does not mutate its input.
 - [x] **Positional ticker metadata** — replaced the five-element tuple with a
   strict Pydantic `TickerMetadata` model at provider and pipeline boundaries.
   Configuration rejects duplicate ticker symbols case-insensitively.
@@ -127,3 +127,8 @@ is a defect or that all technical debt can be eliminated.
   and downstream error-propagation tests. `.\.venv\Scripts\python.exe -m
   unittest -v` — 25 tests passed; compileall and `git diff --check` passed.
   Pending commit.
+- **Cache normalization** — consolidated repeated cache/merge/save cleanup in
+  one idempotent normalizer, removed defensive `None` branches inconsistent
+  with the typed APIs, and added an immutability/idempotence regression test.
+  `.\.venv\Scripts\python.exe -m unittest -v` — 26 tests passed; compileall and
+  `git diff --check` passed. Pending commit.
