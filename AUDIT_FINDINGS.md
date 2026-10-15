@@ -35,11 +35,11 @@ is a defect or that all technical debt can be eliminated.
 
 ## P1 — structural complexity and duplication
 
-- [ ] **Monolithic module / mixed responsibilities** — `quicken_prices.py`
-  still owns configuration, network access, Windows elevation, and GUI
-  automation, but pricing conversion, shared helpers, and persistence now live
-  in `price_processing.py`, `common.py`, and `storage.py` with acyclic imports.
-  Continue separating remaining domain boundaries.
+- [x] **Monolithic module / mixed responsibilities** — `quicken_prices.py`
+  is now a roughly 400-line entrypoint/configuration/orchestration module;
+  market access, Windows automation, pricing conversion, shared helpers, and
+  persistence are in `market_data.py`, `quicken_automation.py`,
+  `price_processing.py`, `common.py`, and `storage.py`. Imports are acyclic.
 - [ ] **Large multi-responsibility functions** — `fetch_ticker_data` handles
   cache validation, downloading, merging, persistence, FX filling, and live
   price insertion; `convert_prices` validates, reports coverage, merges FX,
@@ -51,10 +51,12 @@ is a defect or that all technical debt can be eliminated.
 - [x] **Positional ticker metadata** — replaced the five-element tuple with a
   strict Pydantic `TickerMetadata` model at provider and pipeline boundaries.
   Configuration rejects duplicate ticker symbols case-insensitively.
-- [ ] **Global configuration and GUI lifecycle state** — retry behavior reads
-  the global `config`, `main` replaces it, and Quicken ownership uses the
-  `QUICKEN_SESSION_STARTED` global. Pass explicit dependencies and lifecycle
-  state.
+- [x] **Global configuration** — runtime retry policy is passed explicitly
+  from validated config; `main` keeps configuration local instead of mutating
+  a module global.
+- [ ] **GUI lifecycle state** — Quicken ownership still uses the
+  `QUICKEN_SESSION_STARTED` global; give it an explicit automation-session
+  owner.
 - [ ] **Weak orchestration dispatch** — `execute_import_sequence` decides
   whether to pass configuration by comparing function objects. Give each
   workflow step a uniform callable contract.
@@ -147,4 +149,11 @@ is a defect or that all technical debt can be eliminated.
   success boolean. Static import inspection found no unused imports or cycles
   among the extracted modules. Added isolated cache cleanup/error tests.
   `.\.venv\Scripts\python.exe -m unittest -q` — 27 tests passed; compileall and
+  `git diff --check` passed. Pending commit.
+- **Market pipeline boundary split** — moved retry, dates, ticker validation,
+  provider fetching, and cache planning into `market_data.py`; retry policy
+  now validates and receives the runtime settings explicitly, with no global
+  config. Simplified orchestration and removed library `sys.exit` paths.
+  Tests verify explicit retry policy, errors, and strict invalid retry inputs.
+  `.\.venv\Scripts\python.exe -m unittest -q` — 28 tests passed; compileall and
   `git diff --check` passed. Pending commit.

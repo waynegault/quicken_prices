@@ -9,8 +9,10 @@ from pydantic import ValidationError
 
 import quicken_prices as qp
 import price_processing as processing
+import market_data
 import storage
 from market_models import TickerMetadata
+from settings import AppSettings
 
 
 class TestQuickenPricesPureData(unittest.TestCase):
@@ -49,6 +51,14 @@ class TestQuickenPricesPureData(unittest.TestCase):
                 qp.load_configuration(str(config_path))
 
             config_path.write_text(
+                "tickers:\n  - TEST\npaths: {}\n"
+                "retries:\n  max_retries: '3'\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValidationError):
+                qp.load_configuration(str(config_path))
+
+            config_path.write_text(
                 "tickers:\n  - TEST\n  - test\npaths: {}\n",
                 encoding="utf-8",
             )
@@ -66,7 +76,7 @@ class TestQuickenPricesPureData(unittest.TestCase):
 
     def test_get_date_range_returns_ordered_utc_dates(self):
         config = {"collection_period_years": 0.1}
-        start_date, end_date = qp.get_date_range(config)
+        start_date, end_date = market_data.get_date_range(config)
 
         self.assertLess(start_date, end_date)
         self.assertEqual(str(start_date.tz), "UTC")
@@ -76,7 +86,7 @@ class TestQuickenPricesPureData(unittest.TestCase):
         start_date = pd.Timestamp("2026-01-01", tz="UTC")
         end_date = pd.Timestamp("2026-01-10", tz="UTC")
 
-        missing = qp.find_missing_ranges(start_date, end_date, None, None)
+        missing = market_data.find_missing_ranges(start_date, end_date, None, None)
 
         self.assertEqual(missing, [(start_date, end_date)])
 
@@ -86,7 +96,7 @@ class TestQuickenPricesPureData(unittest.TestCase):
         first_cache = pd.Timestamp("2026-01-03", tz="UTC")
         last_cache = pd.Timestamp("2026-01-08", tz="UTC")
 
-        missing = qp.find_missing_ranges(start_date, end_date, first_cache, last_cache)
+        missing = market_data.find_missing_ranges(start_date, end_date, first_cache, last_cache)
 
         self.assertEqual(
             missing,
@@ -291,7 +301,7 @@ class TestQuickenPricesPureData(unittest.TestCase):
         first = pd.Timestamp("2026-01-01", tz="UTC")
         last = pd.Timestamp("2026-01-15", tz="UTC")
 
-        self.assertEqual(qp.find_missing_ranges(start, end, first, last), [])
+        self.assertEqual(market_data.find_missing_ranges(start, end, first, last), [])
 
     def test_find_missing_ranges_right_gap_only(self):
         start = pd.Timestamp("2026-01-01", tz="UTC")
@@ -299,7 +309,7 @@ class TestQuickenPricesPureData(unittest.TestCase):
         first = pd.Timestamp("2025-12-20", tz="UTC")
         last = pd.Timestamp("2026-01-05", tz="UTC")
 
-        missing = qp.find_missing_ranges(start, end, first, last)
+        missing = market_data.find_missing_ranges(start, end, first, last)
 
         self.assertEqual(
             missing, [(pd.Timestamp("2026-01-06", tz="UTC"), end)]
@@ -311,7 +321,7 @@ class TestQuickenPricesPureData(unittest.TestCase):
         first = pd.Timestamp("2026-01-05", tz="UTC")
         last = pd.Timestamp("2026-01-15", tz="UTC")
 
-        missing = qp.find_missing_ranges(start, end, first, last)
+        missing = market_data.find_missing_ranges(start, end, first, last)
 
         self.assertEqual(
             missing, [(start, pd.Timestamp("2026-01-04", tz="UTC"))]
@@ -368,8 +378,10 @@ class TestQuickenPricesPureData(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as cache_dir:
-            with mock.patch.object(qp, "download_data", return_value=downloaded) as m:
-                result = qp.fetch_ticker_data(
+            with mock.patch.object(
+                market_data, "download_data", return_value=downloaded
+            ) as m:
+                result = market_data.fetch_ticker_data(
                     ticker, start, end, float("nan"), cache_dir
                 )
                 m.assert_called_once()
@@ -391,8 +403,8 @@ class TestQuickenPricesPureData(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as cache_dir:
             storage.save_cache(ticker, cached, cache_dir)
-            with mock.patch.object(qp, "download_data") as m:
-                result = qp.fetch_ticker_data(
+            with mock.patch.object(market_data, "download_data") as m:
+                result = market_data.fetch_ticker_data(
                     ticker, start, end, float("nan"), cache_dir
                 )
                 m.assert_not_called()
@@ -419,8 +431,10 @@ class TestQuickenPricesPureData(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as cache_dir:
             storage.save_cache(ticker, cached, cache_dir)
-            with mock.patch.object(qp, "download_data", return_value=downloaded) as m:
-                result = qp.fetch_ticker_data(
+            with mock.patch.object(
+                market_data, "download_data", return_value=downloaded
+            ) as m:
+                result = market_data.fetch_ticker_data(
                     ticker, start, end, float("nan"), cache_dir
                 )
                 m.assert_called_once()
@@ -439,10 +453,12 @@ class TestQuickenPricesPureData(unittest.TestCase):
         )
 
         with mock.patch.object(
-            qp, "fetch_ticker_data", side_effect=RuntimeError("cache read failed")
+            market_data,
+            "fetch_ticker_data",
+            side_effect=RuntimeError("cache read failed"),
         ):
             with self.assertRaisesRegex(RuntimeError, "cache read failed"):
-                qp.fetch_historical_data(
+                market_data.fetch_historical_data(
                     [ticker_info],
                     pd.Timestamp("2026-01-01", tz="UTC"),
                     pd.Timestamp("2026-01-03", tz="UTC"),
@@ -453,9 +469,9 @@ class TestQuickenPricesPureData(unittest.TestCase):
         ticker = mock.Mock()
         ticker.history.side_effect = RuntimeError("provider unavailable")
 
-        with mock.patch.object(qp.yf, "Ticker", return_value=ticker):
+        with mock.patch.object(market_data.yf, "Ticker", return_value=ticker):
             with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
-                qp.download_data(
+                market_data.download_data(
                     "TEST",
                     pd.Timestamp("2026-01-01", tz="UTC"),
                     pd.Timestamp("2026-01-03", tz="UTC"),
@@ -471,9 +487,9 @@ class TestQuickenPricesPureData(unittest.TestCase):
             "currency": "USD",
             "bid": 42.5,
         }
-        with mock.patch.object(qp.yf, "Ticker") as ticker_factory:
+        with mock.patch.object(market_data.yf, "Ticker") as ticker_factory:
             ticker_factory.return_value.get_info.return_value = info
-            metadata = qp.validate_ticker("TEST")
+            metadata = market_data.validate_ticker("TEST")
 
         self.assertEqual(metadata.ticker, "TEST")
         self.assertEqual(metadata.instrument_type, "EQUITY")
@@ -501,10 +517,41 @@ class TestQuickenPricesPureData(unittest.TestCase):
             )
             for symbol in ("SECOND", "FIRST")
         }
-        with mock.patch.object(qp, "validate_ticker", side_effect=metadata.get):
-            validated = qp.validate_tickers(["SECOND", "FIRST"])
+        with mock.patch.object(
+            market_data,
+            "validate_ticker",
+            side_effect=lambda symbol, retry_settings=None: metadata.get(symbol),
+        ):
+            validated = market_data.validate_tickers(["SECOND", "FIRST"])
 
         self.assertEqual([ticker.ticker for ticker in validated], ["SECOND", "FIRST"])
+
+    def test_retry_uses_explicit_strict_policy(self):
+        attempts = []
+
+        @market_data.retry(exceptions=ValueError)
+        def flaky_operation():
+            attempts.append("attempt")
+            if len(attempts) == 1:
+                raise ValueError("transient")
+            return "ok"
+
+        retry_settings = {
+            "max_retries": 2,
+            "retry_delay": 0.25,
+            "backoff": 2.0,
+        }
+        with (
+            mock.patch.object(market_data.time, "sleep") as sleep,
+            self.assertLogs(level="WARNING") as captured,
+        ):
+            self.assertEqual(flaky_operation(retry_settings=retry_settings), "ok")
+
+        self.assertEqual(len(attempts), 2)
+        sleep.assert_called_once_with(0.25)
+        self.assertIn("Attempt 1/2 failed", captured.output[0])
+        with self.assertRaises(ValidationError):
+            flaky_operation(retry_settings={**retry_settings, "max_retries": "2"})
 
     def test_save_to_csv_is_repeatable_and_surfaces_write_errors(self):
         data = pd.DataFrame(
@@ -567,11 +614,10 @@ class TestQuickenPricesPureData(unittest.TestCase):
 
     def test_startup_self_check_does_not_touch_user_cache(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            config = qp.DEFAULT_CONFIG.copy()
-            config["paths"] = {**qp.DEFAULT_CONFIG["paths"], "base": temp_dir}
+            config = AppSettings(paths={"base": temp_dir}).model_dump()
             config["collection_period_years"] = 0.1
 
-            self.assertTrue(qp.run_startup_self_check(config))
+            qp.run_startup_self_check(config)
             self.assertFalse((Path(temp_dir) / "cache").exists())
 
 
