@@ -34,6 +34,23 @@ CONVERSION_SCENARIO = (
 )
 
 
+def conversion_row(
+    ticker: str,
+    price: float,
+    date: str,
+    row_type: str = "EQUITY",
+    currency: str = "USD",
+) -> dict:
+    """One conversion input row; provider dates arrive UTC-normalized."""
+    return {
+        "Ticker": ticker,
+        "Old Price": price,
+        "Date": pd.Timestamp(date, tz="UTC"),
+        "Type": row_type,
+        "Original Currency": currency,
+    }
+
+
 class TestQuickenPricesPureData(unittest.TestCase):
     def test_load_configuration_applies_model_defaults_without_writing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -289,6 +306,84 @@ class TestQuickenPricesPureData(unittest.TestCase):
                 "Date": pd.Timestamp("2026-01-02", tz="UTC"),
             }
         ])
+
+    def test_convert_prices_keeps_the_first_of_duplicate_fx_rates(self):
+        data = pd.DataFrame(
+            [
+                conversion_row("AAPL", 100.0, "2026-01-02"),
+                conversion_row("USDGBP=X", 0.8, "2026-01-02", "CURRENCY"),
+                conversion_row("USDGBP=X", 0.9, "2026-01-02", "CURRENCY"),
+            ]
+        )
+
+        with self.assertLogs(level="WARNING") as captured:
+            converted = processing.convert_prices(data)
+
+        self.assertIn("Duplicate FX rows", captured.output[0])
+        self.assertEqual(
+            converted.loc[converted["Ticker"] == "AAPL", "Price"].iloc[0], 80.0
+        )
+
+    def test_convert_prices_warns_when_the_fx_rate_is_stale(self):
+        data = pd.DataFrame(
+            [
+                conversion_row("AAPL", 100.0, "2026-01-20"),
+                conversion_row("USDGBP=X", 0.8, "2026-01-02", "CURRENCY"),
+            ]
+        )
+
+        with self.assertLogs(level="WARNING") as captured:
+            converted = processing.convert_prices(data)
+
+        self.assertIn("more than 7 days old", captured.output[0])
+        self.assertIn("oldest 18 days", captured.output[0])
+        self.assertEqual(
+            converted.loc[converted["Ticker"] == "AAPL", "Price"].iloc[0], 80.0
+        )
+
+    def test_convert_prices_accepts_a_weekend_gap_without_warning(self):
+        data = pd.DataFrame(
+            [
+                conversion_row("AAPL", 100.0, "2026-01-05"),
+                conversion_row("USDGBP=X", 0.8, "2026-01-02", "CURRENCY"),
+            ]
+        )
+
+        with self.assertNoLogs(level="WARNING"):
+            converted = processing.convert_prices(data)
+
+        self.assertEqual(
+            converted.loc[converted["Ticker"] == "AAPL", "Price"].iloc[0], 80.0
+        )
+
+    def test_convert_prices_reports_a_currency_with_no_fx_series(self):
+        data = pd.DataFrame(
+            [
+                conversion_row("AAPL", 100.0, "2026-01-02"),
+                # The inverse quote is present but is not a USD rate.
+                conversion_row("GBP=X", 1.27, "2026-01-02", "CURRENCY", "GBP"),
+            ]
+        )
+
+        with self.assertLogs(level="WARNING") as captured:
+            with self.assertRaisesRegex(ValueError, "no FX rate on or before"):
+                processing.convert_prices(data)
+
+        self.assertIn("No USDGBP=X rates", captured.output[0])
+
+    def test_convert_prices_uses_the_pair_for_a_non_gbp_home_currency(self):
+        data = pd.DataFrame(
+            [
+                conversion_row("VOD.L", 200.0, "2026-01-02", currency="GBP"),
+                conversion_row("GBPUSD=X", 1.25, "2026-01-02", "CURRENCY", "GBP"),
+            ]
+        )
+
+        converted = processing.convert_prices(data, home_currency="USD")
+
+        self.assertEqual(
+            converted.loc[converted["Ticker"] == "VOD.L", "Price"].iloc[0], 250.0
+        )
 
     def test_cache_helpers_round_trip(self):
         sample = pd.DataFrame(

@@ -9,6 +9,11 @@ from common import native_currencies, pluralise
 PRICE_COLUMNS = ("Ticker", "Price", "Date")
 CONVERSION_COLUMNS = ("Date", "Type", "Ticker", "Old Price", "Original Currency")
 
+# A backward as-of join carries the most recent known rate forward, so a rate
+# older than this means the FX series is stale or was never refreshed. A normal
+# weekend or public-holiday gap is 3-4 days, so 7 leaves genuine gaps alone.
+MAX_FX_RATE_AGE_DAYS = 7
+
 
 def _prepare_price_rows(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     if data.empty:
@@ -64,6 +69,16 @@ def _log_date_coverage(
 
 
 def _make_exchange_rates(fx_rows: pd.DataFrame) -> pd.DataFrame:
+    duplicate_keys = fx_rows.loc[
+        fx_rows.duplicated(subset=["Date", "Ticker"], keep=False), ["Date", "Ticker"]
+    ].drop_duplicates()
+    if not duplicate_keys.empty:
+        logging.warning(
+            "Duplicate FX rows for %s date/ticker pair(s); the first rate for "
+            "each day is used:\n%s",
+            len(duplicate_keys),
+            duplicate_keys.to_string(index=False),
+        )
     return (
         fx_rows.groupby(["Date", "Ticker"])["Old Price"]
         .first()
@@ -84,7 +99,7 @@ def _attach_historical_fx_rates(
     native = native_currencies(home_currency)
     non_home_mask = ~currencies.isin(native)
     equity_rows.loc[non_home_mask, "FX Ticker"] = (
-        currencies[non_home_mask] + "GBP=X"
+        currencies[non_home_mask] + f"{home_currency}=X"
     )
     equity_rows["FX Ticker"] = equity_rows["FX Ticker"].astype(str)
 
@@ -92,13 +107,29 @@ def _attach_historical_fx_rates(
     merged_groups = []
     for fx_ticker, equity_group in equity_rows.groupby("FX Ticker", sort=False):
         equity_group = equity_group.sort_values("Date").copy()
-        fx_group = exchange_rates.loc[
-            exchange_rates["FX Ticker"] == fx_ticker, ["Date", "FX Rate"]
-        ].sort_values("Date")
+        fx_group = (
+            exchange_rates.loc[
+                exchange_rates["FX Ticker"] == fx_ticker, ["Date", "FX Rate"]
+            ]
+            .sort_values("Date")
+            .copy()
+        )
 
         if fx_group.empty:
             equity_group["FX Rate"] = pd.NA
+            equity_group["FX Rate Date"] = pd.Series(
+                pd.NaT, index=equity_group.index, dtype="datetime64[ns, UTC]"
+            )
+            if fx_ticker != "-":
+                logging.warning(
+                    "No %s rates in the downloaded data; %s row(s) in %s "
+                    "cannot be converted.",
+                    fx_ticker,
+                    len(equity_group),
+                    ", ".join(sorted(set(equity_group["Original Currency"]))),
+                )
         else:
+            fx_group["FX Rate Date"] = fx_group["Date"]
             equity_group = pd.merge_asof(
                 equity_group,
                 fx_group,
@@ -112,6 +143,34 @@ def _attach_historical_fx_rates(
         .sort_values("_row_order")
         .drop(columns="_row_order")
         .reset_index(drop=True)
+    )
+
+
+def _warn_about_stale_fx_rates(
+    equity_rows: pd.DataFrame, non_home_mask: pd.Series
+) -> None:
+    """Report conversions that leaned on a rate older than the ceiling.
+
+    The rate is still applied: a long market closure is not a data error. A rate
+    this old usually means the FX series was never refreshed, which would
+    otherwise be visible only as a slightly wrong price.
+    """
+    converted = equity_rows[non_home_mask & equity_rows["FX Rate Date"].notna()]
+    if converted.empty:
+        return
+
+    ages = (converted["Date"] - converted["FX Rate Date"]).dt.days
+    stale = ages[ages > MAX_FX_RATE_AGE_DAYS]
+    if stale.empty:
+        return
+
+    logging.warning(
+        "%s equity row(s) converted with a rate more than %s days old "
+        "(oldest %s days) using %s.",
+        len(stale),
+        MAX_FX_RATE_AGE_DAYS,
+        int(stale.max()),
+        ", ".join(sorted(set(converted.loc[stale.index, "FX Ticker"]))),
     )
 
 
@@ -136,6 +195,8 @@ def _convert_equity_prices(
             f"{len(missing_rows)} equity rows have no FX rate on or before "
             "their price date."
         )
+
+    _warn_about_stale_fx_rates(equity_rows, non_home_mask)
 
     equity_rows["Price"] = equity_rows["Old Price"] * equity_rows["FX Rate"]
     converted_count = int((equity_rows["FX Ticker"] != "-").sum())
@@ -170,6 +231,13 @@ def convert_prices(df: pd.DataFrame, home_currency: str = "GBP") -> pd.DataFrame
 
     Input rows must contain ``Date``, ``Type``, ``Ticker``, ``Old Price``, and
     ``Original Currency``. FX tickers are emitted unchanged alongside equities.
+
+    Policy: a non-home currency is looked up as ``<CURRENCY><HOME>=X``, whose
+    quote is home-currency units per unit of the foreign currency, matched to
+    the price date or the closest earlier rate. A same-day rate wins over an
+    earlier one, a future rate is never used, and a currency with no series at
+    all fails the run. Duplicate rates for one day keep the first. A rate older
+    than ``MAX_FX_RATE_AGE_DAYS`` is applied but warned about.
     """
     if df.empty:
         logging.warning("Empty DataFrame received for conversion.")

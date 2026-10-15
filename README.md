@@ -56,8 +56,15 @@ as potentially sensitive when sharing the repository.
   replace atomically. Expiry cleanup only removes CSV caches. Legacy pickle
   caches are intentionally not read.
 - Cache results are limited to the requested date range. FX data retains one
-  prior rate as conversion context; conversion uses only a same-day or earlier
-  rate and fails if no historical rate exists.
+  prior rate as conversion context.
+- FX conversion looks the rate up as `<CURRENCY><HOME>=X` — home-currency units
+  per unit of the foreign currency — matched to the price date or the closest
+  earlier rate. A same-day rate is preferred and a future rate is never used. A
+  currency with no series at all is named in a warning and fails the run, so a
+  missing series is never mistaken for a flat price. Duplicate rates for one day
+  keep the first and are logged. A rate more than `MAX_FX_RATE_AGE_DAYS` (7) days
+  old is still applied but logged as a warning: a long market closure is not a
+  data error, a stale series usually is.
 - `data.csv` is written without a header using Quicken's `DD/MM/YYYY` date
   format. A failed fetch, conversion, validation, or write is not reported as
   success.
