@@ -842,6 +842,115 @@ class TestQuickenPricesPureData(unittest.TestCase):
         self.assertEqual(result["Old Price"].tolist(), [12.5])
         self.assertIn("Discarded 1 malformed download rows", captured.output[0])
 
+    def test_download_data_returns_empty_when_the_provider_has_no_rows(self):
+        ticker = mock.Mock()
+        ticker.history.return_value = pd.DataFrame()
+
+        with (
+            mock.patch.object(market_data.yf, "Ticker", return_value=ticker),
+            self.assertLogs(level="ERROR") as captured,
+        ):
+            result = market_data.download_data(
+                "TEST",
+                pd.Timestamp("2026-01-01", tz="UTC"),
+                pd.Timestamp("2026-01-03", tz="UTC"),
+            )
+
+        self.assertTrue(result.empty)
+        self.assertIn("No data from", captured.output[0])
+
+    def test_download_data_treats_a_missing_frame_as_no_data(self):
+        ticker = mock.Mock()
+        ticker.history.return_value = None
+
+        with (
+            mock.patch.object(market_data.yf, "Ticker", return_value=ticker),
+            self.assertLogs(level="ERROR") as captured,
+        ):
+            result = market_data.download_data(
+                "TEST",
+                pd.Timestamp("2026-01-01", tz="UTC"),
+                pd.Timestamp("2026-01-03", tz="UTC"),
+            )
+
+        self.assertTrue(result.empty)
+        self.assertIn("No data from", captured.output[0])
+
+    def test_download_data_reports_when_every_row_is_unusable(self):
+        ticker = mock.Mock()
+        ticker.history.return_value = pd.DataFrame(
+            {"Close": ["not-a-price"]},
+            index=pd.Index(["not-a-date"], name="Date"),
+        )
+
+        with (
+            mock.patch.object(market_data.yf, "Ticker", return_value=ticker),
+            self.assertLogs(level="ERROR") as captured,
+        ):
+            result = market_data.download_data(
+                "TEST",
+                pd.Timestamp("2026-01-01", tz="UTC"),
+                pd.Timestamp("2026-01-03", tz="UTC"),
+            )
+
+        self.assertTrue(result.empty)
+        self.assertIn("no valid price rows", captured.output[0])
+
+    def test_download_data_keeps_the_cache_columns_from_reordered_output(self):
+        ticker = mock.Mock()
+        ticker.history.return_value = pd.DataFrame(
+            {
+                "Volume": [1000],
+                "Close": [12.5],
+                "Open": [11.0],
+            },
+            index=pd.DatetimeIndex(
+                [pd.Timestamp("2026-01-02", tz="UTC")], name="Date"
+            ),
+        )
+
+        with mock.patch.object(market_data.yf, "Ticker", return_value=ticker):
+            result = market_data.download_data(
+                "TEST",
+                pd.Timestamp("2026-01-01", tz="UTC"),
+                pd.Timestamp("2026-01-03", tz="UTC"),
+            )
+
+        self.assertEqual(tuple(result.columns), storage.CACHE_COLUMNS)
+        self.assertEqual(result["Old Price"].tolist(), [12.5])
+
+    def test_download_data_skips_the_provider_for_a_same_day_range(self):
+        today = pd.Timestamp.now(tz="UTC").normalize()
+        ticker = mock.Mock()
+
+        with mock.patch.object(market_data.yf, "Ticker", return_value=ticker):
+            result = market_data.download_data("TEST", today, today)
+
+        self.assertTrue(result.empty)
+        ticker.history.assert_not_called()
+
+    def test_download_data_retries_a_rate_limit_and_reports_exhaustion(self):
+        ticker = mock.Mock()
+        ticker.history.side_effect = market_data.yf.exceptions.YFRateLimitError()
+        retry_settings = {"max_retries": 2, "retry_delay": 0.25, "backoff": 2.0}
+
+        with (
+            mock.patch.object(market_data.yf, "Ticker", return_value=ticker),
+            mock.patch.object(market_data.time, "sleep") as sleep,
+            self.assertLogs(level="ERROR") as captured,
+        ):
+            with self.assertRaises(market_data.yf.exceptions.YFRateLimitError):
+                market_data.download_data(
+                    "TEST",
+                    pd.Timestamp("2026-01-01", tz="UTC"),
+                    pd.Timestamp("2026-01-03", tz="UTC"),
+                    retry_settings=retry_settings,
+                )
+
+        self.assertEqual(ticker.history.call_count, 2)
+        sleep.assert_called_once_with(0.25)
+        self.assertIn("Max attempts reached", captured.output[0])
+
     def test_validate_ticker_returns_strict_metadata_model(self):
         info = {
             "symbol": "TEST",
@@ -991,6 +1100,26 @@ class TestQuickenPricesPureData(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not transient"):
             invalid_operation(retry_settings=retry_settings)
         self.assertEqual(len(attempts), 1)
+
+    def test_retry_reports_exhaustion_after_the_configured_attempts(self):
+        attempts = []
+
+        @market_data.retry(exceptions=ValueError)
+        def always_fails():
+            attempts.append(1)
+            raise ValueError("still broken")
+
+        retry_settings = {"max_retries": 3, "retry_delay": 0.25, "backoff": 2.0}
+        with (
+            mock.patch.object(market_data.time, "sleep") as sleep,
+            self.assertLogs(level="ERROR") as captured,
+        ):
+            with self.assertRaisesRegex(ValueError, "still broken"):
+                always_fails(retry_settings=retry_settings)
+
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual([entry.args[0] for entry in sleep.call_args_list], [0.25, 0.5])
+        self.assertIn("Max attempts reached (3)", captured.output[0])
 
     def test_save_to_csv_is_repeatable_and_surfaces_write_errors(self):
         data = pd.DataFrame(

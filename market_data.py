@@ -18,10 +18,14 @@ from settings import AppSettings, RetrySettings
 from storage import CACHE_COLUMNS, load_cache, normalize_cache_data, save_cache
 
 PUBLIC_HOLIDAYS = {"01-01", "12-25", "12-26"}
+# Retrying is only worth it for failures that a second attempt can clear. A
+# rate limit belongs here: it is the one provider failure a scheduled run is
+# most likely to meet, and it clears on its own after a backoff.
 DEFAULT_TRANSIENT_EXCEPTIONS = (
     requests.exceptions.ConnectionError,
     requests.exceptions.Timeout,
     requests.exceptions.HTTPError,
+    yf.exceptions.YFRateLimitError,
 )
 
 
