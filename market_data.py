@@ -26,7 +26,9 @@ DEFAULT_TRANSIENT_EXCEPTIONS = (
 
 
 def retry(
-    exceptions: Union[Type[BaseException], Tuple[Type[BaseException], ...]] = Exception,
+    exceptions: Union[
+        Type[BaseException], Tuple[Type[BaseException], ...]
+    ] = DEFAULT_TRANSIENT_EXCEPTIONS,
 ):
     """
     Retry failures using explicit validated policy settings or model defaults.

@@ -858,6 +858,38 @@ class TestQuickenPricesPureData(unittest.TestCase):
         with self.assertRaises(ValidationError):
             flaky_operation(retry_settings={**retry_settings, "max_retries": "2"})
 
+    def test_retry_defaults_only_to_transient_provider_errors(self):
+        attempts = []
+
+        @market_data.retry()
+        def flaky_provider():
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise market_data.requests.exceptions.Timeout("temporary")
+            return "ok"
+
+        retry_settings = {"max_retries": 2, "retry_delay": 0, "backoff": 1.0}
+        with (
+            mock.patch.object(market_data.time, "sleep"),
+            self.assertLogs(level="WARNING"),
+        ):
+            self.assertEqual(
+                flaky_provider(retry_settings=retry_settings),
+                "ok",
+            )
+        self.assertEqual(len(attempts), 2)
+
+        attempts.clear()
+
+        @market_data.retry()
+        def invalid_operation():
+            attempts.append(1)
+            raise ValueError("not transient")
+
+        with self.assertRaisesRegex(ValueError, "not transient"):
+            invalid_operation(retry_settings=retry_settings)
+        self.assertEqual(len(attempts), 1)
+
     def test_save_to_csv_is_repeatable_and_surfaces_write_errors(self):
         data = pd.DataFrame(
             [
