@@ -45,6 +45,12 @@ all technical debt has been eliminated.
 - **Transient history request failures** — configured retry policy now applies
   to price downloads; the default retry decorator catches only network
   transient exceptions. (`b03723b`, `d800620`)
+- **Rate-limited provider responses were not retried** — `YFRateLimitError` was
+  missing from the default transient set, so the provider failure a scheduled
+  run is most likely to meet aborted the run on its first attempt while the
+  retry policy sat unused. The response edges around it are pinned too: empty,
+  missing, wholly unusable, reordered columns, the same-day guard, and retry
+  exhaustion. (`b54814b`)
 - **Malformed-row drops were silent** — download, cache normalization, and
   conversion emit warnings when invalid or duplicate rows are discarded.
   (`466c4e6`)
@@ -85,6 +91,11 @@ all technical debt has been eliminated.
 - **No automated gate** — a Windows CI workflow byte-compiles every module, runs
   the suite and lints on each push and pull request. `ruff.toml` pins the lint
   selection so the gate cannot drift with a Ruff release. (`bf248e1`)
+- **Environment-dependent test** — `test_main_propagates_failures` asserted a
+  configuration failure while depending on the checkout having a `.venv`, so it
+  could not fail on a clean checkout. It neutralizes the interpreter check now,
+  and the interpreter contract it depended on has its own test. Caught by the CI
+  gate on that gate's first run. (`fa8ea9b`)
 
 ## Remaining and deferred
 
@@ -106,9 +117,10 @@ all technical debt has been eliminated.
   No remaining function is over 80 lines. Decompose further only when
   behavioral tests establish a useful boundary.
 - **Test organization is still concentrated** in `test_quicken_prices.py`.
-  The 48 tests cover validation, retries, FX direction, cache safety,
-  idempotency, persistence, bounded results, and failure propagation, but
-  Windows UI success flows and several edge cases need dedicated coverage.
+  The 61 tests cover validation, retries, provider response edges, retry
+  exhaustion, FX policy, cache safety, idempotency, persistence, bounded
+  results, and failure propagation, but Windows UI success flows still need
+  dedicated coverage.
 - **No LLM task or evidence-classification subsystem exists in this
   repository.** LLM benchmark coverage and consolidation of evidence
   classification models are therefore not applicable to the audited code.
@@ -177,3 +189,7 @@ all technical debt has been eliminated.
   Ruff clean, compileall clean.
 - Stated and tested FX conversion policy — `bcf0c31`; 53 tests passed, Ruff
   clean, compileall clean.
+- Provider response edges and rate-limit retries — `b54814b`; 60 tests passed,
+  Ruff clean, compileall clean.
+- Hermetic `main()` test and the interpreter contract — `fa8ea9b`; 61 tests
+  passed, Ruff clean. The first CI run failed on the test this batch fixed.
