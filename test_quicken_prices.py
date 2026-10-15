@@ -158,6 +158,29 @@ class TestQuickenPricesPureData(unittest.TestCase):
         self.assertAlmostEqual(aapl_day_2, 86.9, places=6)
         self.assertAlmostEqual(vukg_price, 200.0, places=6)
 
+    def test_convert_prices_never_uses_a_future_fx_rate(self):
+        data = pd.DataFrame(
+            [
+                {
+                    "Ticker": "AAPL",
+                    "Old Price": 100.0,
+                    "Date": pd.Timestamp("2026-01-01", tz="UTC"),
+                    "Type": "EQUITY",
+                    "Original Currency": "USD",
+                },
+                {
+                    "Ticker": "USDGBP=X",
+                    "Old Price": 0.8,
+                    "Date": pd.Timestamp("2026-01-02", tz="UTC"),
+                    "Type": "CURRENCY",
+                    "Original Currency": "USD",
+                },
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "on or before"):
+            qp.convert_prices(data)
+
     def test_cache_helpers_round_trip(self):
         sample = pd.DataFrame(
             [

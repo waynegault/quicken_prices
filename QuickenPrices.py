@@ -1403,37 +1403,15 @@ def convert_prices(df: pd.DataFrame, home_currency: str = "GBP") -> pd.DataFrame
     if home_currency == "GBP":
         equity_df.loc[equity_df["Original Currency"] == "GBp", "FX Rate"] = 0.01
 
-    # 7) Handle missing FX rates more gracefully
+    # 7) Refuse to apply rates from future dates to earlier equity prices.
     missing_fx_mask = equity_df["FX Rate"].isna() & non_home_mask
     if missing_fx_mask.any():
         missing_rows = equity_df[missing_fx_mask]
-        logging.warning(f"The following rows have missing FX rates:\n{missing_rows}")
-
-        # Try to fill missing FX rates using forward-fill and backward-fill by FX Ticker
-        for ticker in missing_rows["FX Ticker"].unique():
-            ticker_mask = equity_df["FX Ticker"] == ticker
-            ticker_data = equity_df[ticker_mask].copy().sort_values("Date")
-
-            # Apply forward fill and backward fill to the FX Rate column
-            ticker_data["FX Rate"] = ticker_data["FX Rate"].ffill().bfill()
-
-            # Update the original dataframe
-            equity_df.loc[ticker_mask, "FX Rate"] = ticker_data["FX Rate"].values
-
-        # Check again for any remaining missing rates
-        remaining_missing = equity_df["FX Rate"].isna() & non_home_mask
-        if remaining_missing.any():
-            remaining_rows = equity_df[remaining_missing]
-            logging.error(
-                f"Could not resolve FX rates for the following rows:\n{remaining_rows}"
-            )
-            raise ValueError(
-                f"{remaining_missing.sum()} rows still have missing FX rates after forward/backward fill."
-            )
-        else:
-            logging.info(
-                "Successfully filled missing FX rates using forward/backward fill."
-            )
+        logging.error(f"Missing historical FX rates for equity rows:\n{missing_rows}")
+        raise ValueError(
+            f"{len(missing_rows)} equity rows have no FX rate on or before "
+            "their price date."
+        )
 
     # 8) Calculate final Price in the home currency
     equity_df["Price"] = equity_df["Old Price"] * equity_df["FX Rate"]

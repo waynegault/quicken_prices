@@ -12,11 +12,10 @@ is a defect or that all technical debt can be eliminated.
   and invalid writes raise explicit errors, and writes replace atomically.
   Legacy `.pkl` caches are intentionally not read. Higher-level fetch
   exception handling remains a separate unresolved finding below.
-- [ ] **Currency conversion can silently use future rates** —
-  `convert_prices` applies `.ffill().bfill()` to missing FX rates. Backfilling
-  can apply a later-known exchange rate to an earlier equity date, which is
-  financially misleading. Define and test the permitted rate direction and
-  fail on unresolved dates.
+- [x] **Currency conversion can silently use future rates** —
+  `convert_prices` no longer backfills; its backward as-of join uses a rate
+  only from the same or an earlier date, and missing prior rates raise a
+  descriptive error. A regression test verifies the future-rate case.
 - [ ] **Success-shaped fetch failures** — `download_data` catches every
   exception and returns an empty frame; `fetch_historical_data` also catches
   broadly and continues. Callers cannot distinguish no market data from API,
@@ -105,3 +104,7 @@ is a defect or that all technical debt can be eliminated.
   format and invalid file/data cases. `.\.venv\Scripts\python.exe -m unittest
   -v` — 17 tests passed; `.\.venv\Scripts\python.exe -m compileall -q
   QuickenPrices.py settings.py test_quicken_prices.py` — passed. Pending commit.
+- **FX rate direction** — removed the backward-fill of exchange rates and fail
+  when an equity price has no same-day-or-prior FX rate. Added a regression
+  test showing that a future quote is never applied. `.\.venv\Scripts\python.exe
+  -m unittest -v` — 18 tests passed. Pending commit.
