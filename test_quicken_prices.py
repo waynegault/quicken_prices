@@ -160,6 +160,13 @@ class TestQuickenPricesPureData(unittest.TestCase):
                     "Type": "ETF",
                     "Original Currency": "GBP",
                 },
+                {
+                    "Ticker": "PENCE.L",
+                    "Old Price": 12500.0,
+                    "Date": pd.Timestamp("2026-01-02", tz="UTC"),
+                    "Type": "EQUITY",
+                    "Original Currency": "GBp",
+                },
                 # USD -> GBP rate (GBP per USD): 100 USD * 0.8 = 80 GBP.
                 {
                     "Ticker": "USDGBP=X",
@@ -200,11 +207,48 @@ class TestQuickenPricesPureData(unittest.TestCase):
             (converted["Ticker"] == "VUKG.L")
             & (converted["Date"] == pd.Timestamp("2026-01-02", tz="UTC"))
         ]["Price"].iloc[0]
+        pence_price = converted[
+            (converted["Ticker"] == "PENCE.L")
+            & (converted["Date"] == pd.Timestamp("2026-01-02", tz="UTC"))
+        ]["Price"].iloc[0]
 
         # USD must be converted via USDGBP=X (0.8), never GBP=X (1.27).
         self.assertAlmostEqual(aapl_day_1, 80.0, places=6)
         self.assertAlmostEqual(aapl_day_2, 86.9, places=6)
         self.assertAlmostEqual(vukg_price, 200.0, places=6)
+        self.assertAlmostEqual(pence_price, 125.0, places=6)
+
+    def test_convert_prices_uses_latest_prior_fx_rate(self):
+        data = pd.DataFrame(
+            [
+                {
+                    "Ticker": "AAPL",
+                    "Old Price": 100.0,
+                    "Date": pd.Timestamp("2026-01-05", tz="UTC"),
+                    "Type": "EQUITY",
+                    "Original Currency": "USD",
+                },
+                {
+                    "Ticker": "USDGBP=X",
+                    "Old Price": 0.8,
+                    "Date": pd.Timestamp("2026-01-02", tz="UTC"),
+                    "Type": "CURRENCY",
+                    "Original Currency": "USD",
+                },
+                {
+                    "Ticker": "USDGBP=X",
+                    "Old Price": 0.9,
+                    "Date": pd.Timestamp("2026-01-06", tz="UTC"),
+                    "Type": "CURRENCY",
+                    "Original Currency": "USD",
+                },
+            ]
+        )
+
+        converted = processing.convert_prices(data)
+
+        aapl = converted.loc[converted["Ticker"] == "AAPL", "Price"].iloc[0]
+        self.assertEqual(aapl, 80.0)
 
     def test_convert_prices_never_uses_a_future_fx_rate(self):
         data = pd.DataFrame(
