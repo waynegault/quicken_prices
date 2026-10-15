@@ -10,6 +10,7 @@ from pydantic import ValidationError
 import quicken_prices as qp
 import price_processing as processing
 import market_data
+import quicken_automation
 import storage
 from market_models import TickerMetadata
 from settings import AppSettings
@@ -26,10 +27,10 @@ class TestQuickenPricesPureData(unittest.TestCase):
             ):
                 config = qp.load_configuration(str(config_path))
 
-            self.assertEqual(config["tickers"], ["TEST"])
-            self.assertEqual(config["retries"]["max_retries"], 3)
-            self.assertEqual(config["paths"]["base"], str(Path(qp.__file__).parent))
-            self.assertEqual(config["paths"]["quicken"], "")
+            self.assertEqual(config.tickers, ["TEST"])
+            self.assertEqual(config.retries.max_retries, 3)
+            self.assertEqual(config.paths.base, str(Path(qp.__file__).parent))
+            self.assertEqual(config.paths.quicken, "")
             self.assertTrue(config_path.is_file())
 
     def test_load_configuration_rejects_unknown_and_coerced_values(self):
@@ -65,6 +66,22 @@ class TestQuickenPricesPureData(unittest.TestCase):
             with self.assertRaisesRegex(ValidationError, "unique"):
                 qp.load_configuration(str(config_path))
 
+    def test_load_configuration_rejects_invalid_explicit_quicken_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "configuration.yaml"
+            config_path.write_text(
+                "tickers:\n  - TEST\npaths:\n  quicken: missing.exe\n",
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.object(qp, "validate_quicken_path") as detect_path,
+                self.assertRaisesRegex(FileNotFoundError, "Configured Quicken executable"),
+            ):
+                qp.load_configuration(str(config_path))
+
+            detect_path.assert_not_called()
+
     def test_missing_configuration_is_not_created(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "missing.yaml"
@@ -75,7 +92,10 @@ class TestQuickenPricesPureData(unittest.TestCase):
             self.assertFalse(config_path.exists())
 
     def test_get_date_range_returns_ordered_utc_dates(self):
-        config = {"collection_period_years": 0.1}
+        config = AppSettings(
+            paths={"base": "."},
+            collection_period_years=0.1,
+        )
         start_date, end_date = market_data.get_date_range(config)
 
         self.assertLess(start_date, end_date)
@@ -506,6 +526,30 @@ class TestQuickenPricesPureData(unittest.TestCase):
                 current_price="42.5",
             )
 
+    def test_validate_ticker_retries_yahoo_invalid_json_response(self):
+        info = {
+            "symbol": "TEST",
+            "quoteType": "EQUITY",
+            "currency": "USD",
+            "bid": 42.5,
+        }
+        retry_settings = {"max_retries": 2, "retry_delay": 0, "backoff": 1.0}
+        with (
+            mock.patch.object(market_data.yf, "Ticker") as ticker_factory,
+            mock.patch.object(market_data.time, "sleep"),
+            self.assertLogs(level="WARNING") as captured,
+        ):
+            ticker_factory.return_value.get_info.side_effect = [
+                ValueError("Expecting value: line 1 column 1"),
+                info,
+            ]
+            metadata = market_data.validate_ticker(
+                "TEST", retry_settings=retry_settings
+            )
+
+        self.assertEqual(metadata.ticker, "TEST")
+        self.assertIn("Attempt 1/2 failed", captured.output[0])
+
     def test_validate_tickers_preserves_configured_order(self):
         metadata = {
             symbol: TickerMetadata(
@@ -562,7 +606,9 @@ class TestQuickenPricesPureData(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            config = {"paths": {"base": temp_dir, "data_file": "data.csv"}}
+            config = AppSettings(
+                paths={"base": temp_dir, "data_file": "data.csv"}
+            )
             storage.save_to_csv(data, config)
             output_path = Path(temp_dir) / "data.csv"
             original_output = output_path.read_bytes()
@@ -586,10 +632,10 @@ class TestQuickenPricesPureData(unittest.TestCase):
             expired_file.write_text("old", encoding="utf-8")
             recent_file.write_text("new", encoding="utf-8")
             os.utime(expired_file, (0, 0))
-            config = {
-                "paths": {"base": temp_dir, "cache": "cache"},
-                "cache": {"max_age_days": 1},
-            }
+            config = AppSettings(
+                paths={"base": temp_dir, "cache": "cache"},
+                cache={"max_age_days": 1},
+            )
 
             storage.clean_cache(config)
 
@@ -614,11 +660,47 @@ class TestQuickenPricesPureData(unittest.TestCase):
 
     def test_startup_self_check_does_not_touch_user_cache(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            config = AppSettings(paths={"base": temp_dir}).model_dump()
-            config["collection_period_years"] = 0.1
+            config = AppSettings(
+                paths={"base": temp_dir},
+                collection_period_years=0.1,
+            )
 
             qp.run_startup_self_check(config)
             self.assertFalse((Path(temp_dir) / "cache").exists())
+
+    def test_quicken_session_closes_only_its_owned_process(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        session = quicken_automation.QuickenSession(process=process)
+
+        self.assertTrue(quicken_automation.close_quicken(session))
+
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=10)
+        process.kill.assert_not_called()
+        self.assertIsNone(session.process)
+
+    def test_quicken_session_leaves_existing_user_process_open(self):
+        session = quicken_automation.QuickenSession()
+
+        self.assertTrue(quicken_automation.close_quicken(session))
+
+    def test_execute_import_sequence_uses_uniform_steps_and_surfaces_failures(self):
+        config = AppSettings(paths={"base": "."})
+        session = quicken_automation.QuickenSession()
+        with (
+            mock.patch.object(quicken_automation, "open_quicken", return_value=True) as open_app,
+            mock.patch.object(quicken_automation, "navigate_to_portfolio", return_value=True) as navigate,
+            mock.patch.object(quicken_automation, "open_import_dialog", return_value=False) as open_dialog,
+            mock.patch.object(quicken_automation, "import_data_file", return_value=True) as import_file,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Opening import dialog"):
+                quicken_automation.execute_import_sequence(config, session)
+
+        open_app.assert_called_once_with(config, session)
+        navigate.assert_called_once_with()
+        open_dialog.assert_called_once_with()
+        import_file.assert_not_called()
 
 
 if __name__ == "__main__":

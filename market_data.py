@@ -14,7 +14,7 @@ import yfinance as yf
 
 from common import native_currencies, pluralise
 from market_models import TickerMetadata
-from settings import RetrySettings
+from settings import AppSettings, RetrySettings
 from storage import CACHE_COLUMNS, load_cache, normalize_cache_data, save_cache
 
 PUBLIC_HOLIDAYS = {"01-01", "12-25", "12-26"}
@@ -99,25 +99,17 @@ def adjust_date(date: pd.Timestamp, direction: str) -> pd.Timestamp:
 
     return date.floor("D")  # Normalize to remove time component
 
-def get_date_range(config: dict) -> Tuple[pd.Timestamp, pd.Timestamp]:
+def get_date_range(config: AppSettings) -> Tuple[pd.Timestamp, pd.Timestamp]:
     """
     Calculates start and end dates, avoiding weekends and public holidays.
 
     Args:
-        config (dict): Configuration containing 'collection_period_years'.
+        config: Strictly validated application settings.
 
     Returns:
         Tuple[pd.Timestamp, pd.Timestamp]: The adjusted start and end dates, localized to UTC.
     """
-    if "collection_period_years" not in config:
-        raise KeyError("Config is missing 'collection_period_years' key.")
-
-    collection_period_years = config["collection_period_years"]
-    if (
-        not isinstance(collection_period_years, (int, float))
-        or collection_period_years <= 0
-    ):
-        raise ValueError("'collection_period_years' must be a positive number.")
+    collection_period_years = config.collection_period_years
 
     # Calculate the number of days in the collection period
     collection_period_days = int(round(collection_period_years * 365.25))
@@ -299,7 +291,14 @@ def validate_ticker(
 
     # Let yfinance handle its own session (no longer accepts custom sessions).
     ticker = yf.Ticker(ticker_symbol)
-    info = ticker.get_info()
+    try:
+        info = ticker.get_info()
+    except ValueError as error:
+        if "Expecting value" not in str(error):
+            raise
+        raise requests.exceptions.HTTPError(
+            f"Yahoo Finance returned an invalid response for {ticker_symbol}."
+        ) from error
 
     if not info or info.get("symbol") is None:
         logging.error(
@@ -344,8 +343,7 @@ def fetch_historical_data(
     and caching logic (handled in fetch_ticker_data).
 
     Args:
-        tickers: A list of tuples containing:
-            (ticker_symbol, earliest_date, ticker_type, currency, current_price).
+        tickers: Validated ticker metadata.
         start_date: Start of the requested data period (inclusive).
         end_date: End of the requested data period (inclusive).
         cache_dir: Directory used for per-ticker cache files.

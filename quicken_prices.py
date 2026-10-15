@@ -26,7 +26,7 @@ import sys
 import tempfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import List
 
 # Third-Party Data and Scientific Computing Imports
 import pandas as pd
@@ -49,9 +49,7 @@ from storage import (
     save_to_csv,
 )
 from quicken_automation import (
-    close_quicken,
     ensure_project_python,
-    is_elevated,
     quicken_import,
     run_as_admin,
     setup_pyautogui,
@@ -64,7 +62,7 @@ from quicken_automation import (
 # Configuration ###############################
 
 
-def load_configuration(config_file: str = "configuration.yaml") -> Dict[str, Any]:
+def load_configuration(config_file: str = "configuration.yaml") -> AppSettings:
     """
     Load strict YAML settings, filling only model-defined defaults.
     """
@@ -88,37 +86,40 @@ def load_configuration(config_file: str = "configuration.yaml") -> Dict[str, Any
         **raw_paths,
         "base": raw_paths.get("base", str(base_path)),
     }
-    final_config = AppSettings.model_validate(user_config).model_dump()
+    settings = AppSettings.model_validate(user_config)
 
     # Validate Quicken path, but honour an explicit configuration override.
-    configured_quicken_path = final_config.get("paths", {}).get("quicken")
+    configured_quicken_path = settings.paths.quicken
     if configured_quicken_path:
         configured_quicken_path = os.path.expanduser(
             os.path.expandvars(configured_quicken_path)
         )
 
-    quicken_path = None
-    if configured_quicken_path and Path(configured_quicken_path).is_file():
+    if configured_quicken_path:
+        if not Path(configured_quicken_path).is_file():
+            raise FileNotFoundError(
+                f"Configured Quicken executable was not found: {configured_quicken_path}"
+            )
         quicken_path = configured_quicken_path
         logging.info(f"Using Quicken path from configuration: {quicken_path}")
     else:
-        if configured_quicken_path:
-            logging.warning(
-                f"Configured Quicken path was not found: {configured_quicken_path}. Falling back to auto-detection."
-            )
         quicken_path = validate_quicken_path()
 
     if quicken_path:
-        final_config["paths"]["quicken"] = quicken_path
         logging.info(f"Using Quicken at: {quicken_path}")
     else:
-        final_config["paths"]["quicken"] = ""
         logging.warning(
             "Quicken executable not found. CSV generation will continue, but GUI import automation is unavailable."
         )
 
-    # Validate tickers
-    return final_config
+    resolved_settings = settings.model_copy(
+        update={
+            "paths": settings.paths.model_copy(
+                update={"quicken": quicken_path or ""}
+            )
+        }
+    )
+    return AppSettings.model_validate(resolved_settings.model_dump())
 
 
 
@@ -134,23 +135,23 @@ def load_configuration(config_file: str = "configuration.yaml") -> Dict[str, Any
 
 
 
-def setup_logging(config: Dict[str, Any]) -> None:
+def setup_logging(config: AppSettings) -> None:
     """
     Sets up logging configuration.
     """
 
-    base_path = Path(config["paths"]["base"])
-    file_log_level = config["logging_level"]["file"].upper()
-    terminal_log_level = config["logging_level"]["terminal"].upper()
+    base_path = Path(config.paths.base)
+    file_log_level = config.logging_level.file
+    terminal_log_level = config.logging_level.terminal
 
-    log_file_path = base_path / config["paths"]["log_file"]
+    log_file_path = base_path / config.paths.log_file
     log_file_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Create a rotating file handler with a simpler format for readability
     file_handler = RotatingFileHandler(
         log_file_path,
-        maxBytes=config["log_file"]["max_bytes"],
-        backupCount=config["log_file"]["backup_count"],
+        maxBytes=config.log_file.max_bytes,
+        backupCount=config.log_file.backup_count,
         encoding="utf-8",
     )
     file_handler.setLevel(getattr(logging, file_log_level))
@@ -175,7 +176,7 @@ def setup_logging(config: Dict[str, Any]) -> None:
     logging.info(f"Log at: {log_file_path}")
 
 
-def run_startup_self_check(config: Dict[str, Any]) -> None:
+def run_startup_self_check(config: AppSettings) -> None:
     """
     Run deterministic date and cache checks without touching user data.
     """
@@ -325,21 +326,21 @@ def main():
             return
 
         # 4) Read ticker config from your YAML
-        tickers = config["tickers"]
+        tickers = config.tickers
 
         # 5) Validate and acquire ticker metadata
-        home_currency = config.get("home_currency", "GBP")
+        home_currency = config.home_currency
         valid_tickers: List[TickerMetadata] = get_tickers(
             tickers,
             home_currency=home_currency,
-            retry_settings=config["retries"],
+            retry_settings=config.retries.model_dump(),
         )
 
         # 6) Fetch historical data
 
         # Retrieve date range and cache_dir from config
         start_date, end_date = get_date_range(config)
-        cache_dir = Path(config["paths"]["base"]) / config["paths"]["cache"]
+        cache_dir = Path(config.paths.base) / config.paths.cache
         price_data = fetch_historical_data(
             valid_tickers, start_date, end_date, cache_dir
         )
@@ -373,10 +374,6 @@ def main():
 
         # End
         logging.info("Script completed successfully")
-
-        # Close Quicken if needed, but always keep the terminal open for review
-        if is_elevated():
-            close_quicken()
 
     except KeyboardInterrupt:
         logging.warning("Script interrupted by user.")

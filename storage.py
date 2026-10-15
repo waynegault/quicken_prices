@@ -4,11 +4,12 @@ import logging
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Tuple
 
 import pandas as pd
 
 from common import format_path, pluralise
+from settings import AppSettings
 
 SECONDS_IN_A_DAY = 86400
 CACHE_COLUMNS = ("Ticker", "Old Price", "Date")
@@ -121,7 +122,7 @@ def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
     )
 
 
-def clean_cache(config: Dict[str, Any]) -> None:
+def clean_cache(config: AppSettings) -> None:
     """
     Cleans up cache files older than the configured maximum age.
 
@@ -130,8 +131,8 @@ def clean_cache(config: Dict[str, Any]) -> None:
 
     """
 
-    cache_dir = Path(config["paths"]["base"]) / config["paths"]["cache"]
-    max_age_seconds = config["cache"]["max_age_days"] * SECONDS_IN_A_DAY
+    cache_dir = Path(config.paths.base) / config.paths.cache
+    max_age_seconds = config.cache.max_age_days * SECONDS_IN_A_DAY
     now = time.time()
 
     if not cache_dir.is_dir():
@@ -145,8 +146,8 @@ def clean_cache(config: Dict[str, Any]) -> None:
             deleted_files += 1
             logging.info(
                 f"Cache cleaning: {entry.name} deleted. Older than "
-                f"{config['cache']['max_age_days']} "
-                f"{pluralise('day', config['cache']['max_age_days'])}"
+                f"{config.cache.max_age_days} "
+                f"{pluralise('day', config.cache.max_age_days)}"
             )
 
     logging.info(
@@ -154,7 +155,7 @@ def clean_cache(config: Dict[str, Any]) -> None:
     )
 
 
-def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> None:
+def save_to_csv(df: pd.DataFrame, config: AppSettings) -> None:
     """
     Saves the DataFrame to a CSV file without headers.
 
@@ -164,7 +165,7 @@ def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> None:
 
     """
 
-    file_path = Path(config["paths"]["base"]) / config["paths"]["data_file"]
+    file_path = Path(config.paths.base) / config.paths.data_file
     if df.empty:
         raise ValueError("No data to save.")
     required_columns = ["Ticker", "Price", "Date"]

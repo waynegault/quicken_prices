@@ -1,24 +1,63 @@
 """Windows-only Quicken discovery and GUI automation."""
 
+from __future__ import annotations
+
 import ctypes
 import logging
 import os
 import subprocess
 import sys
 import time
+import traceback
 import winreg
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Optional
 
 import pandas as pd
 import pyautogui
 import pygetwindow as gw
 
 from common import format_path
+from settings import AppSettings
 
 QUICKEN_SESSION_STARTED = False
 QUICKEN_MAIN_WINDOW_TITLE = "Quicken XG 2004"
 QUICKEN_PORTFOLIO_WINDOW_TITLE = "Quicken XG 2004 - Home - [Investing Centre]"
 QUICKEN_IMPORT_DIALOG_TITLE = "Import Price Data"
+
+
+@dataclass
+class QuickenSession:
+    """Own only a Quicken process started by this application."""
+
+    process: Optional[subprocess.Popen] = None
+
+    def close(self) -> bool:
+        if self.process is None:
+            logging.info("Leaving existing Quicken session open.")
+            return True
+
+        process = self.process
+        self.process = None
+        if process.poll() is not None:
+            logging.info("Quicken process already exited.")
+            return True
+
+        try:
+            logging.info("Closing Quicken process started by this application...")
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                logging.warning("Quicken did not close; terminating its process.")
+                process.kill()
+                process.wait()
+            logging.info("Quicken closed successfully.")
+            return True
+        except OSError:
+            logging.exception("Failed to close Quicken process.")
+            raise
 
 
 def validate_quicken_path() -> Optional[str]:
@@ -144,11 +183,11 @@ def is_elevated():
 
     return bool(ctypes.windll.shell32.IsUserAnAdmin())
 
-def import_data_file(config):
+def import_data_file(config: AppSettings) -> bool:
 
     try:
-        output_file_name = config["paths"]["data_file"]
-        base_path = config["paths"]["base"]
+        output_file_name = config.paths.data_file
+        base_path = config.paths.base
         filename = str(Path(base_path) / output_file_name)
 
         if not activate_window_by_title(QUICKEN_IMPORT_DIALOG_TITLE, timeout=5):
@@ -230,13 +269,9 @@ def navigate_to_portfolio():
         logging.debug("Full traceback:\n%s", traceback.format_exc())
         return False
 
-def open_quicken(config):
-    """
-    Opens the Quicken application, reusing an existing window when available.
-    """
-    global QUICKEN_SESSION_STARTED
-
-    quicken_path = config["paths"].get("quicken", "")
+def open_quicken(config: AppSettings, session: QuickenSession) -> bool:
+    """Open Quicken and record ownership only for a process launched here."""
+    quicken_path = config.paths.quicken
     try:
         if not quicken_path or not Path(quicken_path).is_file():
             logging.error(f"Quicken executable not found: {quicken_path}")
@@ -246,20 +281,19 @@ def open_quicken(config):
         if windows:
             activate_window_by_title(QUICKEN_MAIN_WINDOW_TITLE, timeout=1)
             logging.info("Quicken is already open.")
-            QUICKEN_SESSION_STARTED = False
             return True
 
         logging.info("Launching Quicken...")
-        process = subprocess.Popen([quicken_path], shell=False)
-        if process.poll() is not None:
+        session.process = subprocess.Popen([quicken_path], shell=False)
+        if session.process.poll() is not None:
             logging.error("Failed to start Quicken process.")
+            session.process = None
             return False
 
         start_time = time.time()
         while time.time() - start_time < 30:
             if activate_window_by_title(QUICKEN_MAIN_WINDOW_TITLE, timeout=0.5):
                 logging.info("Quicken window found.")
-                QUICKEN_SESSION_STARTED = True
                 return True
             time.sleep(0.5)
 
@@ -270,31 +304,9 @@ def open_quicken(config):
         logging.debug("Full traceback:\n%s", traceback.format_exc())
         return False
 
-def close_quicken():
-    """
-    Closes Quicken only when this script launched it.
-    """
-    global QUICKEN_SESSION_STARTED
-
-    if not QUICKEN_SESSION_STARTED:
-        logging.info("Leaving existing Quicken session open.")
-        return True
-
-    try:
-        logging.info("Closing Quicken...")
-        subprocess.run(
-            ["taskkill", "/F", "/IM", "qw.exe"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        time.sleep(1)
-        QUICKEN_SESSION_STARTED = False
-        logging.info("Quicken closed successfully.")
-        return True
-    except Exception as e:
-        logging.error(f"An error occurred while closing Quicken: {e}")
-        return False
+def close_quicken(session: QuickenSession) -> bool:
+    """Close only the Quicken process owned by the supplied session."""
+    return session.close()
 
 def activate_window_by_title(window_title: str, timeout: float = 5.0) -> bool:
     """
@@ -317,7 +329,7 @@ def activate_window_by_title(window_title: str, timeout: float = 5.0) -> bool:
         time.sleep(0.2)
     return False
 
-def execute_import_sequence(config):
+def execute_import_sequence(config: AppSettings, session: QuickenSession) -> bool:
     """
     Execute the sequence of steps for importing data.
 
@@ -325,32 +337,22 @@ def execute_import_sequence(config):
         bool: True if all steps completed successfully
     """
 
-    steps = [
-        (open_quicken, "Opening Quicken"),
-        (navigate_to_portfolio, "Navigating to Portfolio view"),
-        (open_import_dialog, "Opening import dialog"),
-        (import_data_file, "Importing data file"),
+    steps: list[tuple[str, Callable[[], bool]]] = [
+        ("Opening Quicken", lambda: open_quicken(config, session)),
+        ("Navigating to Portfolio view", navigate_to_portfolio),
+        ("Opening import dialog", open_import_dialog),
+        ("Importing data file", lambda: import_data_file(config)),
     ]
 
-    for step_function, message in steps:
+    for message, step in steps:
         logging.info(f"Starting step: {message}")
         try:
-            # Call the step function with necessary arguments if applicable
-            if step_function == import_data_file:
-                result = step_function(config)
-            elif step_function == open_quicken:
-                result = step_function(config)
-            else:
-                result = step_function()
-
-            if not result:
-                logging.error(f"Step '{message}' failed.")
-                return False
-
-            logging.info(f"Step '{message}' completed successfully.")
-        except Exception as e:
-            logging.error(f"Error in step '{message}': {e}")
-            return False
+            result = step()
+        except Exception as error:
+            raise RuntimeError(f"Quicken import failed during: {message}.") from error
+        if not result:
+            raise RuntimeError(f"Quicken import failed during: {message}.")
+        logging.info(f"Step '{message}' completed successfully.")
 
     logging.info("All steps completed successfully.")
     return True
@@ -363,7 +365,7 @@ def setup_pyautogui():
     pyautogui.FAILSAFE = True  # Abort ongoing automation by moving mouse to the top-left corner of screen.
     pyautogui.PAUSE = 0.3  # Delay between actions
 
-def quicken_import(config):
+def quicken_import(config: AppSettings) -> bool:
     """
     Automates the process of importing data into Quicken.
 
@@ -376,19 +378,18 @@ def quicken_import(config):
 
     logging.info("\nImport to Quicken 2004")
 
-    try:
-        if is_elevated():
-            return execute_import_sequence(config)
-        else:
-            file_path = Path(config["paths"]["base"]) / config["paths"]["data_file"]
-            short_CSV_path = format_path(file_path)
-            logging.info("Quicken cannot be opened from here.\n")
-            logging.info("Instead:")
-            logging.info("1. Close this window.")
-            logging.info("2. Click the Quicken 'Update Prices' shortcut.")
-            logging.info(f"3. If needed, import {short_CSV_path} manually.")
-            return False
-    except Exception as e:
-        logging.error(f"Error during Quicken import: {e}")
-        logging.debug("Full traceback:\n%s", traceback.format_exc())
+    if not is_elevated():
+        file_path = Path(config.paths.base) / config.paths.data_file
+        short_csv_path = format_path(file_path)
+        logging.warning("Quicken GUI automation requires elevation; CSV export is ready.")
+        logging.info("To import manually:")
+        logging.info("1. Close this window.")
+        logging.info("2. Click the Quicken 'Update Prices' shortcut.")
+        logging.info(f"3. If needed, import {short_csv_path} manually.")
         return False
+
+    session = QuickenSession()
+    try:
+        return execute_import_sequence(config, session)
+    finally:
+        close_quicken(session)
