@@ -1,159 +1,147 @@
 # Architecture audit findings
 
-This is a prioritized, evidence-based working list for the 2026-10-15 audit.
-Items are not claimed fixed until marked **Resolved** and backed by a batch
-commit. The audit is intentionally critical; it does not imply every concern
-is a defect or that all technical debt can be eliminated.
+This is the tracked, evidence-based record of the QuickenPrices audit. A
+resolved item names the commit that implemented it. This is not a claim that
+all technical debt has been eliminated.
 
-## P0 — correctness, data safety, and failure visibility
+## Resolved
 
-- [x] **Unsafe and opaque cache persistence** — cache storage now uses
-  schema-checked CSV instead of executable pickle data; corrupt/empty files
-  and invalid writes raise explicit errors, and writes replace atomically.
--  Legacy `.pkl` caches are intentionally not read. Persistence failures now
-  bubble through data fetching and the application entry point.
-- [x] **Currency conversion can silently use future rates** —
-  `convert_prices` no longer backfills; its backward as-of join uses a rate
-  only from the same or an earlier date, and missing prior rates raise a
-  descriptive error. A regression test verifies the future-rate case.
-- [x] **Success-shaped fetch failures** — provider/parsing/cache failures now
-  propagate from `download_data` and `fetch_historical_data`; genuinely empty
-  provider responses remain an explicit no-data result.
-- [x] **Configuration isn't validated as a single contract** —
-  `load_configuration` merges untyped dictionaries and silently falls back to
-  defaults after parse errors; checks are split between it,
-  `run_startup_self_check`, and individual functions. `settings.py` now defines
-  strict Pydantic v2 models; config parsing rejects unknown keys, wrong types,
-  malformed YAML, and missing files instead of silently changing behavior.
-- [x] **Startup mutates project state** — configuration loading no longer
-  creates a missing YAML file, and startup self-checks only use a temporary
-  cache directory; operational cache creation occurs only when fetching data.
-- [x] **Main path hides failure status** — `main` logs unexpected exceptions
-  with tracebacks and re-raises them, so CLI failures produce a nonzero status.
-  CSV validation and write errors also propagate; cache and output CSVs share
-  one atomic writer.
+### Correctness, validation, and data safety
 
-## P1 — structural complexity and duplication
+- **Unsafe cache serialization** — replaced executable pickle with
+  schema-checked, atomic CSV persistence; old `.pkl` files are not read.
+  (`e852ce5`)
+- **Future FX rates used for past prices** — conversion is a backward as-of
+  join and errors when a non-native price has no same-day-or-prior rate.
+  (`bac1546`, `69f10b3`)
+- **Silent fetch, conversion, and output failures** — provider, cache, parsing,
+  conversion, and CSV-write failures are surfaced; the CLI logs and re-raises
+  unexpected errors. (`9cb2690`, `69f10b3`)
+- **Unvalidated settings and ticker metadata** — strict Pydantic v2 models
+  reject unknown/coerced settings and duplicate symbols; validated settings
+  objects are passed through runtime boundaries. Ticker metadata is modeled
+  explicitly. (`cb64064`, `e350cbf`, `0125729`)
+- **Explicit Quicken path silently falling back** — an invalid configured
+  executable now fails instead of being replaced by auto-detection.
+  (`0125729`)
+- **Historical window and FX context errors** — results are constrained to
+  the requested window, one prior FX row is retained for conversion, and a
+  current quote is not added when the requested end date is in the past.
+  (`39e4a7f`)
+- **Ticker path and cache cleanup scope** — Pydantic ticker symbols reject path
+  separators before cache use; expiry cleanup only removes `.csv` cache files.
+  (`ef8095b`, `8ebe1bd`)
+- **Non-idempotent output date formatting** — formatted `DD/MM/YYYY` output
+  can be processed repeatedly without date reinterpretation. (`ba6147f`)
+- **Unvalidated market date boundaries** — ticker metadata dates must be
+  timezone-aware and history orchestration normalizes ranges to UTC.
+  (`a10a238`)
+- **Transient history request failures** — configured retry policy now applies
+  to price downloads; the default retry decorator catches only network
+  transient exceptions. (`b03723b`, `d800620`)
+- **Malformed-row drops were silent** — download, cache normalization, and
+  conversion emit warnings when invalid or duplicate rows are discarded.
+  (`466c4e6`)
+- **Startup touching user cache / missing config creation** — startup checks
+  use temporary storage and missing configuration is an error.
+  (`ba63033`)
 
-- [x] **Monolithic module / mixed responsibilities** — `quicken_prices.py`
-  is now a roughly 400-line entrypoint/configuration/orchestration module;
-  market access, Windows automation, pricing conversion, shared helpers, and
-  persistence are in `market_data.py`, `quicken_automation.py`,
-  `price_processing.py`, `common.py`, and `storage.py`. Imports are acyclic.
-- [ ] **Large multi-responsibility functions** — `fetch_ticker_data` handles
-  cache validation, downloading, merging, persistence, FX filling, and live
-  price insertion; `convert_prices` validates, reports coverage, merges FX,
-  imputes rates, converts, and formats. Extract cohesive transformations with
-  contracts and focused tests.
-- [x] **Duplicated cache/DataFrame cleanup** — `normalize_cache_data` now owns
-  cache load/merge/save schema cleanup, numeric/date normalization, sorting,
-  and deduplication. It is idempotent and does not mutate its input.
-- [x] **Positional ticker metadata** — replaced the five-element tuple with a
-  strict Pydantic `TickerMetadata` model at provider and pipeline boundaries.
-  Configuration rejects duplicate ticker symbols case-insensitively.
-- [x] **Global configuration** — runtime retry policy is passed explicitly
-  from validated config; `main` keeps configuration local instead of mutating
-  a module global.
-- [ ] **GUI lifecycle state** — Quicken ownership still uses the
-  `QUICKEN_SESSION_STARTED` global; give it an explicit automation-session
-  owner.
-- [ ] **Weak orchestration dispatch** — `execute_import_sequence` decides
-  whether to pass configuration by comparing function objects. Give each
-  workflow step a uniform callable contract.
-- [ ] **Overlapping configuration and health checks** — defaults, ad-hoc
-  validation, and startup checks each describe parts of the same config
-  contract. Replace overlapping checks with one strict model and limited
-  operational preflight.
+### Structure and maintainability
 
-## P2 — launcher, tests, and maintainability
+- **Monolithic module and mixed responsibilities** — market data, Windows
+  automation, conversion, shared helpers, and storage have separate modules.
+  (`fe7e95e`, `2532412`)
+- **Repeated cache cleanup** — one immutable, idempotent normalizer is used for
+  load, merge, and save. (`e809b90`)
+- **Positional ticker metadata** — replaced tuples with a strict
+  `TickerMetadata` model. (`e350cbf`)
+- **Global runtime configuration** — removed; retry settings are explicit.
+  (`2532412`)
+- **Hidden GUI ownership and step dispatch** — Quicken lifecycle is owned by an
+  explicit session object; workflow steps share a uniform callable contract
+  and a failed step raises. (`0125729`)
+- **Conversion monster and redundant arithmetic check** — conversion is split
+  into focused transformations; invalid required input columns now fail, and
+  a tautological floating-point check was removed. (`69f10b3`)
+- **History-fetch orchestration** — split cache, download, merge, FX fill,
+  latest quote, and requested-window responsibilities into small functions.
+  (`39e4a7f`, `a10a238`)
+- **Entry-point noise and success-shaped import status** — removed obsolete
+  section scaffolding, clarified completion logging, and only configures GUI
+  automation when elevated. (`da0dcac`)
+- **Inconsistent entry-point names** — renamed the script and launcher to
+  snake_case without compatibility aliases. (`5b01723`)
+- **Interpreter fallback** — batch launcher, VS Code, application startup, and
+  UAC relaunch require the repository `.venv`. (`ba63033`)
 
-- [x] **Launcher bypasses the project environment** — the batch launcher and
-  VS Code run configuration now require `.venv\Scripts\python.exe`, the UAC
-  relaunch explicitly selects that interpreter, and `main` verifies it before
-  running.
-- [x] **Poorly named executable files** — renamed `QuickenPrices.py` and
-  `quickenprice.bat` to `quicken_prices.py` and `quicken_prices.bat` and updated
-  imports, launchers, and documentation without compatibility aliases.
-- [ ] **Tests cover a narrow subset** — 12 unit tests cover date ranges,
-  cache/fetch basics, one FX conversion, and CSV preparation. Add regression
-  tests for strict config validation, retries/failure propagation, cache
-  corruption, FX rate direction, idempotency, saving, and orchestration. Keep
-  all filesystem effects under temporary directories and mock network/GUI.
-- [ ] **No LLM benchmark coverage** — no LLM-using task is evident in this
-  repository; reassess if such a task or pipeline is added.
-- [ ] **Documentation contradicts runtime behavior** — `README.md` claims
-  modular architecture, uses old `pickle`/config descriptions, and describes
-  launch/exit behavior that does not match current code. Revise it after the
-  structural changes.
-- [ ] **Stale / noisy implementation details** — unused imports, repeated
-  comments and formatting, weak annotations (`Any`/untyped `config`), and
-  likely dead constants/branches should be removed after call-site checks.
-- [ ] **Automatic version control metadata absent** — no generated build or
-  version stamping mechanism exists. Determine whether a runtime version is
-  actually required before adding one; avoid creating unnecessary
-  configurability or generated files.
+## Remaining and deferred
 
-## Batch log
+- **Internal cache gaps are not reconciled.** Cache planning fetches only
+  leading and trailing ranges from date bounds; it cannot detect missing
+  trading dates inside those bounds. Correct detection needs an exchange-aware
+  calendar and a policy for holidays, so this remains open rather than adding
+  a naive weekday-only heuristic.
+- **Calendar assumptions are incomplete.** Date adjustment handles weekends
+  and a small set of fixed-date holidays, not full exchange-specific holiday
+  calendars or observed holidays.
+- **Provider and Windows integration remain partly untested.** Unit tests mock
+  Yahoo Finance and GUI calls; no live network run or Quicken 2004 GUI
+  end-to-end run was performed.
+- **Operational logs are not tracked.** `prices.log` is ignored and no
+  representative runtime log was available in the worktree to inspect.
+- **Some provider/orchestration functions remain moderately large**, notably
+  `get_tickers` and `validate_ticker` (63 and 48 lines in the current source).
+  No remaining function is over 80 lines. Decompose further only when
+  behavioral tests establish a useful boundary.
+- **Test organization is still concentrated** in `test_quicken_prices.py`.
+  The 48 tests cover validation, retries, FX direction, cache safety,
+  idempotency, persistence, bounded results, and failure propagation, but
+  Windows UI success flows and several edge cases need dedicated coverage.
+- **No LLM task or evidence-classification subsystem exists in this
+  repository.** LLM benchmark coverage and consolidation of evidence
+  classification models are therefore not applicable to the audited code.
+- **No generated version-stamping or AI-generated VCS metadata exists.** No
+  versioning requirement was evident; adding automatic commits or generated
+  version files would introduce behavior without a demonstrated need.
+- **Some comments/docstrings and typing can still be improved.** The audit
+  found no unused imports in the extracted application modules at the time of
+  the last static check, no warning-suppression rules, and no `TODO`, `FIXME`,
+  `pass`, or `NotImplemented` stubs in tracked Python code.
+- **Tests do not access live user data.** File-writing tests use temporary
+  directories; provider and GUI behavior is mocked. All Python validation was
+  run with `.venv\Scripts\python.exe`.
 
-- **Baseline** — clean worktree before audit changes; created repository
-  `.venv` with Python 3.14.7 and installed `requirements.txt`. Ran
-  `.\.venv\Scripts\python.exe -m unittest -v`: 12 tests passed.
-- **Findings recorded** — pending commit.
-- **Strict configuration** — added strict settings models, removed recursive
-  default merging and silent parse fallback, and added regression tests for
-  model defaults, invalid types/keys, and missing-file non-creation.
-  `.\.venv\Scripts\python.exe -m unittest -v` — 15 tests passed;
-  `.\.venv\Scripts\python.exe -m compileall -q quicken_prices.py settings.py
-  test_quicken_prices.py` — passed. Pending commit.
-- **Safe cache format** — replaced pickle reads/writes with schema-checked CSV,
-  atomic writes, and explicit corrupt/invalid-cache errors. Added tests for the
-  format and invalid file/data cases. `.\.venv\Scripts\python.exe -m unittest
-  -v` — 17 tests passed; `.\.venv\Scripts\python.exe -m compileall -q
-  quicken_prices.py settings.py test_quicken_prices.py` — passed. Pending commit.
-- **FX rate direction** — removed the backward-fill of exchange rates and fail
-  when an equity price has no same-day-or-prior FX rate. Added a regression
-  test showing that a future quote is never applied. `.\.venv\Scripts\python.exe
-  -m unittest -v` — 18 tests passed. Pending commit.
-- **Failure visibility and atomic output** — removed broad success-shaped
-  catches from ticker validation, historical fetching, and downloads; the CLI
-  re-raises logged errors; output CSV writes are atomic and raise on invalid
-  data or I/O failures. Added regression tests for provider errors, repeatable
-  output, write failure, and main error propagation. `.\.venv\Scripts\python.exe
-  -m unittest -v` — 21 tests passed; compileall passed. Pending commit.
-- **Startup isolation and interpreter enforcement** — removed startup writes
-  to the configured cache, made the cache self-check temporary, disallowed
-  Python executable fallbacks, enforced the project venv in the CLI/UAC path,
-  and updated launcher/VS Code/installation docs. Added a test proving the
-  self-check leaves the configured cache absent. `.\.venv\Scripts\python.exe
-  -m unittest -v` — 22 tests passed; compileall and `git diff --check` passed.
-  Pending commit.
-- **Validated ticker domain model** — introduced strict Pydantic metadata for
-  ticker-provider results and all fetch-pipeline inputs, and reject duplicate
-  configured tickers ignoring case. Added provider model, invalid-type, order,
-  and downstream error-propagation tests. `.\.venv\Scripts\python.exe -m
-  unittest -v` — 25 tests passed; compileall and `git diff --check` passed.
-  Pending commit.
-- **Cache normalization** — consolidated repeated cache/merge/save cleanup in
-  one idempotent normalizer, removed defensive `None` branches inconsistent
-  with the typed APIs, and added an immutability/idempotence regression test.
-  `.\.venv\Scripts\python.exe -m unittest -v` — 26 tests passed; compileall and
-  `git diff --check` passed. Pending commit.
-- **Entry-point naming** — renamed the main script and Windows launcher to
-  consistent snake_case names, updated references, and removed stale pickle
-  dependency comments. `.\.venv\Scripts\python.exe -m unittest -v` — 26 tests
-  passed; compileall and `git diff --check` passed. Pending commit.
-- **Processing/storage boundary split** — extracted reusable helpers,
-  conversion/output preparation, and atomic cache/output persistence into
-  `common.py`, `price_processing.py`, and `storage.py`. Removed broad exception
-  swallowing from cache cleanup and eliminated the output writer's redundant
-  success boolean. Static import inspection found no unused imports or cycles
-  among the extracted modules. Added isolated cache cleanup/error tests.
-  `.\.venv\Scripts\python.exe -m unittest -q` — 27 tests passed; compileall and
-  `git diff --check` passed. Pending commit.
-- **Market pipeline boundary split** — moved retry, dates, ticker validation,
-  provider fetching, and cache planning into `market_data.py`; retry policy
-  now validates and receives the runtime settings explicitly, with no global
-  config. Simplified orchestration and removed library `sys.exit` paths.
-  Tests verify explicit retry policy, errors, and strict invalid retry inputs.
-  `.\.venv\Scripts\python.exe -m unittest -q` — 28 tests passed; compileall and
-  `git diff --check` passed. Pending commit.
+## Batch history
+
+- Baseline — clean worktree; created `.venv` with Python 3.14.7 and installed
+  requirements. `.\.venv\Scripts\python.exe -m unittest -v`: 12 passed.
+- Findings recorded — `9db6fd7`.
+- Strict configuration — `cb64064`; 15 tests passed.
+- Safe atomic CSV cache — `e852ce5`; 17 tests passed.
+- Historical FX direction — `bac1546`; 18 tests passed.
+- Failure propagation and atomic output — `9cb2690`; 21 tests passed.
+- Startup isolation and `.venv` enforcement — `ba63033`; 22 tests passed.
+- Strict ticker metadata — `e350cbf`; 25 tests passed.
+- Idempotent cache normalization — `e809b90`; 26 tests passed.
+- Snake-case entry points — `5b01723`; 26 tests passed.
+- Processing/storage module split — `fe7e95e`; 27 tests passed.
+- Market/automation module split — `2532412`; 28 tests passed.
+- Validated runtime settings and explicit Quicken lifecycle — `0125729`;
+  33 tests passed.
+- Conversion decomposition and input contracts — `69f10b3`; 37 tests passed.
+- Bounded cache results with prior FX context — `39e4a7f`; 40 tests passed.
+- Idempotent output date formatting — `ba6147f`; 40 tests passed.
+- Restrict expiry cleanup to cache CSVs — `ef8095b`; 40 tests passed.
+- UTC market metadata and smaller history orchestration — `a10a238`;
+  41 tests passed.
+- Entry-point cleanup and explicit GUI skip reporting — `da0dcac`;
+  42 tests passed.
+- Strict ticker symbols and cache-path validation — `8ebe1bd`;
+  43 tests passed.
+- Prior-day and pence FX regression coverage — `0f7894d`;
+  44 tests passed.
+- Configured transient retries for price downloads — `b03723b`;
+  45 tests passed.
+- Transient-only retry defaults — `d800620`; 46 tests passed.
+- Malformed provider/cache/price rows now log discard warnings — `466c4e6`;
+  48 tests passed.
