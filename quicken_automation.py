@@ -390,6 +390,7 @@ def quicken_import(config: AppSettings) -> bool:
 
     session = QuickenSession()
     try:
+        setup_pyautogui()
         return execute_import_sequence(config, session)
     finally:
         close_quicken(session)

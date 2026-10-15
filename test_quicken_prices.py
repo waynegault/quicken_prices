@@ -845,6 +845,18 @@ class TestQuickenPricesPureData(unittest.TestCase):
 
         self.assertTrue(quicken_automation.close_quicken(session))
 
+    def test_quicken_import_skips_gui_without_elevation(self):
+        config = AppSettings(paths={"base": ".", "data_file": "data.csv"})
+        with (
+            mock.patch.object(quicken_automation, "is_elevated", return_value=False),
+            mock.patch.object(quicken_automation, "setup_pyautogui") as setup_gui,
+            self.assertLogs(level="WARNING") as captured,
+        ):
+            self.assertFalse(quicken_automation.quicken_import(config))
+
+        setup_gui.assert_not_called()
+        self.assertIn("CSV export is ready", captured.output[0])
+
     def test_execute_import_sequence_uses_uniform_steps_and_surfaces_failures(self):
         config = AppSettings(paths={"base": "."})
         session = quicken_automation.QuickenSession()

@@ -1,72 +1,44 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Shebang and coding declaration.
 
 """
-quicken_prices.py
-
-This script fetches historical price data for a list of tickers specified in 'configuration.yaml' and saves the data to a CSV file.
-
-It includes features such as configuration management, logging, error handling, data fetching, data processing, currency conversion, and more.
-
-Wayne Gault
-23/11/2024
-
-Updated 17/7/25 with revised error handling and logging improvements and concurrent processing for faster ticker validation.
-
-MIT Licence
+Fetch market prices, write a Quicken CSV, and optionally automate import.
 """
 
-# Imports #####################################
-
-# Standard Library Imports
 import logging
 import os
 import sys
 import tempfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import List
 
-# Third-Party Data and Scientific Computing Imports
 import pandas as pd
 import yaml
 import yfinance as yf
 
-from settings import AppSettings
-from market_models import TickerMetadata
 from market_data import (
     fetch_historical_data,
     get_date_range,
     get_tickers,
 )
-
+from market_models import TickerMetadata
 from price_processing import convert_prices, process_converted_prices
+from quicken_automation import (
+    ensure_project_python,
+    quicken_import,
+    run_as_admin,
+    validate_quicken_path,
+)
+from settings import AppSettings
 from storage import (
     clean_cache,
     load_cache,
     save_cache,
     save_to_csv,
 )
-from quicken_automation import (
-    ensure_project_python,
-    quicken_import,
-    run_as_admin,
-    setup_pyautogui,
-    validate_quicken_path,
-)
-
-# GUI and Automation Imports
-
-
-# Configuration ###############################
 
 
 def load_configuration(config_file: str = "configuration.yaml") -> AppSettings:
-    """
-    Load strict YAML settings, filling only model-defined defaults.
-    """
-
+    """Load strict YAML settings, filling only model-defined defaults."""
     base_path = Path(__file__).resolve().parent
     config_path = base_path / config_file
 
@@ -88,7 +60,6 @@ def load_configuration(config_file: str = "configuration.yaml") -> AppSettings:
     }
     settings = AppSettings.model_validate(user_config)
 
-    # Validate Quicken path, but honour an explicit configuration override.
     configured_quicken_path = settings.paths.quicken
     if configured_quicken_path:
         configured_quicken_path = os.path.expanduser(
@@ -122,24 +93,8 @@ def load_configuration(config_file: str = "configuration.yaml") -> AppSettings:
     return AppSettings.model_validate(resolved_settings.model_dump())
 
 
-
-
-
-
-
-
-# Note: yfinance now handles its own session internally, no custom session needed
-
-# Coding utilities ############################
-
-
-
-
 def setup_logging(config: AppSettings) -> None:
-    """
-    Sets up logging configuration.
-    """
-
+    """Configure rotating file and console logging."""
     base_path = Path(config.paths.base)
     file_log_level = config.logging_level.file
     terminal_log_level = config.logging_level.terminal
@@ -147,7 +102,6 @@ def setup_logging(config: AppSettings) -> None:
     log_file_path = base_path / config.paths.log_file
     log_file_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Create a rotating file handler with a simpler format for readability
     file_handler = RotatingFileHandler(
         log_file_path,
         maxBytes=config.log_file.max_bytes,
@@ -155,18 +109,14 @@ def setup_logging(config: AppSettings) -> None:
         encoding="utf-8",
     )
     file_handler.setLevel(getattr(logging, file_log_level))
-    file_formatter = logging.Formatter(
+    formatter = logging.Formatter(
         "%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s"
     )
-    file_handler.setFormatter(file_formatter)
+    file_handler.setFormatter(formatter)
 
-    # Create a console handler with the same format
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(getattr(logging, terminal_log_level))
-    console_formatter = logging.Formatter(
-        "%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s"
-    )
-    console_handler.setFormatter(console_formatter)
+    console_handler.setFormatter(formatter)
 
     logging.getLogger().handlers = []
     logging.getLogger().addHandler(file_handler)
@@ -213,94 +163,8 @@ def run_startup_self_check(config: AppSettings) -> None:
     logging.info("Startup self-check passed.")
 
 
-# Initialisation ##############################
-
-
-
-
-
-
-
-
-
-# Helper functions ############################
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Validate tickers ############################
-
-
-
-
-
-
-# Get data ####################################
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Process Data ################################
-
-
-
-
-
-
-
-
-# Quicken GUI #################################
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Main ########################################
-
-
-def main():
-    """
-    Main script execution.
-    """
+def main() -> None:
+    """Run the validated market-data, conversion, export, and import flow."""
     exit_prompt = "\n\t Press Enter to exit...\n\t"
     should_pause_before_exit = True
 
@@ -308,37 +172,25 @@ def main():
         ensure_project_python()
         config = load_configuration("configuration.yaml")
 
-        # 0) Initialise
         os.system("cls" if os.name == "nt" else "clear")
         print("Starting script\n")
         print("sys.executable", sys.executable)
         print("yfinance version:", yf.__version__, "\n")
 
-        # 1) Configure logging from YAML/ini settings
-        setup_logging(config=config)
-
-        # 2) Quick startup checks to catch obvious regressions before network/UI work
+        setup_logging(config)
         run_startup_self_check(config)
 
-        # 3) Attempt to elevate privileges (if needed on Windows)
         if run_as_admin():
             should_pause_before_exit = False
             return
 
-        # 4) Read ticker config from your YAML
-        tickers = config.tickers
-
-        # 5) Validate and acquire ticker metadata
         home_currency = config.home_currency
-        valid_tickers: List[TickerMetadata] = get_tickers(
-            tickers,
+        valid_tickers: list[TickerMetadata] = get_tickers(
+            config.tickers,
             home_currency=home_currency,
             retry_settings=config.retries.model_dump(),
         )
 
-        # 6) Fetch historical data
-
-        # Retrieve date range and cache_dir from config
         start_date, end_date = get_date_range(config)
         cache_dir = Path(config.paths.base) / config.paths.cache
         price_data = fetch_historical_data(
@@ -348,24 +200,14 @@ def main():
         if price_data.empty:
             raise ValueError("No valid price data fetched.")
 
-        # 7) Convert prices to the home currency
         processed_data = convert_prices(price_data, home_currency=home_currency)
-
-        # 8) Build the final output (e.g., pivoting, filtering, etc.)
         output_csv = process_converted_prices(processed_data, start_date)
-
-        # 9) Save to CSV or your preferred data store
-        save_to_csv(output_csv, config=config)
-
-        # 10) Clean up the cache if desired
-        clean_cache(config=config)
-
-        # 11) Optionally automate an import sequence
-        setup_pyautogui()
-        quicken_import(config=config)
-
-        # End
-        logging.info("Script completed successfully")
+        save_to_csv(output_csv, config)
+        clean_cache(config)
+        if quicken_import(config):
+            logging.info("Price data exported and imported successfully.")
+        else:
+            logging.info("Price data exported; Quicken GUI import was not performed.")
 
     except KeyboardInterrupt:
         logging.warning("Script interrupted by user.")
@@ -386,5 +228,4 @@ def pause_before_exit(prompt: str = "\n\t Press Enter to exit...\n\t") -> None:
 
 
 if __name__ == "__main__":
-
     main()
