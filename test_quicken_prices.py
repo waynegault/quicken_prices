@@ -7,14 +7,13 @@ from unittest import mock
 import pandas as pd
 from pydantic import ValidationError
 
-import quicken_prices as qp
-import price_processing as processing
 import market_data
+import price_processing as processing
 import quicken_automation
+import quicken_prices as qp
 import storage
 from market_models import TickerMetadata
 from settings import AppSettings
-
 
 CONVERSION_SCENARIO_COLUMNS = (
     "Ticker",

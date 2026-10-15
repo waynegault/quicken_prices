@@ -113,6 +113,18 @@ all technical debt has been eliminated.
 - **Tests do not access live user data.** File-writing tests use temporary
   directories; provider and GUI behavior is mocked. All Python validation was
   run with `.venv\Scripts\python.exe`.
+- **The lint gate is deliberately narrow.** Ruff 0.16.6's own default rule set
+  reports 159 findings on this code, so a bare `ruff check` cannot gate it.
+  `ruff.toml` pins an explicit `select` covering only the families the code
+  already satisfies; the rest stay open and visible rather than fixed blindly
+  or suppressed: `LOG015` x101 (modules log through the root logger instead of
+  a module logger), `E501` x52, the `PT009`/`PT027` x116 test-assertion style,
+  `TRY003`/`TRY300`/`TRY301`/`TRY400` x50 with `EM101`/`EM102` x38 (exception
+  construction), `TRY004` x2, `UP006`/`UP035`/`UP045`/`UP007` x40 (modern
+  annotations), `SIM117` x8, `BLE001` x5 (broad handlers, each needing a stated
+  contract), `PLR0913`/`PLR0917`/`PLR2004`/`PLW2901` x11, `PERF203` x2,
+  `RUF005`/`RUF046` x3, `Q003`, `RET503`/`RET505` x2, `ARG005`. Each family
+  needs a decision rather than a blanket `--fix`.
 
 ## Batch history
 

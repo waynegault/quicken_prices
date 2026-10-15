@@ -1,0 +1,35 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    # The application drives Windows APIs (winreg, pyautogui, pygetwindow), so
+    # the suite has to run on Windows. Provider and GUI calls are mocked, so
+    # this needs neither network access nor a Quicken installation.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Byte-compile every module
+        run: python -m compileall -q .
+
+      - name: Unit tests
+        run: python -m unittest -v
+
+      - name: Lint
+        run: |
+          python -m pip install "ruff==0.16.6"
+          python -m ruff check .

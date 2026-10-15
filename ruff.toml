@@ -1,0 +1,45 @@
+# Lint standard for this repository.
+#
+# `select` *replaces* Ruff's default rule set on purpose. Ruff 0.16.6 lints far
+# more by default than the classic E4/E7/E9/F, so inheriting the defaults would
+# let the gate change (and go red) on a Ruff upgrade alone. Every family listed
+# here is already satisfied by this code, so a red run always means a new
+# problem rather than an old one surfacing.
+#
+# Families Ruff reports on this code but that are deliberately not gated yet are
+# recorded in AUDIT_FINDINGS.md ("Remaining and deferred") with their
+# 2026-10-15 counts from `ruff check --statistics`:
+#   LOG015 101, E501 52, PT009 89, PT027 27, TRY003 36, EM101/EM102 38,
+#   UP006/UP035/UP045/UP007 40, SIM117 8, BLE001 5, TRY300/TRY301/TRY400 14,
+#   PLR0913/PLR0917/PLR2004/PLW2901 11, PERF203 2, RUF005/RUF046 3, Q003 1,
+#   RET503/RET505 2, ARG005 1.
+# Each needs a decision (per-module loggers, line length, exception typing)
+# rather than a blanket `--fix`, so they stay visible until that decision.
+
+target-version = "py314"
+line-length = 100
+
+[lint]
+select = [
+  "F",              # pyflakes: undefined names, unused imports
+  "E4", "E7", "E9", # pycodestyle: syntax and runtime errors
+  "W",              # pycodestyle: warnings
+  "I",              # import sorting
+  "B",              # flake8-bugbear
+  "C4",             # comprehensions
+  "DTZ",            # naive datetime use
+  "ERA",            # commented-out code
+  "EXE",            # shebang correctness
+  "FA",             # future annotations
+  "FLY",            # f-string conversion
+  "FURB",           # refurb
+  "ICN",            # import conventions
+  "ISC",            # implicit string concatenation
+  "N",              # pep8-naming
+  "PIE",            # flake8-pie
+  "PYI",            # stub files
+  "RSE",            # raise style
+  "SLF",            # private member access
+  "TD",             # todo comments
+  "TID",            # tidy imports
+]

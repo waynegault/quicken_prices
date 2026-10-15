@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+
 def pluralise(title: str, quantity: int) -> str:
     return title if quantity == 1 else title + "s"
 
