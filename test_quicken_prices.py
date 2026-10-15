@@ -1177,7 +1177,11 @@ class TestQuickenPricesPureData(unittest.TestCase):
                     storage.clean_cache(config)
 
     def test_main_propagates_failures(self):
+        # The interpreter check runs before configuration loading and needs a
+        # checkout venv to exist. Neutralize it: this test is about a failing
+        # configuration, not about the environment it runs in.
         with (
+            mock.patch.object(qp, "ensure_project_python"),
             mock.patch.object(qp, "load_configuration", side_effect=RuntimeError("bad config")),
             mock.patch.object(qp, "pause_before_exit"),
         ):
@@ -1185,6 +1189,32 @@ class TestQuickenPricesPureData(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "bad config"):
                     qp.main()
         self.assertIn("An unexpected error occurred", captured.output[0])
+
+    def test_ensure_project_python_requires_the_repository_venv(self):
+        missing = Path("absent-venv") / "Scripts" / "python.exe"
+        with mock.patch.object(
+            quicken_automation, "project_python", return_value=missing
+        ):
+            with self.assertRaisesRegex(
+                FileNotFoundError, "Project virtual environment not found"
+            ):
+                quicken_automation.ensure_project_python()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            interpreter = Path(temp_dir) / "python.exe"
+            interpreter.write_text("", encoding="utf-8")
+            with mock.patch.object(
+                quicken_automation, "project_python", return_value=interpreter
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "Run QuickenPrices with the project interpreter"
+                ):
+                    quicken_automation.ensure_project_python()
+
+                with mock.patch.object(
+                    quicken_automation.sys, "executable", str(interpreter)
+                ):
+                    self.assertIsNone(quicken_automation.ensure_project_python())
 
     def test_startup_self_check_does_not_touch_user_cache(self):
         with tempfile.TemporaryDirectory() as temp_dir:
