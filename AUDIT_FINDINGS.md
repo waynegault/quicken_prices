@@ -10,16 +10,15 @@ is a defect or that all technical debt can be eliminated.
 - [x] **Unsafe and opaque cache persistence** — cache storage now uses
   schema-checked CSV instead of executable pickle data; corrupt/empty files
   and invalid writes raise explicit errors, and writes replace atomically.
-  Legacy `.pkl` caches are intentionally not read. Higher-level fetch
-  exception handling remains a separate unresolved finding below.
+-  Legacy `.pkl` caches are intentionally not read. Persistence failures now
+  bubble through data fetching and the application entry point.
 - [x] **Currency conversion can silently use future rates** —
   `convert_prices` no longer backfills; its backward as-of join uses a rate
   only from the same or an earlier date, and missing prior rates raise a
   descriptive error. A regression test verifies the future-rate case.
-- [ ] **Success-shaped fetch failures** — `download_data` catches every
-  exception and returns an empty frame; `fetch_historical_data` also catches
-  broadly and continues. Callers cannot distinguish no market data from API,
-  parsing, or programming failures.
+- [x] **Success-shaped fetch failures** — provider/parsing/cache failures now
+  propagate from `download_data` and `fetch_historical_data`; genuinely empty
+  provider responses remain an explicit no-data result.
 - [x] **Configuration isn't validated as a single contract** —
   `load_configuration` merges untyped dictionaries and silently falls back to
   defaults after parse errors; checks are split between it,
@@ -30,10 +29,10 @@ is a defect or that all technical debt can be eliminated.
   cache directory and a probe. Configuration loading no longer creates a
   missing YAML file; make the remaining operational preflight repeatable and
   isolate tests from user files.
-- [ ] **Main path hides failure status** — `main` catches general exceptions,
-  logs them, and returns normally; callers and launchers can observe a zero
-  exit status for failed runs. Propagate errors or return explicit nonzero
-  process status.
+- [x] **Main path hides failure status** — `main` logs unexpected exceptions
+  with tracebacks and re-raises them, so CLI failures produce a nonzero status.
+  CSV validation and write errors also propagate; cache and output CSVs share
+  one atomic writer.
 
 ## P1 — structural complexity and duplication
 
@@ -108,3 +107,9 @@ is a defect or that all technical debt can be eliminated.
   when an equity price has no same-day-or-prior FX rate. Added a regression
   test showing that a future quote is never applied. `.\.venv\Scripts\python.exe
   -m unittest -v` — 18 tests passed. Pending commit.
+- **Failure visibility and atomic output** — removed broad success-shaped
+  catches from ticker validation, historical fetching, and downloads; the CLI
+  re-raises logged errors; output CSV writes are atomic and raise on invalid
+  data or I/O failures. Added regression tests for provider errors, repeatable
+  output, write failure, and main error propagation. `.\.venv\Scripts\python.exe
+  -m unittest -v` — 21 tests passed; compileall passed. Pending commit.

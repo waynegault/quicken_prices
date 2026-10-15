@@ -383,6 +383,50 @@ class TestQuickenPricesPureData(unittest.TestCase):
         self.assertEqual(result["Old Price"].min(), 1.0)
         self.assertEqual(result["Old Price"].max(), 5.0)
 
+    def test_download_data_propagates_provider_failures(self):
+        ticker = mock.Mock()
+        ticker.history.side_effect = RuntimeError("provider unavailable")
+
+        with mock.patch.object(qp.yf, "Ticker", return_value=ticker):
+            with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
+                qp.download_data(
+                    "TEST",
+                    pd.Timestamp("2026-01-01", tz="UTC"),
+                    pd.Timestamp("2026-01-03", tz="UTC"),
+                )
+
+    def test_save_to_csv_is_repeatable_and_surfaces_write_errors(self):
+        data = pd.DataFrame(
+            [
+                {"Ticker": "TEST", "Price": 1.23, "Date": "01/01/2026"},
+                {"Ticker": "TEST", "Price": 1.24, "Date": "02/01/2026"},
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = {"paths": {"base": temp_dir, "data_file": "data.csv"}}
+            self.assertTrue(qp.save_to_csv(data, config))
+            output_path = Path(temp_dir) / "data.csv"
+            original_output = output_path.read_bytes()
+
+            self.assertTrue(qp.save_to_csv(data, config))
+            self.assertEqual(output_path.read_bytes(), original_output)
+
+            with mock.patch.object(pd.DataFrame, "to_csv", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    qp.save_to_csv(data, config)
+
+            self.assertEqual(output_path.read_bytes(), original_output)
+            self.assertEqual(list(Path(temp_dir).glob("*.tmp")), [])
+
+    def test_main_propagates_failures(self):
+        with (
+            mock.patch.object(qp, "load_configuration", side_effect=RuntimeError("bad config")),
+            mock.patch.object(qp, "pause_before_exit"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "bad config"):
+                qp.main()
+
 
 if __name__ == "__main__":
     unittest.main()

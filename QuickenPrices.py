@@ -668,28 +668,23 @@ def validate_tickers(
         }
         for future in concurrent.futures.as_completed(future_to_ticker):
             ticker_symbol = future_to_ticker[future]
-            try:
-                data = future.result()
-                if (
-                    data
-                    and data["ticker"]
-                    and data["type"] != "Unknown"
-                    and data["currency"] != "Unknown"
-                ):
-                    ticker_key = str(data["ticker"]).upper()
-                    current_price = data["current_price"]
-                    validated_by_symbol[ticker_key] = (
-                        ticker_key,
-                        data["earliest_date"],
-                        str(data["type"]),
-                        str(data["currency"]),
-                        float(current_price)
-                        if isinstance(current_price, Real) and not pd.isna(current_price)
-                        else float("nan"),
-                    )
-            except Exception as e:
-                logging.error(
-                    f"An unexpected error occurred processing ticker '{ticker_symbol}': {e}"
+            data = future.result()
+            if (
+                data
+                and data["ticker"]
+                and data["type"] != "Unknown"
+                and data["currency"] != "Unknown"
+            ):
+                ticker_key = str(data["ticker"]).upper()
+                current_price = data["current_price"]
+                validated_by_symbol[ticker_key] = (
+                    ticker_key,
+                    data["earliest_date"],
+                    str(data["type"]),
+                    str(data["currency"]),
+                    float(current_price)
+                    if isinstance(current_price, Real) and not pd.isna(current_price)
+                    else float("nan"),
                 )
 
     valid_tickers = []
@@ -729,71 +724,37 @@ def validate_ticker(
         logging.error("Ticker must be a string.")
         return None
 
-    try:
-        # Let yfinance handle its own session (no longer accepts custom sessions)
-        ticker = yf.Ticker(ticker_symbol)
+    # Let yfinance handle its own session (no longer accepts custom sessions).
+    ticker = yf.Ticker(ticker_symbol)
+    info = ticker.get_info()
 
-        info = ticker.get_info()
+    if not info or info.get("symbol") is None:
+        logging.error(
+            f"Ticker '{ticker_symbol}' is invalid. Check if the symbol is correct or available on yfinance."
+        )
+        return None
 
-        if not info or info.get("symbol") is None:
-            logging.error(
-                f"Ticker '{ticker_symbol}' is invalid. Check if the symbol is correct or available on yfinance."
+    first_trade_date = info.get("firstTradeDateEpochUtc")
+    if first_trade_date is None:
+        earliest_date = pd.NaT
+    else:
+        try:
+            earliest_date = pd.Timestamp(first_trade_date, unit="s").tz_localize(
+                "UTC"
             )
-            return None
-
-        # Safely parse the first trade date (Unix epoch in seconds)
-        first_trade_date = info.get("firstTradeDateEpochUtc", None)
-        if first_trade_date is not None:
-            try:
-                earliest_date = pd.Timestamp(first_trade_date, unit="s").tz_localize(
-                    "UTC"
-                )
-            except (ValueError, OverflowError) as e:
-                logging.warning(
-                    f"Failed to parse firstTradeDateEpochUtc={first_trade_date} for '{ticker_symbol}': {e}"
-                )
-                earliest_date = pd.NaT
-        else:
+        except (ValueError, OverflowError) as e:
+            logging.warning(
+                f"Failed to parse firstTradeDateEpochUtc={first_trade_date} for '{ticker_symbol}': {e}"
+            )
             earliest_date = pd.NaT
 
-        # Construct the data dictionary
-        data = {
-            "ticker": info.get("symbol", ticker_symbol).upper(),
-            "earliest_date": earliest_date,
-            "type": info.get("quoteType", "Unknown"),
-            "currency": info.get("currency", "Unknown"),
-            "current_price": info.get("bid", float("nan")),
-        }
-
-        return data
-
-    except requests.exceptions.HTTPError as e:
-        if "429" in str(e):
-            logging.warning(
-                f"Rate limited for {ticker_symbol}. This will be retried automatically..."
-            )
-            # Don't sleep here - let the retry decorator handle it
-            raise  # Re-raise to trigger retry
-        else:
-            logging.error(f"HTTP error fetching {ticker_symbol}: {e}")
-            return None
-    except (ValueError, TypeError) as e:
-        # Handle JSON parsing errors that can occur when rate limited
-        if "Expecting value" in str(e):
-            logging.warning(
-                f"JSON parsing error for {ticker_symbol} (likely rate limited). Will retry..."
-            )
-            # Convert to HTTPError to trigger retry
-            raise requests.exceptions.HTTPError(
-                "429 Rate Limited - JSON parsing failed"
-            )
-        else:
-            logging.error(f"Data parsing error for {ticker_symbol}: {e}")
-            return None
-    except Exception as e:
-        logging.error(f"An unexpected error occurred fetching {ticker_symbol}: {e}")
-        logging.debug("Full traceback:\n%s", traceback.format_exc())
-        return None
+    return {
+        "ticker": info.get("symbol", ticker_symbol).upper(),
+        "earliest_date": earliest_date,
+        "type": info.get("quoteType", "Unknown"),
+        "currency": info.get("currency", "Unknown"),
+        "current_price": info.get("bid", float("nan")),
+    }
 
 
 # Get data ####################################
@@ -854,27 +815,18 @@ def fetch_historical_data(
         # Only fetch from max(start_date, earliest_date)
         data_start_date = max(start_date, normalized_earliest_date) if normalized_earliest_date is not None else start_date
 
-        try:
-            df = fetch_ticker_data(
-                ticker, data_start_date, end_date, current_price, cache_dir
-            )
-            if df is None or df.empty:
-                logging.warning(f"No data found for ticker {ticker}. Skipping.")
-                continue
+        df = fetch_ticker_data(
+            ticker, data_start_date, end_date, current_price, cache_dir
+        )
+        if df.empty:
+            logging.warning(f"No data found for ticker {ticker}. Skipping.")
+            continue
 
-            # Ensure metadata columns exist
-            if "Type" not in df.columns:
-                df["Type"] = ticker_type
-            if "Original Currency" not in df.columns:
-                df["Original Currency"] = currency
-
-            records.append(df)
-
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Error fetching data for {ticker}: {e}")
-        except Exception as e:
-            logging.error(f"Unexpected error fetching data for {ticker}: {e}")
-            logging.debug("Full traceback:\n%s", traceback.format_exc())
+        if "Type" not in df.columns:
+            df["Type"] = ticker_type
+        if "Original Currency" not in df.columns:
+            df["Original Currency"] = currency
+        records.append(df)
 
     # Combine records
     valid_records = [df for df in records if not df.empty and df is not None]
@@ -1097,61 +1049,69 @@ def download_data(
     ticker_symbol: str,
     rng_start: pd.Timestamp,
     rng_end: pd.Timestamp,
-) -> Optional[pd.DataFrame]:
+) -> pd.DataFrame:
     """
     Downloads daily data for the specified date range [rng_start, rng_end] from yfinance.
     Returns a DataFrame with columns including "Date".
     """
-    try:
-        # dont collect data if start is today
-        today = pd.Timestamp.now(tz="UTC").normalize()
-        if today == rng_start:
-            return pd.DataFrame()
+    today = pd.Timestamp.now(tz="UTC").normalize()
+    if today == rng_start:
+        return pd.DataFrame()
 
-        # Make range end inclusive
-        rng_end = rng_end + pd.Timedelta(days=1)
+    inclusive_end = rng_end + pd.Timedelta(days=1)
+    ticker = yf.Ticker(ticker_symbol)
+    raw_df = ticker.history(
+        start=rng_start,
+        end=inclusive_end,
+        interval="1d",
+    )
 
-        # Let yfinance handle its own session (no longer accepts custom sessions)
-        ticker = yf.Ticker(ticker_symbol)
-        raw_df = ticker.history(
-            start=rng_start,
-            end=rng_end,
-            interval="1d",
+    if raw_df is None or raw_df.empty:
+        logging.error(
+            f"{ticker_symbol}: No data from {rng_start.strftime('%d/%m/%Y')} to "
+            f"{inclusive_end.strftime('%d/%m/%Y')}."
         )
+        return pd.DataFrame()
 
-        if raw_df is None or raw_df.empty:
-            logging.warning(
-                f"{ticker_symbol}: No data from {rng_start.strftime('%d/%m/%Y')} to {rng_end.strftime('%d/%m/%Y')}."
-            )
-            return pd.DataFrame()
+    raw_df = raw_df.reset_index().rename(columns={"Close": "Old Price"})
+    raw_df["Ticker"] = ticker_symbol
+    raw_df["Date"] = pd.to_datetime(raw_df["Date"], utc=True).dt.normalize()
+    raw_df["Old Price"] = pd.to_numeric(raw_df["Old Price"], errors="coerce")
+    raw_df = raw_df.dropna(subset=["Date", "Old Price"]).loc[:, CACHE_COLUMNS]
 
-        raw_df.reset_index(inplace=True)
-        raw_df.rename(columns={"Close": "Old Price"}, inplace=True)
-        raw_df["Ticker"] = ticker_symbol
-
-        # Make sure the date and price columns are normalized consistently.
-        raw_df["Date"] = pd.to_datetime(raw_df["Date"], utc=True).dt.normalize()
-        raw_df["Old Price"] = pd.to_numeric(raw_df["Old Price"], errors="coerce")
-        raw_df.dropna(subset=["Date", "Old Price"], inplace=True)
-
-        # Select columns
-        raw_df = raw_df[list(CACHE_COLUMNS)]
-
-        first_data = raw_df["Date"].min().strftime("%d/%m/%Y")
-        last_data = raw_df["Date"].max().strftime("%d/%m/%Y")
-
-        logging.info(
-            f"{ticker_symbol}: Downloaded from {first_data} to {last_data} ({len(raw_df)} days.)"
-        )
-
+    if raw_df.empty:
+        logging.error(f"{ticker_symbol}: Download contained no valid price rows.")
         return raw_df
 
-    except Exception as e:
-        logging.error(
-            f"Failed to download data for {ticker_symbol} from {rng_start} to {rng_end}: {e}"
-        )
-        logging.debug("Full traceback:\n%s", traceback.format_exc())
-        return pd.DataFrame()
+    logging.info(
+        f"{ticker_symbol}: Downloaded from {raw_df['Date'].min().strftime('%d/%m/%Y')} "
+        f"to {raw_df['Date'].max().strftime('%d/%m/%Y')} ({len(raw_df)} days.)"
+    )
+    return raw_df
+
+
+def write_csv_atomically(
+    data: pd.DataFrame, destination: Path, *, index: bool, header: bool
+) -> None:
+    """Write a CSV beside its destination and replace it only after success."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="",
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=destination.parent,
+        delete=False,
+    ) as temporary_file:
+        temporary_path = Path(temporary_file.name)
+
+    try:
+        data.to_csv(temporary_path, index=index, header=header)
+        temporary_path.replace(destination)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
 
 
 def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
@@ -1163,7 +1123,6 @@ def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
         data (pd.DataFrame): DataFrame containing data to cache.
     """
     cache_path = Path(cache_dir)
-    cache_path.mkdir(parents=True, exist_ok=True)
     cache_file = cache_path / f"{ticker}.csv"
 
     missing_columns = set(CACHE_COLUMNS).difference(data.columns)
@@ -1191,23 +1150,7 @@ def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
             f"{sorted(cached_tickers)}."
         )
 
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        newline="",
-        prefix=f".{ticker}.",
-        suffix=".tmp",
-        dir=cache_path,
-        delete=False,
-    ) as temporary_file:
-        temporary_path = Path(temporary_file.name)
-
-    try:
-        cache_data.to_csv(temporary_path, index=False)
-        temporary_path.replace(cache_file)
-    except Exception:
-        temporary_path.unlink(missing_ok=True)
-        raise
+    write_csv_atomically(cache_data, cache_file, index=False, header=True)
 
     logging.info(
         f"{ticker}: Cache saved from {cache_data['Date'].min().strftime('%d/%m/%Y')} "
@@ -1489,35 +1432,22 @@ def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
         config: Configuration dictionary.
 
     Returns:
-        True if saved successfully, False otherwise.
+        True if saved successfully.
     """
 
     file_path = Path(config["paths"]["base"]) / config["paths"]["data_file"]
-    short_CSV_path = format_path(file_path)
+    if df.empty:
+        raise ValueError("No data to save.")
+    required_columns = ["Ticker", "Price", "Date"]
+    missing_columns = set(required_columns).difference(df.columns)
+    if missing_columns:
+        raise ValueError(
+            f"Cannot save CSV; missing required columns {sorted(missing_columns)}."
+        )
 
-    try:
-        if df.empty:
-            logging.error("No data to save. Check earlier steps for errors.")
-            return False
-        required_columns = ["Ticker", "Price", "Date"]
-        if not all(col in df.columns for col in required_columns):
-            logging.error(
-                f"Missing required columns {required_columns} in data. Cannot save CSV."
-            )
-            return False
-
-        # Save the DataFrame to CSV without headers
-        df.to_csv(file_path, index=False, header=False)
-
-        # Log the save location
-        short_CSV_path = format_path(file_path)
-        logging.info(f"Data saved successfully to {short_CSV_path}\n")
-
-        return True
-
-    except Exception as e:
-        logging.exception(f"An error occurred while saving to {short_CSV_path}")
-        return False
+    write_csv_atomically(df[required_columns], file_path, index=False, header=False)
+    logging.info(f"Data saved successfully to {format_path(file_path)}\n")
+    return True
 
 
 # Quicken GUI #################################
@@ -1859,9 +1789,7 @@ def main():
         output_csv = process_converted_prices(processed_data, start_date)
 
         # 9) Save to CSV or your preferred data store
-        if not save_to_csv(output_csv, config=config):
-            logging.error("CSV save failed; skipping cache cleanup and Quicken import.")
-            return
+        save_to_csv(output_csv, config=config)
 
         # 10) Clean up the cache if desired
         clean_cache(config=config)
@@ -1879,9 +1807,10 @@ def main():
 
     except KeyboardInterrupt:
         logging.warning("Script interrupted by user.")
-    except Exception as e:
-        logging.error(f"An unexpected error occurred: {e}")
-        logging.error(traceback.format_exc())
+        raise
+    except Exception:
+        logging.exception("An unexpected error occurred.")
+        raise
     finally:
         if should_pause_before_exit:
             pause_before_exit(exit_prompt)
