@@ -14,6 +14,12 @@ all technical debt has been eliminated.
 - **Future FX rates used for past prices** — conversion is a backward as-of
   join and errors when a non-native price has no same-day-or-prior rate.
   (`bac1546`, `69f10b3`)
+- **Unspecified FX policy for duplicates, stale rates, and missing series** —
+  conversion now states and tests its rules: duplicate rates for one day keep
+  the first and are logged, a rate older than `MAX_FX_RATE_AGE_DAYS` (7) is
+  applied but warned about, a currency with no series at all is named in a
+  warning before the run fails, and the pair is built from the configured home
+  currency rather than a hardcoded `GBP`. (`bcf0c31`)
 - **Silent fetch, conversion, and output failures** — provider, cache, parsing,
   conversion, and CSV-write failures are surfaced; the CLI logs and re-raises
   unexpected errors. (`9cb2690`, `69f10b3`)
@@ -76,6 +82,9 @@ all technical debt has been eliminated.
   snake_case without compatibility aliases. (`5b01723`)
 - **Interpreter fallback** — batch launcher, VS Code, application startup, and
   UAC relaunch require the repository `.venv`. (`ba63033`)
+- **No automated gate** — a Windows CI workflow byte-compiles every module, runs
+  the suite and lints on each push and pull request. `ruff.toml` pins the lint
+  selection so the gate cannot drift with a Ruff release. (`bf248e1`)
 
 ## Remaining and deferred
 
@@ -164,3 +173,7 @@ all technical debt has been eliminated.
   `d626ea1`.
 - Extracted the reusable FX conversion test scenario — `4894685`; 48 tests
   passed, compileall and `git diff --check` passed.
+- Windows CI workflow and a pinned lint baseline — `bf248e1`; 48 tests passed,
+  Ruff clean, compileall clean.
+- Stated and tested FX conversion policy — `bcf0c31`; 53 tests passed, Ruff
+  clean, compileall clean.
