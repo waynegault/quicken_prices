@@ -16,6 +16,25 @@ from market_models import TickerMetadata
 from settings import AppSettings
 
 
+CONVERSION_SCENARIO_COLUMNS = (
+    "Ticker",
+    "Old Price",
+    "Date",
+    "Type",
+    "Original Currency",
+)
+CONVERSION_SCENARIO = (
+    ("AAPL", 100.0, "2026-01-02", "EQUITY", "USD"),
+    ("AAPL", 110.0, "2026-01-03", "EQUITY", "USD"),
+    ("VUKG.L", 200.0, "2026-01-02", "ETF", "GBP"),
+    ("PENCE.L", 12500.0, "2026-01-02", "EQUITY", "GBp"),
+    ("USDGBP=X", 0.8, "2026-01-02", "CURRENCY", "USD"),
+    ("USDGBP=X", 0.79, "2026-01-03", "CURRENCY", "USD"),
+    # Inverse quote must not be used for USD-denominated securities.
+    ("GBP=X", 1.27, "2026-01-02", "CURRENCY", "GBP"),
+)
+
+
 class TestQuickenPricesPureData(unittest.TestCase):
     def test_load_configuration_applies_model_defaults_without_writing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -138,85 +157,26 @@ class TestQuickenPricesPureData(unittest.TestCase):
 
     def test_convert_prices_converts_usd_via_usdgbp_and_preserves_gbp(self):
         data = pd.DataFrame(
-            [
-                {
-                    "Ticker": "AAPL",
-                    "Old Price": 100.0,
-                    "Date": pd.Timestamp("2026-01-02", tz="UTC"),
-                    "Type": "EQUITY",
-                    "Original Currency": "USD",
-                },
-                {
-                    "Ticker": "AAPL",
-                    "Old Price": 110.0,
-                    "Date": pd.Timestamp("2026-01-03", tz="UTC"),
-                    "Type": "EQUITY",
-                    "Original Currency": "USD",
-                },
-                {
-                    "Ticker": "VUKG.L",
-                    "Old Price": 200.0,
-                    "Date": pd.Timestamp("2026-01-02", tz="UTC"),
-                    "Type": "ETF",
-                    "Original Currency": "GBP",
-                },
-                {
-                    "Ticker": "PENCE.L",
-                    "Old Price": 12500.0,
-                    "Date": pd.Timestamp("2026-01-02", tz="UTC"),
-                    "Type": "EQUITY",
-                    "Original Currency": "GBp",
-                },
-                # USD -> GBP rate (GBP per USD): 100 USD * 0.8 = 80 GBP.
-                {
-                    "Ticker": "USDGBP=X",
-                    "Old Price": 0.8,
-                    "Date": pd.Timestamp("2026-01-02", tz="UTC"),
-                    "Type": "CURRENCY",
-                    "Original Currency": "USD",
-                },
-                {
-                    "Ticker": "USDGBP=X",
-                    "Old Price": 0.79,
-                    "Date": pd.Timestamp("2026-01-03", tz="UTC"),
-                    "Type": "CURRENCY",
-                    "Original Currency": "USD",
-                },
-                # GBP -> USD rate (USD per GBP): must NOT be applied to USD rows.
-                {
-                    "Ticker": "GBP=X",
-                    "Old Price": 1.27,
-                    "Date": pd.Timestamp("2026-01-02", tz="UTC"),
-                    "Type": "CURRENCY",
-                    "Original Currency": "GBP",
-                },
-            ]
+            CONVERSION_SCENARIO, columns=CONVERSION_SCENARIO_COLUMNS
         )
+        converted = processing.convert_prices(data).set_index(["Ticker", "Date"])
 
-        converted = processing.convert_prices(data)
-
-        aapl_day_1 = converted[
-            (converted["Ticker"] == "AAPL")
-            & (converted["Date"] == pd.Timestamp("2026-01-02", tz="UTC"))
-        ]["Price"].iloc[0]
-        aapl_day_2 = converted[
-            (converted["Ticker"] == "AAPL")
-            & (converted["Date"] == pd.Timestamp("2026-01-03", tz="UTC"))
-        ]["Price"].iloc[0]
-        vukg_price = converted[
-            (converted["Ticker"] == "VUKG.L")
-            & (converted["Date"] == pd.Timestamp("2026-01-02", tz="UTC"))
-        ]["Price"].iloc[0]
-        pence_price = converted[
-            (converted["Ticker"] == "PENCE.L")
-            & (converted["Date"] == pd.Timestamp("2026-01-02", tz="UTC"))
-        ]["Price"].iloc[0]
-
-        # USD must be converted via USDGBP=X (0.8), never GBP=X (1.27).
-        self.assertAlmostEqual(aapl_day_1, 80.0, places=6)
-        self.assertAlmostEqual(aapl_day_2, 86.9, places=6)
-        self.assertAlmostEqual(vukg_price, 200.0, places=6)
-        self.assertAlmostEqual(pence_price, 125.0, places=6)
+        self.assertAlmostEqual(
+            converted.loc[("AAPL", pd.Timestamp("2026-01-02", tz="UTC")), "Price"],
+            80.0,
+        )
+        self.assertAlmostEqual(
+            converted.loc[("AAPL", pd.Timestamp("2026-01-03", tz="UTC")), "Price"],
+            86.9,
+        )
+        self.assertAlmostEqual(
+            converted.loc[("VUKG.L", pd.Timestamp("2026-01-02", tz="UTC")), "Price"],
+            200.0,
+        )
+        self.assertAlmostEqual(
+            converted.loc[("PENCE.L", pd.Timestamp("2026-01-02", tz="UTC")), "Price"],
+            125.0,
+        )
 
     def test_convert_prices_uses_latest_prior_fx_rate(self):
         data = pd.DataFrame(
