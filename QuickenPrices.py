@@ -21,7 +21,6 @@ MIT Licence
 
 # Standard Library Imports
 import concurrent.futures
-import copy
 import ctypes
 import datetime
 import logging
@@ -48,6 +47,8 @@ import requests
 import yaml
 import yfinance as yf
 
+from settings import AppSettings
+
 # GUI and Automation Imports
 
 
@@ -65,19 +66,12 @@ DEFAULT_TRANSIENT_EXCEPTIONS = (
     requests.exceptions.Timeout,
     requests.exceptions.HTTPError,  # Sometimes a retry helps if it's 5xx
 )
-DEFAULT_CONFIG = {
-    "home_currency": "GBP",
-    "collection_period_years": 0.08,
-    "retries": {"max_retries": 3, "retry_delay": 2, "backoff": 2},
-    "logging_level": {"file": "DEBUG", "terminal": "DEBUG"},
-    "log_file": {"max_bytes": 5242880, "backup_count": 5},
-    "tickers": ["^FTSE"],
-    "paths": {"data_file": "data.csv", "log_file": "prices.log", "cache": "cache"},
-    "cache": {"max_age_days": 30},
-}
+DEFAULT_CONFIG = AppSettings(
+    paths={"base": str(Path(__file__).resolve().parent)}
+).model_dump()
 
-# Keep a safe default config at import-time; runtime config is loaded in main().
-config: Dict[str, Any] = copy.deepcopy(DEFAULT_CONFIG)
+# Runtime settings are loaded in main().
+config: Dict[str, Any] = DEFAULT_CONFIG.copy()
 
 QUICKEN_SESSION_STARTED = False
 QUICKEN_MAIN_WINDOW_TITLE = "Quicken XG 2004"
@@ -90,43 +84,29 @@ QUICKEN_IMPORT_DIALOG_TITLE = "Import Price Data"
 
 def load_configuration(config_file: str = "configuration.yaml") -> Dict[str, Any]:
     """
-    Load and validate YAML configuration with defaults.
-    Exits if critical values are missing or invalid.
+    Load strict YAML settings, filling only model-defined defaults.
     """
 
     base_path = Path(__file__).resolve().parent
     config_path = base_path / config_file
 
-    # Ensure configuration file exists
     if not config_path.exists():
-        logging.warning(
-            f"{config_file} not found. Creating default configuration. Please update to suit."
-        )
-        with config_path.open("w", encoding="utf-8") as f:
-            yaml.dump(DEFAULT_CONFIG, f, default_flow_style=False)
-        logging.info(f"Default {config_file} created at {config_path}.")
-    else:
-        # Log that the local YAML file is found and being used
-        logging.info(f"Using {config_file} found at {base_path}.")
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
-    # Load user configuration
-    try:
-        with config_path.open("r", encoding="utf-8") as f:
-            user_config = yaml.safe_load(f) or {}
+    logging.info(f"Using configuration file: {config_path}")
+    with config_path.open("r", encoding="utf-8") as config_stream:
+        user_config = yaml.safe_load(config_stream)
+    if not isinstance(user_config, dict):
+        raise ValueError(f"Configuration in {config_path} must be a YAML mapping.")
 
-        if not isinstance(user_config, dict):
-            logging.warning(f"Invalid format in {config_file}. Using defaults.")
-            user_config = {}
-
-    except Exception as e:
-        logging.error(f"Error reading {config_file}: {e}. Using internal defaults.")
-        user_config = {}
-
-    # Merge defaults with user config
-    final_config = apply_defaults(DEFAULT_CONFIG, user_config)
-
-    # Add base path to paths in the config
-    final_config.setdefault("paths", {}).setdefault("base", str(base_path))
+    raw_paths = user_config.get("paths", {})
+    if not isinstance(raw_paths, dict):
+        raise ValueError("Configuration 'paths' must be a mapping.")
+    user_config["paths"] = {
+        **raw_paths,
+        "base": raw_paths.get("base", str(base_path)),
+    }
+    final_config = AppSettings.model_validate(user_config).model_dump()
 
     # Validate Quicken path, but honour an explicit configuration override.
     configured_quicken_path = final_config.get("paths", {}).get("quicken")
@@ -156,36 +136,7 @@ def load_configuration(config_file: str = "configuration.yaml") -> Dict[str, Any
         )
 
     # Validate tickers
-    if not final_config["tickers"]:
-        logging.error(
-            "No tickers defined in configuration. Please add at least one ticker."
-        )
-        sys.exit(1)
-
     return final_config
-
-
-def apply_defaults(
-    defaults: Dict[str, Any], settings: Dict[str, Any]
-) -> Dict[str, Any]:
-    if not isinstance(settings, dict):
-        settings = {}
-
-    merged_settings: Dict[str, Any] = {}
-    for key, value in defaults.items():
-        current_value = settings.get(key)
-        if isinstance(value, dict):
-            merged_settings[key] = apply_defaults(
-                value, current_value if isinstance(current_value, dict) else {}
-            )
-        else:
-            merged_settings[key] = value if current_value is None else current_value
-
-    for key, value in settings.items():
-        if key not in merged_settings:
-            merged_settings[key] = value
-
-    return merged_settings
 
 
 def validate_quicken_path() -> Optional[str]:

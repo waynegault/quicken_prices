@@ -1,13 +1,55 @@
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import pandas as pd
+from pydantic import ValidationError
 
 import QuickenPrices as qp
 
 
 class TestQuickenPricesPureData(unittest.TestCase):
+    def test_load_configuration_applies_model_defaults_without_writing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "configuration.yaml"
+            config_path.write_text("tickers:\n  - TEST\npaths: {}\n", encoding="utf-8")
+            with mock.patch.object(qp, "validate_quicken_path", return_value=None):
+                config = qp.load_configuration(str(config_path))
+
+            self.assertEqual(config["tickers"], ["TEST"])
+            self.assertEqual(config["retries"]["max_retries"], 3)
+            self.assertEqual(config["paths"]["base"], str(Path(qp.__file__).parent))
+            self.assertEqual(config["paths"]["quicken"], "")
+            self.assertTrue(config_path.is_file())
+
+    def test_load_configuration_rejects_unknown_and_coerced_values(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "configuration.yaml"
+            config_path.write_text(
+                "tickers:\n  - TEST\npaths: {}\ncollection_period_years: '0.2'\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValidationError):
+                qp.load_configuration(str(config_path))
+
+            config_path.write_text(
+                "tickers:\n  - TEST\npaths: {}\nlegacy_option: true\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValidationError):
+                qp.load_configuration(str(config_path))
+
+    def test_missing_configuration_is_not_created(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "missing.yaml"
+
+            with self.assertRaises(FileNotFoundError):
+                qp.load_configuration(str(config_path))
+
+            self.assertFalse(config_path.exists())
+
     def test_get_date_range_returns_ordered_utc_dates(self):
         config = {"collection_period_years": 0.1}
         start_date, end_date = qp.get_date_range(config)

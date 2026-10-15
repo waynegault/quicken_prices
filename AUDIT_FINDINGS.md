@@ -20,16 +20,16 @@ is a defect or that all technical debt can be eliminated.
   exception and returns an empty frame; `fetch_historical_data` also catches
   broadly and continues. Callers cannot distinguish no market data from API,
   parsing, or programming failures.
-- [ ] **Configuration isn't validated as a single contract** —
+- [x] **Configuration isn't validated as a single contract** —
   `load_configuration` merges untyped dictionaries and silently falls back to
   defaults after parse errors; checks are split between it,
-  `run_startup_self_check`, and individual functions. Introduce strict
-  Pydantic models and reject invalid/unknown configuration rather than silently
-  changing behavior.
-- [ ] **Startup mutates project state** — `load_configuration` creates a
-  default YAML file when missing; `run_startup_self_check` creates the cache
-  directory and a probe. Make configuration loading repeatable and isolate
-  tests from user files.
+  `run_startup_self_check`, and individual functions. `settings.py` now defines
+  strict Pydantic v2 models; config parsing rejects unknown keys, wrong types,
+  malformed YAML, and missing files instead of silently changing behavior.
+- [ ] **Startup mutates project state** — `run_startup_self_check` creates the
+  cache directory and a probe. Configuration loading no longer creates a
+  missing YAML file; make the remaining operational preflight repeatable and
+  isolate tests from user files.
 - [ ] **Main path hides failure status** — `main` catches general exceptions,
   logs them, and returns normally; callers and launchers can observe a zero
   exit status for failed runs. Propagate errors or return explicit nonzero
@@ -93,3 +93,9 @@ is a defect or that all technical debt can be eliminated.
   `.venv` with Python 3.14.7 and installed `requirements.txt`. Ran
   `.\.venv\Scripts\python.exe -m unittest -v`: 12 tests passed.
 - **Findings recorded** — pending commit.
+- **Strict configuration** — added strict settings models, removed recursive
+  default merging and silent parse fallback, and added regression tests for
+  model defaults, invalid types/keys, and missing-file non-creation.
+  `.\.venv\Scripts\python.exe -m unittest -v` — 15 tests passed;
+  `.\.venv\Scripts\python.exe -m compileall -q QuickenPrices.py settings.py
+  test_quicken_prices.py` — passed. Pending commit.

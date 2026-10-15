@@ -13,6 +13,7 @@ requests>=2.31.0
 
 # Configuration Management
 PyYAML>=6.0
+pydantic>=2.7,<3
 
 # GUI Automation (Windows)
 pyautogui>=0.9.54
