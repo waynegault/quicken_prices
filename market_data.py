@@ -6,7 +6,7 @@ import logging
 import time
 from functools import wraps
 from numbers import Real
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Dict, List, Optional, Tuple, Type, Union
 
 import pandas as pd
 import requests
@@ -183,7 +183,7 @@ def get_tickers(
     tickers: List[str],
     max_show: int = 5,
     home_currency: str = "GBP",
-    retry_settings: Optional[Dict[str, Any]] = None,
+    retry_settings: Optional[RetrySettings] = None,
 ) -> List[TickerMetadata]:
     """
     Get and validate stock and FX tickers.
@@ -246,7 +246,7 @@ def get_tickers(
 def validate_tickers(
     tickers: List[str],
     max_show: int = 5,
-    retry_settings: Optional[Dict[str, Any]] = None,
+    retry_settings: Optional[RetrySettings] = None,
 ) -> List[TickerMetadata]:
     validated_by_symbol: Dict[str, TickerMetadata] = {}
     # Use a ThreadPoolExecutor for concurrent validation
@@ -362,6 +362,7 @@ def _fetch_ticker_history(
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
     cache_dir: str,
+    retry_settings: Optional[RetrySettings],
 ) -> Optional[pd.DataFrame]:
     ticker_start = _ticker_start_date(ticker_info, start_date, end_date)
     if ticker_start is None:
@@ -373,6 +374,7 @@ def _fetch_ticker_history(
         end_date,
         ticker_info.current_price,
         cache_dir,
+        retry_settings,
     )
     if data.empty:
         logging.warning(f"No data found for ticker {ticker_info.ticker}. Skipping.")
@@ -388,6 +390,7 @@ def fetch_historical_data(
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
     cache_dir: str,
+    retry_settings: Optional[RetrySettings] = None,
 ) -> pd.DataFrame:
     """
     Fetch historical data for a list of tickers using daily yfinance data
@@ -420,7 +423,7 @@ def fetch_historical_data(
     records = []
     for ticker_info in tickers:
         data = _fetch_ticker_history(
-            ticker_info, start_date, end_date, cache_dir
+            ticker_info, start_date, end_date, cache_dir, retry_settings
         )
         if data is not None:
             records.append(data)
@@ -458,11 +461,18 @@ def _get_cache_bounds(
 
 
 def _download_missing_data(
-    ticker: str, missing_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]]
+    ticker: str,
+    missing_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]],
+    retry_settings: Optional[RetrySettings],
 ) -> pd.DataFrame:
     downloaded_frames = []
     for range_start, range_end in missing_ranges:
-        partial_data = download_data(ticker, range_start, range_end)
+        partial_data = download_data(
+            ticker,
+            range_start,
+            range_end,
+            retry_settings=retry_settings,
+        )
         if not partial_data.empty:
             downloaded_frames.append(partial_data)
 
@@ -557,6 +567,7 @@ def fetch_ticker_data(
     end_date: pd.Timestamp,
     current_price: float,
     cache_dir: str,
+    retry_settings: Optional[RetrySettings] = None,
 ) -> pd.DataFrame:
     """
     Fetch historical data (daily) for a ticker using local cache + yfinance,
@@ -572,7 +583,9 @@ def fetch_ticker_data(
     cache_data, cache_status = load_cache(ticker, cache_dir)
     first_cache, last_cache = _get_cache_bounds(ticker, cache_data, cache_status)
     missing_ranges = find_missing_ranges(start_date, end_date, first_cache, last_cache)
-    downloaded_data = _download_missing_data(ticker, missing_ranges)
+    downloaded_data = _download_missing_data(
+        ticker, missing_ranges, retry_settings
+    )
     combined_data = _merge_and_save_cache(
         ticker, cache_data, downloaded_data, cache_dir
     )
@@ -597,6 +610,7 @@ def fetch_ticker_data(
     )
     return combined_data
 
+@retry(exceptions=DEFAULT_TRANSIENT_EXCEPTIONS)
 def download_data(
     ticker_symbol: str,
     rng_start: pd.Timestamp,

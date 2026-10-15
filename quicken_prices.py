@@ -188,13 +188,17 @@ def main() -> None:
         valid_tickers: list[TickerMetadata] = get_tickers(
             config.tickers,
             home_currency=home_currency,
-            retry_settings=config.retries.model_dump(),
+            retry_settings=config.retries,
         )
 
         start_date, end_date = get_date_range(config)
         cache_dir = Path(config.paths.base) / config.paths.cache
         price_data = fetch_historical_data(
-            valid_tickers, start_date, end_date, cache_dir
+            valid_tickers,
+            start_date,
+            end_date,
+            cache_dir,
+            retry_settings=config.retries,
         )
 
         if price_data.empty:

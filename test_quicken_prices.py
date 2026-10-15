@@ -662,18 +662,32 @@ class TestQuickenPricesPureData(unittest.TestCase):
             current_price=float("nan"),
         )
 
+        retry_settings = AppSettings(paths={"base": "."}).retries
         with mock.patch.object(
             market_data,
             "fetch_ticker_data",
             side_effect=RuntimeError("cache read failed"),
-        ):
+        ) as fetch:
             with self.assertRaisesRegex(RuntimeError, "cache read failed"):
                 market_data.fetch_historical_data(
                     [ticker_info],
                     pd.Timestamp("2026-01-01", tz="UTC"),
                     pd.Timestamp("2026-01-03", tz="UTC"),
                     "cache",
+                    retry_settings=retry_settings,
                 )
+        self.assertEqual(fetch.call_count, 1)
+        call_args = fetch.call_args.args
+        self.assertEqual(
+            call_args[:3],
+            (
+                "TEST",
+                pd.Timestamp("2026-01-01", tz="UTC"),
+                pd.Timestamp("2026-01-03", tz="UTC"),
+            ),
+        )
+        self.assertTrue(pd.isna(call_args[3]))
+        self.assertEqual(call_args[4:], ("cache", retry_settings))
 
     def test_fetch_historical_data_requires_timezone_aware_bounds(self):
         with self.assertRaisesRegex(ValueError, "start_date must include a timezone"):
@@ -696,6 +710,36 @@ class TestQuickenPricesPureData(unittest.TestCase):
                     pd.Timestamp("2026-01-03", tz="UTC"),
                 )
 
+    def test_download_data_retries_transient_provider_failures(self):
+        ticker = mock.Mock()
+        ticker.history.side_effect = [
+            market_data.requests.exceptions.ConnectionError("temporary"),
+            pd.DataFrame(
+                {"Close": [12.5]},
+                index=pd.DatetimeIndex(
+                    [pd.Timestamp("2026-01-02", tz="UTC")], name="Date"
+                ),
+            ),
+        ]
+        retry_settings = {"max_retries": 2, "retry_delay": 0.25, "backoff": 2.0}
+
+        with (
+            mock.patch.object(market_data.yf, "Ticker", return_value=ticker),
+            mock.patch.object(market_data.time, "sleep") as sleep,
+            self.assertLogs(level="WARNING") as captured,
+        ):
+            result = market_data.download_data(
+                "TEST",
+                pd.Timestamp("2026-01-01", tz="UTC"),
+                pd.Timestamp("2026-01-03", tz="UTC"),
+                retry_settings=retry_settings,
+            )
+
+        self.assertEqual(result["Old Price"].tolist(), [12.5])
+        self.assertEqual(ticker.history.call_count, 2)
+        sleep.assert_called_once_with(0.25)
+        self.assertIn("Attempt 1/2 failed", captured.output[0])
+
     def test_validate_ticker_returns_strict_metadata_model(self):
         info = {
             "symbol": "TEST",
@@ -708,7 +752,9 @@ class TestQuickenPricesPureData(unittest.TestCase):
         }
         with mock.patch.object(market_data.yf, "Ticker") as ticker_factory:
             ticker_factory.return_value.get_info.return_value = info
-            metadata = market_data.validate_ticker("TEST")
+            metadata = market_data.validate_ticker(
+                "TEST", retry_settings=AppSettings(paths={"base": "."}).retries
+            )
 
         self.assertEqual(metadata.ticker, "TEST")
         self.assertEqual(metadata.instrument_type, "EQUITY")
