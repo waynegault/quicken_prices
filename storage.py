@@ -141,7 +141,11 @@ def clean_cache(config: AppSettings) -> None:
 
     deleted_files = 0
     for entry in cache_dir.iterdir():
-        if entry.is_file() and (now - entry.stat().st_mtime) > max_age_seconds:
+        if (
+            entry.is_file()
+            and entry.suffix.lower() == ".csv"
+            and (now - entry.stat().st_mtime) > max_age_seconds
+        ):
             entry.unlink()
             deleted_files += 1
             logging.info(

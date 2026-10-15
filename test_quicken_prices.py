@@ -768,9 +768,12 @@ class TestQuickenPricesPureData(unittest.TestCase):
             cache_dir.mkdir()
             expired_file = cache_dir / "expired.csv"
             recent_file = cache_dir / "recent.csv"
+            unrelated_file = cache_dir / "user-notes.txt"
             expired_file.write_text("old", encoding="utf-8")
             recent_file.write_text("new", encoding="utf-8")
+            unrelated_file.write_text("keep", encoding="utf-8")
             os.utime(expired_file, (0, 0))
+            os.utime(unrelated_file, (0, 0))
             config = AppSettings(
                 paths={"base": temp_dir, "cache": "cache"},
                 cache={"max_age_days": 1},
@@ -780,6 +783,7 @@ class TestQuickenPricesPureData(unittest.TestCase):
 
             self.assertFalse(expired_file.exists())
             self.assertTrue(recent_file.exists())
+            self.assertTrue(unrelated_file.exists())
 
             expired_file.write_text("old again", encoding="utf-8")
             os.utime(expired_file, (0, 0))
