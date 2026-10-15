@@ -22,7 +22,6 @@ MIT Licence
 # Standard Library Imports
 import concurrent.futures
 import ctypes
-import datetime
 import logging
 import os
 import subprocess
@@ -36,7 +35,7 @@ from functools import wraps
 from logging.handlers import RotatingFileHandler
 from numbers import Real
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 # Third-Party Data and Scientific Computing Imports
 import pandas as pd
@@ -47,6 +46,7 @@ import yaml
 import yfinance as yf
 
 from settings import AppSettings
+from market_models import TickerMetadata
 
 # GUI and Automation Imports
 
@@ -573,7 +573,7 @@ def format_path(full_path):
 
 def get_tickers(
     tickers: List[str], max_show: int = 5, home_currency: str = "GBP"
-) -> List[Tuple[str, Optional[pd.Timestamp], str, str, float]]:
+) -> List[TickerMetadata]:
     """
     Get and validate stock and FX tickers.
 
@@ -593,9 +593,7 @@ def get_tickers(
     logging.info(
         f"Validating {len(tickers)} stock {pluralise('ticker', len(tickers))}..."
     )
-    valid_tickers: List[Tuple[str, Optional[pd.Timestamp], str, str, float]] = (
-        validate_tickers(tickers, max_show)
-    )
+    valid_tickers = validate_tickers(tickers, max_show)
 
     if not valid_tickers:
         logging.error(
@@ -605,12 +603,14 @@ def get_tickers(
 
     # Generate FX tickers based on the currencies in valid_tickers
     currencies = {
-        t[3] for t in valid_tickers if t[3] not in native_currencies(home_currency)
+        ticker.currency
+        for ticker in valid_tickers
+        if ticker.currency not in native_currencies(home_currency)
     }
     fx_tickers = {f"{currency}{home_currency}=X" for currency in currencies}
 
     # Exclude tickers from fx_tickers that might already be in valid_tickers
-    valid_ticker_strings = {ticker[0] for ticker in valid_tickers}
+    valid_ticker_strings = {ticker.ticker for ticker in valid_tickers}
     fx_tickers = {ticker for ticker in fx_tickers if ticker not in valid_ticker_strings}
 
     if fx_tickers:
@@ -621,9 +621,9 @@ def get_tickers(
         all_valid_tickers = []
         seen_tickers = set()
         for ticker_info in valid_tickers + valid_fx_tickers:
-            if ticker_info[0] in seen_tickers:
+            if ticker_info.ticker in seen_tickers:
                 continue
-            seen_tickers.add(ticker_info[0])
+            seen_tickers.add(ticker_info.ticker)
             all_valid_tickers.append(ticker_info)
     else:
         logging.info("No new FX tickers required.")
@@ -637,8 +637,8 @@ def get_tickers(
 
 def validate_tickers(
     tickers: List[str], max_show: int = 5
-) -> List[Tuple[str, Optional[pd.Timestamp], str, str, float]]:
-    validated_by_symbol: Dict[str, Tuple[str, Optional[pd.Timestamp], str, str, float]] = {}
+) -> List[TickerMetadata]:
+    validated_by_symbol: Dict[str, TickerMetadata] = {}
     # Use a ThreadPoolExecutor for concurrent validation
     max_workers = max(1, min(10, len(tickers)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -651,21 +651,10 @@ def validate_tickers(
             data = future.result()
             if (
                 data
-                and data["ticker"]
-                and data["type"] != "Unknown"
-                and data["currency"] != "Unknown"
+                and data.instrument_type != "Unknown"
+                and data.currency != "Unknown"
             ):
-                ticker_key = str(data["ticker"]).upper()
-                current_price = data["current_price"]
-                validated_by_symbol[ticker_key] = (
-                    ticker_key,
-                    data["earliest_date"],
-                    str(data["type"]),
-                    str(data["currency"]),
-                    float(current_price)
-                    if isinstance(current_price, Real) and not pd.isna(current_price)
-                    else float("nan"),
-                )
+                validated_by_symbol[data.ticker.upper()] = data
 
     valid_tickers = []
     for ticker_symbol in tickers:
@@ -675,7 +664,7 @@ def validate_tickers(
 
     logging.info(
         f"{len(valid_tickers)} {pluralise('ticker', len(valid_tickers))} validated: "
-        f"{[ticker[0] for ticker in valid_tickers[:max_show]]}"
+        f"{[ticker.ticker for ticker in valid_tickers[:max_show]]}"
         f"{'...' if len(valid_tickers) > max_show else ''}"
     )
     return valid_tickers
@@ -690,19 +679,9 @@ def validate_tickers(
 )
 def validate_ticker(
     ticker_symbol: str,
-) -> Optional[Dict[str, Union[str, pd.Timestamp, float]]]:
-    """
-    Validate a ticker symbol and fetch metadata using yfinance.
-
-    Args:
-        ticker_symbol (str): The ticker symbol to validate.
-
-    Returns:
-        Optional[Dict[str, Union[str, pd.Timestamp, float]]]: Metadata about the ticker, or None if invalid.
-    """
+) -> Optional[TickerMetadata]:
     if not isinstance(ticker_symbol, str):
-        logging.error("Ticker must be a string.")
-        return None
+        raise TypeError("Ticker must be a string.")
 
     # Let yfinance handle its own session (no longer accepts custom sessions).
     ticker = yf.Ticker(ticker_symbol)
@@ -716,7 +695,7 @@ def validate_ticker(
 
     first_trade_date = info.get("firstTradeDateEpochUtc")
     if first_trade_date is None:
-        earliest_date = pd.NaT
+        earliest_date = None
     else:
         try:
             earliest_date = pd.Timestamp(first_trade_date, unit="s").tz_localize(
@@ -726,22 +705,26 @@ def validate_ticker(
             logging.warning(
                 f"Failed to parse firstTradeDateEpochUtc={first_trade_date} for '{ticker_symbol}': {e}"
             )
-            earliest_date = pd.NaT
+            earliest_date = None
 
-    return {
-        "ticker": info.get("symbol", ticker_symbol).upper(),
-        "earliest_date": earliest_date,
-        "type": info.get("quoteType", "Unknown"),
-        "currency": info.get("currency", "Unknown"),
-        "current_price": info.get("bid", float("nan")),
-    }
+    current_price = info.get("bid", float("nan"))
+    if not isinstance(current_price, Real) or pd.isna(current_price):
+        current_price = float("nan")
+
+    return TickerMetadata(
+        ticker=info.get("symbol", ticker_symbol).upper(),
+        earliest_date=earliest_date,
+        instrument_type=info.get("quoteType", "Unknown"),
+        currency=info.get("currency", "Unknown"),
+        current_price=float(current_price),
+    )
 
 
 # Get data ####################################
 
 
 def fetch_historical_data(
-    tickers: List[Tuple[str, Optional[pd.Timestamp], str, str, float]],
+    tickers: List[TickerMetadata],
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
     cache_dir: str,
@@ -773,7 +756,13 @@ def fetch_historical_data(
     records = []
 
     # For each ticker, fetch data
-    for ticker, earliest_date, ticker_type, currency, current_price in tickers:
+    for ticker_info in tickers:
+        ticker = ticker_info.ticker
+        earliest_date = (
+            pd.Timestamp(ticker_info.earliest_date)
+            if ticker_info.earliest_date is not None
+            else None
+        )
         normalized_earliest_date = (
             earliest_date if earliest_date is not None and not pd.isna(earliest_date) else None
         )
@@ -796,16 +785,16 @@ def fetch_historical_data(
         data_start_date = max(start_date, normalized_earliest_date) if normalized_earliest_date is not None else start_date
 
         df = fetch_ticker_data(
-            ticker, data_start_date, end_date, current_price, cache_dir
+            ticker, data_start_date, end_date, ticker_info.current_price, cache_dir
         )
         if df.empty:
             logging.warning(f"No data found for ticker {ticker}. Skipping.")
             continue
 
         if "Type" not in df.columns:
-            df["Type"] = ticker_type
+            df["Type"] = ticker_info.instrument_type
         if "Original Currency" not in df.columns:
-            df["Original Currency"] = currency
+            df["Original Currency"] = ticker_info.currency
         records.append(df)
 
     # Combine records
@@ -1735,7 +1724,7 @@ def main():
 
         # 5) Validate and acquire ticker metadata
         home_currency = config.get("home_currency", "GBP")
-        valid_tickers: List[Tuple[str, Optional[pd.Timestamp], str, str, float]] = []
+        valid_tickers: List[TickerMetadata] = []
         valid_tickers = get_tickers(tickers, home_currency=home_currency)
         if not valid_tickers:
             logging.error("No valid tickers to process. Exiting.")

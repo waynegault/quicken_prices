@@ -66,6 +66,9 @@ class AppSettings(StrictModel):
     def validate_tickers(cls, tickers: list[str]) -> list[str]:
         if any(not ticker.strip() for ticker in tickers):
             raise ValueError("tickers must not contain empty values")
+        normalized_tickers = [ticker.upper() for ticker in tickers]
+        if len(set(normalized_tickers)) != len(normalized_tickers):
+            raise ValueError("tickers must be unique, ignoring case")
         return tickers
 
     @field_validator("home_currency")

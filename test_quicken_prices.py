@@ -7,6 +7,7 @@ import pandas as pd
 from pydantic import ValidationError
 
 import QuickenPrices as qp
+from market_models import TickerMetadata
 
 
 class TestQuickenPricesPureData(unittest.TestCase):
@@ -14,7 +15,10 @@ class TestQuickenPricesPureData(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "configuration.yaml"
             config_path.write_text("tickers:\n  - TEST\npaths: {}\n", encoding="utf-8")
-            with mock.patch.object(qp, "validate_quicken_path", return_value=None):
+            with (
+                mock.patch.object(qp, "validate_quicken_path", return_value=None),
+                self.assertLogs(level="WARNING"),
+            ):
                 config = qp.load_configuration(str(config_path))
 
             self.assertEqual(config["tickers"], ["TEST"])
@@ -39,6 +43,13 @@ class TestQuickenPricesPureData(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaises(ValidationError):
+                qp.load_configuration(str(config_path))
+
+            config_path.write_text(
+                "tickers:\n  - TEST\n  - test\npaths: {}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValidationError, "unique"):
                 qp.load_configuration(str(config_path))
 
     def test_missing_configuration_is_not_created(self):
@@ -178,8 +189,10 @@ class TestQuickenPricesPureData(unittest.TestCase):
             ]
         )
 
-        with self.assertRaisesRegex(ValueError, "on or before"):
-            qp.convert_prices(data)
+        with self.assertLogs(level="ERROR") as captured:
+            with self.assertRaisesRegex(ValueError, "on or before"):
+                qp.convert_prices(data)
+        self.assertIn("Missing historical FX rates", captured.output[0])
 
     def test_cache_helpers_round_trip(self):
         sample = pd.DataFrame(
@@ -383,6 +396,26 @@ class TestQuickenPricesPureData(unittest.TestCase):
         self.assertEqual(result["Old Price"].min(), 1.0)
         self.assertEqual(result["Old Price"].max(), 5.0)
 
+    def test_fetch_historical_data_propagates_ticker_failures(self):
+        ticker_info = TickerMetadata(
+            ticker="TEST",
+            earliest_date=None,
+            instrument_type="EQUITY",
+            currency="GBP",
+            current_price=float("nan"),
+        )
+
+        with mock.patch.object(
+            qp, "fetch_ticker_data", side_effect=RuntimeError("cache read failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "cache read failed"):
+                qp.fetch_historical_data(
+                    [ticker_info],
+                    pd.Timestamp("2026-01-01", tz="UTC"),
+                    pd.Timestamp("2026-01-03", tz="UTC"),
+                    "cache",
+                )
+
     def test_download_data_propagates_provider_failures(self):
         ticker = mock.Mock()
         ticker.history.side_effect = RuntimeError("provider unavailable")
@@ -394,6 +427,51 @@ class TestQuickenPricesPureData(unittest.TestCase):
                     pd.Timestamp("2026-01-01", tz="UTC"),
                     pd.Timestamp("2026-01-03", tz="UTC"),
                 )
+
+    def test_validate_ticker_returns_strict_metadata_model(self):
+        info = {
+            "symbol": "TEST",
+            "firstTradeDateEpochUtc": int(
+                pd.Timestamp("2026-01-01", tz="UTC").timestamp()
+            ),
+            "quoteType": "EQUITY",
+            "currency": "USD",
+            "bid": 42.5,
+        }
+        with mock.patch.object(qp.yf, "Ticker") as ticker_factory:
+            ticker_factory.return_value.get_info.return_value = info
+            metadata = qp.validate_ticker("TEST")
+
+        self.assertEqual(metadata.ticker, "TEST")
+        self.assertEqual(metadata.instrument_type, "EQUITY")
+        self.assertEqual(metadata.currency, "USD")
+        self.assertEqual(metadata.current_price, 42.5)
+        self.assertEqual(metadata.earliest_date, pd.Timestamp("2026-01-01", tz="UTC"))
+
+        with self.assertRaises(ValidationError):
+            TickerMetadata(
+                ticker="TEST",
+                earliest_date=None,
+                instrument_type="EQUITY",
+                currency="USD",
+                current_price="42.5",
+            )
+
+    def test_validate_tickers_preserves_configured_order(self):
+        metadata = {
+            symbol: TickerMetadata(
+                ticker=symbol,
+                earliest_date=None,
+                instrument_type="EQUITY",
+                currency="GBP",
+                current_price=float("nan"),
+            )
+            for symbol in ("SECOND", "FIRST")
+        }
+        with mock.patch.object(qp, "validate_ticker", side_effect=metadata.get):
+            validated = qp.validate_tickers(["SECOND", "FIRST"])
+
+        self.assertEqual([ticker.ticker for ticker in validated], ["SECOND", "FIRST"])
 
     def test_save_to_csv_is_repeatable_and_surfaces_write_errors(self):
         data = pd.DataFrame(
