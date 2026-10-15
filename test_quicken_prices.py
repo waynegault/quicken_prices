@@ -624,6 +624,15 @@ class TestQuickenPricesPureData(unittest.TestCase):
                     "cache",
                 )
 
+    def test_fetch_historical_data_requires_timezone_aware_bounds(self):
+        with self.assertRaisesRegex(ValueError, "start_date must include a timezone"):
+            market_data.fetch_historical_data(
+                [],
+                pd.Timestamp("2026-01-01"),
+                pd.Timestamp("2026-01-03", tz="UTC"),
+                "cache",
+            )
+
     def test_download_data_propagates_provider_failures(self):
         ticker = mock.Mock()
         ticker.history.side_effect = RuntimeError("provider unavailable")
@@ -663,6 +672,14 @@ class TestQuickenPricesPureData(unittest.TestCase):
                 instrument_type="EQUITY",
                 currency="USD",
                 current_price="42.5",
+            )
+        with self.assertRaisesRegex(ValidationError, "timezone"):
+            TickerMetadata(
+                ticker="TEST",
+                earliest_date=pd.Timestamp("2026-01-01"),
+                instrument_type="EQUITY",
+                currency="USD",
+                current_price=42.5,
             )
 
     def test_validate_ticker_retries_yahoo_invalid_json_response(self):

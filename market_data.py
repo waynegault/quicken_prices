@@ -332,6 +332,57 @@ def validate_ticker(
         current_price=float(current_price),
     )
 
+
+def _normalize_utc_day(value: pd.Timestamp, name: str) -> pd.Timestamp:
+    normalized = pd.Timestamp(value)
+    if normalized.tzinfo is None:
+        raise ValueError(f"{name} must include a timezone.")
+    return normalized.tz_convert("UTC").normalize()
+
+
+def _ticker_start_date(
+    ticker_info: TickerMetadata,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+) -> Optional[pd.Timestamp]:
+    if ticker_info.earliest_date is None:
+        return start_date
+
+    earliest_date = pd.Timestamp(ticker_info.earliest_date).tz_convert("UTC").normalize()
+    if earliest_date > end_date:
+        logging.warning(
+            f"Skipping {ticker_info.ticker}: Requested period ends before ticker existed."
+        )
+        return None
+    return max(start_date, earliest_date)
+
+
+def _fetch_ticker_history(
+    ticker_info: TickerMetadata,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+    cache_dir: str,
+) -> Optional[pd.DataFrame]:
+    ticker_start = _ticker_start_date(ticker_info, start_date, end_date)
+    if ticker_start is None:
+        return None
+
+    data = fetch_ticker_data(
+        ticker_info.ticker,
+        ticker_start,
+        end_date,
+        ticker_info.current_price,
+        cache_dir,
+    )
+    if data.empty:
+        logging.warning(f"No data found for ticker {ticker_info.ticker}. Skipping.")
+        return None
+
+    data["Type"] = ticker_info.instrument_type
+    data["Original Currency"] = ticker_info.currency
+    return data
+
+
 def fetch_historical_data(
     tickers: List[TickerMetadata],
     start_date: pd.Timestamp,
@@ -353,6 +404,11 @@ def fetch_historical_data(
         and 'Original Currency'. Returns empty DataFrame if no data.
     """
 
+    start_date = _normalize_utc_day(start_date, "start_date")
+    end_date = _normalize_utc_day(end_date, "end_date")
+    if start_date > end_date:
+        raise ValueError("start_date must not be after end_date.")
+
     if not tickers:
         logging.info("No tickers provided. Returning empty DataFrame.")
         return pd.DataFrame(columns=list(CACHE_COLUMNS) + ["Type", "Original Currency"])
@@ -362,56 +418,17 @@ def fetch_historical_data(
         f"to {end_date.strftime('%d/%m/%Y')}\n"
     )
     records = []
-
-    # For each ticker, fetch data
     for ticker_info in tickers:
-        ticker = ticker_info.ticker
-        earliest_date = (
-            pd.Timestamp(ticker_info.earliest_date)
-            if ticker_info.earliest_date is not None
-            else None
+        data = _fetch_ticker_history(
+            ticker_info, start_date, end_date, cache_dir
         )
-        normalized_earliest_date = (
-            earliest_date if earliest_date is not None and not pd.isna(earliest_date) else None
-        )
-
-        # Ensure earliest_date and end_date are directly comparable
-        if normalized_earliest_date is not None and getattr(normalized_earliest_date, "tzinfo", None):
-            if normalized_earliest_date.tzinfo != end_date.tzinfo:
-                normalized_earliest_date = normalized_earliest_date.tz_convert(
-                    end_date.tzinfo
-                )  # Convert to the same timezone as end_date
-
-        # Skip tickers that began trading after our end_date
-        if normalized_earliest_date is not None and end_date < normalized_earliest_date:
-            logging.warning(
-                f"Skipping {ticker}: Requested period ends before ticker existed."
-            )
-            continue
-
-        # Only fetch from max(start_date, earliest_date)
-        data_start_date = max(start_date, normalized_earliest_date) if normalized_earliest_date is not None else start_date
-
-        df = fetch_ticker_data(
-            ticker, data_start_date, end_date, ticker_info.current_price, cache_dir
-        )
-        if df.empty:
-            logging.warning(f"No data found for ticker {ticker}. Skipping.")
-            continue
-
-        if "Type" not in df.columns:
-            df["Type"] = ticker_info.instrument_type
-        if "Original Currency" not in df.columns:
-            df["Original Currency"] = ticker_info.currency
-        records.append(df)
-
-    # Combine records
-    valid_records = [df for df in records if not df.empty and df is not None]
-    if valid_records:
-        combined_df = pd.concat(valid_records, ignore_index=True)
+        if data is not None:
+            records.append(data)
+    if records:
+        combined_df = pd.concat(records, ignore_index=True)
         logging.info(
             f"Finished retrieving {len(combined_df)} {pluralise('record', len(combined_df))} "
-            f"for {len(valid_records)} {pluralise('ticker', len(valid_records))}\n"
+            f"for {len(records)} {pluralise('ticker', len(records))}\n"
         )
         return combined_df
 
@@ -547,6 +564,8 @@ def fetch_ticker_data(
     Forward-fills missing dates if this is a CURRENCY ticker.
     """
 
+    start_date = _normalize_utc_day(start_date, "start_date")
+    end_date = _normalize_utc_day(end_date, "end_date")
     if start_date > end_date:
         raise ValueError("start_date must not be after end_date.")
 
