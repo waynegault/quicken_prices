@@ -36,9 +36,10 @@ is a defect or that all technical debt can be eliminated.
 ## P1 — structural complexity and duplication
 
 - [ ] **Monolithic module / mixed responsibilities** — `quicken_prices.py`
-  (about 1,960 lines) combines configuration, network access, caching,
-  conversion, CSV output, Windows elevation, and GUI automation. Split along
-  stable boundaries and remove circular imports rather than layering wrappers.
+  still owns configuration, network access, Windows elevation, and GUI
+  automation, but pricing conversion, shared helpers, and persistence now live
+  in `price_processing.py`, `common.py`, and `storage.py` with acyclic imports.
+  Continue separating remaining domain boundaries.
 - [ ] **Large multi-responsibility functions** — `fetch_ticker_data` handles
   cache validation, downloading, merging, persistence, FX filling, and live
   price insertion; `convert_prices` validates, reports coverage, merges FX,
@@ -139,3 +140,11 @@ is a defect or that all technical debt can be eliminated.
   consistent snake_case names, updated references, and removed stale pickle
   dependency comments. `.\.venv\Scripts\python.exe -m unittest -v` — 26 tests
   passed; compileall and `git diff --check` passed. Pending commit.
+- **Processing/storage boundary split** — extracted reusable helpers,
+  conversion/output preparation, and atomic cache/output persistence into
+  `common.py`, `price_processing.py`, and `storage.py`. Removed broad exception
+  swallowing from cache cleanup and eliminated the output writer's redundant
+  success boolean. Static import inspection found no unused imports or cycles
+  among the extracted modules. Added isolated cache cleanup/error tests.
+  `.\.venv\Scripts\python.exe -m unittest -q` — 27 tests passed; compileall and
+  `git diff --check` passed. Pending commit.

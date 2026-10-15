@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,8 @@ import pandas as pd
 from pydantic import ValidationError
 
 import quicken_prices as qp
+import price_processing as processing
+import storage
 from market_models import TickerMetadata
 
 
@@ -149,7 +152,7 @@ class TestQuickenPricesPureData(unittest.TestCase):
             ]
         )
 
-        converted = qp.convert_prices(data)
+        converted = processing.convert_prices(data)
 
         aapl_day_1 = converted[
             (converted["Ticker"] == "AAPL")
@@ -191,7 +194,7 @@ class TestQuickenPricesPureData(unittest.TestCase):
 
         with self.assertLogs(level="ERROR") as captured:
             with self.assertRaisesRegex(ValueError, "on or before"):
-                qp.convert_prices(data)
+                processing.convert_prices(data)
         self.assertIn("Missing historical FX rates", captured.output[0])
 
     def test_cache_helpers_round_trip(self):
@@ -211,31 +214,31 @@ class TestQuickenPricesPureData(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            qp.save_cache("TEST", sample, temp_dir)
-            loaded, status = qp.load_cache("TEST", temp_dir)
+            storage.save_cache("TEST", sample, temp_dir)
+            loaded, status = storage.load_cache("TEST", temp_dir)
             self.assertTrue((Path(temp_dir) / "TEST.csv").is_file())
             self.assertFalse((Path(temp_dir) / "TEST.pkl").exists())
 
         self.assertEqual(status, "loaded")
         self.assertFalse(loaded.empty)
         self.assertEqual(len(loaded), 2)
-        self.assertEqual(set(loaded.columns), set(qp.CACHE_COLUMNS))
+        self.assertEqual(set(loaded.columns), set(storage.CACHE_COLUMNS))
 
     def test_cache_load_rejects_empty_or_invalid_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             cache_file = Path(temp_dir) / "TEST.csv"
             cache_file.write_text("", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "empty"):
-                qp.load_cache("TEST", temp_dir)
+                storage.load_cache("TEST", temp_dir)
 
             cache_file.write_text("Ticker,Unrelated\nTEST,1\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "missing columns"):
-                qp.load_cache("TEST", temp_dir)
+                storage.load_cache("TEST", temp_dir)
 
     def test_save_cache_rejects_empty_or_mismatched_data(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(ValueError, "missing columns"):
-                qp.save_cache("TEST", pd.DataFrame(), temp_dir)
+                storage.save_cache("TEST", pd.DataFrame(), temp_dir)
 
             wrong_ticker = pd.DataFrame(
                 [
@@ -247,7 +250,7 @@ class TestQuickenPricesPureData(unittest.TestCase):
                 ]
             )
             with self.assertRaisesRegex(ValueError, "unexpected tickers"):
-                qp.save_cache("TEST", wrong_ticker, temp_dir)
+                storage.save_cache("TEST", wrong_ticker, temp_dir)
 
             self.assertFalse((Path(temp_dir) / "TEST.csv").exists())
 
@@ -273,11 +276,11 @@ class TestQuickenPricesPureData(unittest.TestCase):
         )
         original = source.copy(deep=True)
 
-        normalized = qp.normalize_cache_data("TEST", source)
+        normalized = storage.normalize_cache_data("TEST", source)
 
         pd.testing.assert_frame_equal(source, original)
         pd.testing.assert_frame_equal(
-            normalized, qp.normalize_cache_data("TEST", normalized)
+            normalized, storage.normalize_cache_data("TEST", normalized)
         )
         self.assertEqual(normalized["Old Price"].tolist(), [1.1, 2.0])
 
@@ -341,7 +344,7 @@ class TestQuickenPricesPureData(unittest.TestCase):
         )
         start_date = pd.Timestamp("2026-01-01", tz="UTC")
 
-        result = qp.process_converted_prices(converted, start_date)
+        result = processing.process_converted_prices(converted, start_date)
 
         self.assertEqual(set(result.columns), {"Ticker", "Price", "Date"})
         self.assertNotIn("OLD", set(result["Ticker"]))
@@ -372,7 +375,7 @@ class TestQuickenPricesPureData(unittest.TestCase):
                 m.assert_called_once()
 
         self.assertEqual(len(result), 3)
-        self.assertEqual(set(result.columns), set(qp.CACHE_COLUMNS))
+        self.assertEqual(set(result.columns), set(storage.CACHE_COLUMNS))
 
     def test_fetch_ticker_data_uses_cache_without_download(self):
         ticker = "TEST"
@@ -387,7 +390,7 @@ class TestQuickenPricesPureData(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as cache_dir:
-            qp.save_cache(ticker, cached, cache_dir)
+            storage.save_cache(ticker, cached, cache_dir)
             with mock.patch.object(qp, "download_data") as m:
                 result = qp.fetch_ticker_data(
                     ticker, start, end, float("nan"), cache_dir
@@ -415,7 +418,7 @@ class TestQuickenPricesPureData(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as cache_dir:
-            qp.save_cache(ticker, cached, cache_dir)
+            storage.save_cache(ticker, cached, cache_dir)
             with mock.patch.object(qp, "download_data", return_value=downloaded) as m:
                 result = qp.fetch_ticker_data(
                     ticker, start, end, float("nan"), cache_dir
@@ -513,19 +516,44 @@ class TestQuickenPricesPureData(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             config = {"paths": {"base": temp_dir, "data_file": "data.csv"}}
-            self.assertTrue(qp.save_to_csv(data, config))
+            storage.save_to_csv(data, config)
             output_path = Path(temp_dir) / "data.csv"
             original_output = output_path.read_bytes()
 
-            self.assertTrue(qp.save_to_csv(data, config))
+            storage.save_to_csv(data, config)
             self.assertEqual(output_path.read_bytes(), original_output)
 
             with mock.patch.object(pd.DataFrame, "to_csv", side_effect=OSError("disk full")):
                 with self.assertRaisesRegex(OSError, "disk full"):
-                    qp.save_to_csv(data, config)
+                    storage.save_to_csv(data, config)
 
             self.assertEqual(output_path.read_bytes(), original_output)
             self.assertEqual(list(Path(temp_dir).glob("*.tmp")), [])
+
+    def test_clean_cache_only_removes_expired_files_and_surfaces_errors(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir) / "cache"
+            cache_dir.mkdir()
+            expired_file = cache_dir / "expired.csv"
+            recent_file = cache_dir / "recent.csv"
+            expired_file.write_text("old", encoding="utf-8")
+            recent_file.write_text("new", encoding="utf-8")
+            os.utime(expired_file, (0, 0))
+            config = {
+                "paths": {"base": temp_dir, "cache": "cache"},
+                "cache": {"max_age_days": 1},
+            }
+
+            storage.clean_cache(config)
+
+            self.assertFalse(expired_file.exists())
+            self.assertTrue(recent_file.exists())
+
+            expired_file.write_text("old again", encoding="utf-8")
+            os.utime(expired_file, (0, 0))
+            with mock.patch.object(Path, "unlink", side_effect=PermissionError("denied")):
+                with self.assertRaisesRegex(PermissionError, "denied"):
+                    storage.clean_cache(config)
 
     def test_main_propagates_failures(self):
         with (

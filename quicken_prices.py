@@ -48,13 +48,22 @@ import yfinance as yf
 from settings import AppSettings
 from market_models import TickerMetadata
 
+from common import format_path, native_currencies, pluralise
+from price_processing import convert_prices, process_converted_prices
+from storage import (
+    CACHE_COLUMNS,
+    clean_cache,
+    load_cache,
+    normalize_cache_data,
+    save_cache,
+    save_to_csv,
+)
+
 # GUI and Automation Imports
 
 
 # Constants ###################################
 
-SECONDS_IN_A_DAY = 86400
-CACHE_COLUMNS = ("Ticker", "Old Price", "Date")
 PUBLIC_HOLIDAYS = {
     "01-01",  # New Year's Day
     "12-25",  # Christmas Day
@@ -420,19 +429,8 @@ def is_elevated():
 # Helper functions ############################
 
 
-def pluralise(title: str, quantity: int) -> str:
-    return title if quantity == 1 else title + "s"
 
 
-def native_currencies(home_currency: str) -> set:
-    """Currency codes already denominated in the home currency (no FX needed).
-
-    Includes the pence variant yfinance reports for some GBP-listed securities.
-    """
-    native = {home_currency}
-    if home_currency == "GBP":
-        native.add("GBp")
-    return native
 
 
 def adjust_date(date: pd.Timestamp, direction: str) -> pd.Timestamp:
@@ -560,12 +558,6 @@ def find_missing_ranges(
     return missing_ranges
 
 
-def format_path(full_path):
-    """Format a file path to show the last parent directory and filename."""
-    path = Path(full_path)
-    if path.parent == Path("."):
-        return f"\\{path.name}"
-    return f"\\{path.parent.name}\\{path.name}"
 
 
 # Validate tickers ############################
@@ -939,57 +931,8 @@ def fetch_ticker_data(
     return combined_data
 
 
-def normalize_cache_data(ticker: str, data: pd.DataFrame) -> pd.DataFrame:
-    """Normalize one ticker's rows identically for load, merge, and save."""
-    missing_columns = set(CACHE_COLUMNS).difference(data.columns)
-    if missing_columns:
-        raise ValueError(
-            f"{ticker}: Price data is missing columns {sorted(missing_columns)}."
-        )
-
-    normalized = data.loc[:, CACHE_COLUMNS].copy()
-    normalized = normalized.dropna(subset=["Ticker"])
-    normalized["Ticker"] = normalized["Ticker"].astype(str).str.upper()
-    normalized["Date"] = pd.to_datetime(normalized["Date"], errors="coerce", utc=True)
-    normalized["Old Price"] = pd.to_numeric(normalized["Old Price"], errors="coerce")
-    normalized = (
-        normalized.dropna(subset=["Date", "Old Price"])
-        .drop_duplicates(subset=["Date"], keep="last")
-        .sort_values("Date")
-        .reset_index(drop=True)
-    )
-    cached_tickers = set(normalized["Ticker"])
-    if cached_tickers and cached_tickers != {ticker.upper()}:
-        raise ValueError(
-            f"{ticker}: Price data contains unexpected tickers "
-            f"{sorted(cached_tickers)}."
-        )
-    return normalized
 
 
-def load_cache(ticker: str, cache_dir: str) -> Tuple[pd.DataFrame, str]:
-    """
-    Loads schema-checked CSV data for a ticker cache.
-
-    Args:
-        ticker (str): The ticker symbol.
-        cache_dir (str): Path to the cache directory.
-
-    Returns:
-        Tuple[pd.DataFrame, str]: A tuple containing:
-            - A DataFrame with cached data, or an empty DataFrame if the file is not found or empty.
-            - A string indicating the cache status: "not_found", "empty", or "loaded".
-    """
-    cache_file = Path(cache_dir) / f"{ticker}.csv"
-
-    if not cache_file.exists():
-        return pd.DataFrame(columns=CACHE_COLUMNS), "not_found"
-
-    if cache_file.stat().st_size == 0:
-        raise ValueError(f"{ticker}: Cache file is empty: {cache_file}")
-
-    data = normalize_cache_data(ticker, pd.read_csv(cache_file))
-    return data, "loaded"
 
 
 def download_data(
@@ -1037,349 +980,19 @@ def download_data(
     return raw_df
 
 
-def write_csv_atomically(
-    data: pd.DataFrame, destination: Path, *, index: bool, header: bool
-) -> None:
-    """Write a CSV beside its destination and replace it only after success."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        newline="",
-        prefix=f".{destination.name}.",
-        suffix=".tmp",
-        dir=destination.parent,
-        delete=False,
-    ) as temporary_file:
-        temporary_path = Path(temporary_file.name)
-
-    try:
-        data.to_csv(temporary_path, index=index, header=header)
-        temporary_path.replace(destination)
-    except BaseException:
-        temporary_path.unlink(missing_ok=True)
-        raise
 
 
-def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
-    """
-    Save a cache as an atomic CSV replacement.
-
-    Args:
-        ticker (str): The ticker symbol.
-        data (pd.DataFrame): DataFrame containing data to cache.
-    """
-    cache_path = Path(cache_dir)
-    cache_file = cache_path / f"{ticker}.csv"
-
-    missing_columns = set(CACHE_COLUMNS).difference(data.columns)
-    if missing_columns:
-        raise ValueError(
-            f"Cannot save cache for {ticker}; missing columns "
-            f"{sorted(missing_columns)}."
-        )
-
-    cache_data = normalize_cache_data(ticker, data)
-    if cache_data.empty:
-        raise ValueError(f"Cannot save an empty cache for {ticker}.")
-    write_csv_atomically(cache_data, cache_file, index=False, header=True)
-
-    logging.info(
-        f"{ticker}: Cache saved from {cache_data['Date'].min().strftime('%d/%m/%Y')} "
-        f"to {cache_data['Date'].max().strftime('%d/%m/%Y')} "
-        f"({len(cache_data)} days)."
-    )
 
 
-def clean_cache(config):
-    """
-    Cleans up cache files older than the configured maximum age.
-
-    Args:
-        config (dict): Configuration dictionary containing cache path and max age settings.
-
-    Returns:
-        bool: True if cleaning completes successfully, False otherwise.
-    """
-
-    cache_dir = Path(config["paths"]["base"]) / config["paths"]["cache"]
-    max_age_seconds = config["cache"]["max_age_days"] * SECONDS_IN_A_DAY
-    now = time.time()
-
-    if not cache_dir.is_dir():
-        logging.warning(f"Cache cleaning: can't find {cache_dir}")
-        return False
-
-    deleted_files = 0
-    try:
-        for entry in cache_dir.iterdir():
-            if entry.is_file() and (now - entry.stat().st_mtime) > max_age_seconds:
-                try:
-                    entry.unlink()
-                    deleted_files += 1
-                    logging.info(
-                        f"Cache cleaning: {entry.name} deleted. Older than {config['cache']['max_age_days']} {pluralise('day', config['cache']['max_age_days'])}"
-                    )
-                except Exception as remove_error:
-                    logging.error(
-                        f"Cache cleaning: Failed to delete file {entry}: {remove_error}"
-                    )
-
-        logging.info(
-            f"Cache cleaning: {deleted_files} cache {pluralise('file', deleted_files)} deleted\n"
-        )
-    except Exception as e:
-        logging.error(
-            f"Cache cleaning: Error with {cache_dir}: {e}. Check file permissions or existence of the directory"
-        )
-        logging.debug("Full traceback:\n%s", traceback.format_exc())
-        return False
-
-    return True
 
 
 # Process Data ################################
 
 
-def convert_prices(df: pd.DataFrame, home_currency: str = "GBP") -> pd.DataFrame:
-    """
-    Converts prices to the home currency based on ticker type and currency
-    (daily data), while also logging mismatched days between equity and FX.
-
-    Logic Overview:
-      1) Separate equity rows (Type != "CURRENCY") from FX rows (Type == "CURRENCY").
-      2) Log how many dates appear in equity vs. FX vs. both (mismatched days).
-      3) For currency rows, group by (Date, Ticker) to build an 'FX Rate'.
-      4) Merge 'FX Rate' into equity rows on (Date, FX Ticker) using merge_asof.
-      5) Set FX Rate = 1.0 (or 0.01 for the GBP pence variant).
-      6) Raise an error if non-home rows have missing FX rates.
-      7) Compute final Price in the home currency and return the result.
-
-    Args:
-        df: DataFrame containing historical data. Must include columns:
-            'Date', 'Type', 'Ticker', 'Old Price', 'Original Currency'.
-        home_currency: The target currency for conversion (e.g. "GBP").
-
-    Returns:
-        DataFrame with a new 'Price' column converted to the home currency.
-        Raises ValueError if missing FX rates are found for non-home instruments.
-        Returns empty DataFrame if 'df' is empty or errors occur.
-    """
-    # Quick check
-    if df.empty:
-        logging.error("Empty DataFrame received.")
-        return pd.DataFrame()
-
-    required_columns = {"Date", "Type", "Ticker", "Old Price", "Original Currency"}
-    missing_columns = required_columns.difference(df.columns)
-    if missing_columns:
-        logging.error(f"Missing required columns for conversion: {sorted(missing_columns)}")
-        return pd.DataFrame()
-
-    # 1) Separate equity rows vs. FX rows
-    equity_df = df[df["Type"] != "CURRENCY"].copy()
-    fx_df = df[df["Type"] == "CURRENCY"].copy()
-    equity_df["Date"] = pd.to_datetime(equity_df["Date"], utc=True, errors="coerce").dt.normalize()
-    fx_df["Date"] = pd.to_datetime(fx_df["Date"], utc=True, errors="coerce").dt.normalize()
-    equity_df["Old Price"] = pd.to_numeric(equity_df["Old Price"], errors="coerce")
-    fx_df["Old Price"] = pd.to_numeric(fx_df["Old Price"], errors="coerce")
-    equity_df.dropna(subset=["Date", "Ticker", "Old Price"], inplace=True)
-    fx_df.dropna(subset=["Date", "Ticker", "Old Price"], inplace=True)
-
-    # 2) Log day coverage mismatches
-    equity_days = set(equity_df["Date"])
-    fx_days = set(fx_df["Date"])
-    common_days = equity_days.intersection(fx_days)
-    unmatched_equity_days = equity_days - fx_days
-    unmatched_fx_days = fx_days - equity_days
-    logging.info(
-        f"Total equity {pluralise('day', len(equity_days))}: {len(equity_days)}"
-    )
-    logging.info(f"Total FX {pluralise('day', len(fx_days))}: {len(fx_days)}")
-    logging.info(f"Common {pluralise('day', len(common_days))}: {len(common_days)}")
-    logging.info(
-        f"Equity-only {pluralise('day', len(unmatched_equity_days))}: {len(unmatched_equity_days)}"
-    )
-    logging.info(
-        f"FX-only {pluralise('day', len(unmatched_fx_days))}: {len(unmatched_fx_days)}\n"
-    )
-
-    # 3) Build a minimal FX DataFrame -> 'FX Rate'
-    exchange_rate_df = (
-        fx_df.groupby(["Date", "Ticker"])["Old Price"]
-        .first()  # one price per date+ticker
-        .rename("FX Rate")
-        .reset_index()
-        .rename(columns={"Ticker": "FX Ticker"})
-    )
-
-    # 4) Work on a copy of the equity data to avoid mutating the original
-    equity_df = equity_df.copy()
-
-    # We'll rename 'Price' -> 'Old Price' so we can store a new 'Price'
-    if "Price" in equity_df.columns:
-        equity_df = equity_df.rename(columns={"Price": "Old Price"})
-
-    if equity_df.empty:
-        fx_only_df = fx_df.rename(columns={"Old Price": "Price"})[["Ticker", "Price", "Date"]]
-        return fx_only_df.sort_values(by=["Date", "Ticker"]).reset_index(drop=True)
-
-    # Prepare an 'FX Ticker' column for non-home currencies
-    equity_df["FX Ticker"] = "-"
-    equity_df["Original Currency"] = equity_df["Original Currency"].astype(str)
-    native = native_currencies(home_currency)
-    non_home_mask = ~equity_df["Original Currency"].isin(native)
-    equity_df.loc[non_home_mask, "FX Ticker"] = (
-        equity_df.loc[non_home_mask, "Original Currency"] + f"{home_currency}=X"
-    )
-
-    # Ensure data types match for merging
-    equity_df["FX Ticker"] = equity_df["FX Ticker"].astype(str)
-    exchange_rate_df["FX Ticker"] = exchange_rate_df["FX Ticker"].astype(str)
-
-    # 5) Merge the 'FX Rate' onto the equity rows using merge_asof.
-    # Pandas requires the merge key to be sorted, so do the asof merge
-    # ticker-by-ticker instead of one global multi-key merge.
-    equity_df = equity_df.reset_index().rename(columns={"index": "_row_order"})
-    merged_groups = []
-    for fx_ticker, equity_group in equity_df.groupby("FX Ticker", sort=False):
-        equity_group = equity_group.sort_values("Date").copy()
-        fx_group = (
-            exchange_rate_df.loc[
-                exchange_rate_df["FX Ticker"] == fx_ticker, ["Date", "FX Rate"]
-            ]
-            .sort_values("Date")
-            .reset_index(drop=True)
-        )
-
-        if fx_group.empty:
-            equity_group["FX Rate"] = pd.NA
-        else:
-            equity_group = pd.merge_asof(
-                equity_group,
-                fx_group,
-                on="Date",
-                direction="backward",  # Use the last known FX rate
-            )
-
-        merged_groups.append(equity_group)
-
-    equity_df = (
-        pd.concat(merged_groups, ignore_index=True)
-        .sort_values("_row_order")
-        .drop(columns="_row_order")
-        .reset_index(drop=True)
-    )
-
-    # 6) Hard-code FX Rate for the home currency and its pence variant
-    home_mask = equity_df["Original Currency"] == home_currency
-    non_home_mask = ~equity_df["Original Currency"].isin(native)
-    equity_df.loc[home_mask, "FX Rate"] = 1.0
-    if home_currency == "GBP":
-        equity_df.loc[equity_df["Original Currency"] == "GBp", "FX Rate"] = 0.01
-
-    # 7) Refuse to apply rates from future dates to earlier equity prices.
-    missing_fx_mask = equity_df["FX Rate"].isna() & non_home_mask
-    if missing_fx_mask.any():
-        missing_rows = equity_df[missing_fx_mask]
-        logging.error(f"Missing historical FX rates for equity rows:\n{missing_rows}")
-        raise ValueError(
-            f"{len(missing_rows)} equity rows have no FX rate on or before "
-            "their price date."
-        )
-
-    # 8) Calculate final Price in the home currency
-    equity_df["Price"] = equity_df["Old Price"] * equity_df["FX Rate"]
-
-    # Log how many conversions happened (where 'FX Ticker' != '-')
-    converted_count = int((equity_df["FX Ticker"] != "-").sum())
-    logging.info(f"{converted_count} prices successfully converted to {home_currency}\n")
-
-    # 9) Validate floating-point multiplication
-    conversion_error_mask = (
-        equity_df["Price"].notna()
-        & (equity_df["FX Rate"] * equity_df["Old Price"] - equity_df["Price"]).abs().gt(1e-6)
-    )
-    incorrect_rows = equity_df[conversion_error_mask]
-    if not incorrect_rows.empty:
-        logging.warning(f"The following rows have conversion errors:\n{incorrect_rows}")
-
-    # 10) merge equity and fx df's with "Ticker", "Price", "Date" cols
-    equity_df = equity_df[["Ticker", "Price", "Date"]]
-    fx_df = fx_df.rename(columns={"Old Price": "Price"})
-    fx_df = fx_df[["Ticker", "Price", "Date"]]
-    combined_df = pd.concat([equity_df, fx_df])
-    # Sort by Date then Ticker and reset index
-    combined_df = combined_df.sort_values(by=["Date", "Ticker"]).reset_index(drop=True)
-
-    return combined_df
 
 
-def process_converted_prices(
-    converted_df: pd.DataFrame, start_date: pd.Timestamp
-) -> pd.DataFrame:
-    """
-    Prepares the final DataFrame for CSV export.
-
-    Args:
-        converted_df: DataFrame with "Ticker", "Date", "Price"
-
-    Returns:
-        Processed DataFrame ready to be saved as CSV, or an empty DataFrame if input is empty.
-        Raises if a critical error occurs.
-    """
-
-    if converted_df.empty:
-        logging.warning("Input DataFrame is empty. Returning empty DataFrame.")
-        return pd.DataFrame(columns=["Ticker", "Price", "Date"])
-
-    try:
-        output_csv = converted_df[["Ticker", "Price", "Date"]].copy()
-
-        # Ensure 'Date' is a proper datetime type
-        output_csv["Date"] = pd.to_datetime(output_csv["Date"], errors="coerce")
-
-        # Sort by descending date (in place)
-        output_csv.sort_values(by="Date", ascending=False, inplace=True)
-
-        # Filter rows to include only those with 'Date' >= start_date
-        output_csv = output_csv[output_csv["Date"] >= start_date]
-
-        # Format date as string using .dt.strftime() -> DD/MM/YYYY
-        output_csv["Date"] = output_csv["Date"].dt.strftime("%d/%m/%Y")
-
-        return output_csv
-
-    except Exception as e:
-        logging.exception(f"A critical error occurred: {e}")
-        raise
 
 
-def save_to_csv(df: pd.DataFrame, config: Dict[str, Any]) -> bool:
-    """
-    Saves the DataFrame to a CSV file without headers.
-
-    Args:
-        df: DataFrame to save.
-        config: Configuration dictionary.
-
-    Returns:
-        True if saved successfully.
-    """
-
-    file_path = Path(config["paths"]["base"]) / config["paths"]["data_file"]
-    if df.empty:
-        raise ValueError("No data to save.")
-    required_columns = ["Ticker", "Price", "Date"]
-    missing_columns = set(required_columns).difference(df.columns)
-    if missing_columns:
-        raise ValueError(
-            f"Cannot save CSV; missing required columns {sorted(missing_columns)}."
-        )
-
-    write_csv_atomically(df[required_columns], file_path, index=False, header=False)
-    logging.info(f"Data saved successfully to {format_path(file_path)}\n")
-    return True
 
 
 # Quicken GUI #################################
