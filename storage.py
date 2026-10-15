@@ -7,12 +7,19 @@ from pathlib import Path
 from typing import Tuple
 
 import pandas as pd
+from pydantic import TypeAdapter
 
 from common import format_path, pluralise
-from settings import AppSettings
+from settings import AppSettings, TickerSymbol
 
 SECONDS_IN_A_DAY = 86400
 CACHE_COLUMNS = ("Ticker", "Old Price", "Date")
+TICKER_SYMBOL_ADAPTER = TypeAdapter(TickerSymbol)
+
+
+def _cache_file(ticker: str, cache_dir: str) -> Path:
+    validated_ticker = TICKER_SYMBOL_ADAPTER.validate_python(ticker, strict=True)
+    return Path(cache_dir) / f"{validated_ticker.upper()}.csv"
 
 
 def normalize_cache_data(ticker: str, data: pd.DataFrame) -> pd.DataFrame:
@@ -56,7 +63,7 @@ def load_cache(ticker: str, cache_dir: str) -> Tuple[pd.DataFrame, str]:
             - A DataFrame with cached data, or an empty frame when not found.
             - A status of "not_found" or "loaded".
     """
-    cache_file = Path(cache_dir) / f"{ticker}.csv"
+    cache_file = _cache_file(ticker, cache_dir)
 
     if not cache_file.exists():
         return pd.DataFrame(columns=CACHE_COLUMNS), "not_found"
@@ -100,8 +107,7 @@ def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
         ticker (str): The ticker symbol.
         data (pd.DataFrame): DataFrame containing data to cache.
     """
-    cache_path = Path(cache_dir)
-    cache_file = cache_path / f"{ticker}.csv"
+    cache_file = _cache_file(ticker, cache_dir)
 
     missing_columns = set(CACHE_COLUMNS).difference(data.columns)
     if missing_columns:

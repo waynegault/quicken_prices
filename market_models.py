@@ -4,11 +4,11 @@ from datetime import datetime, timezone
 
 from pydantic import Field, field_validator
 
-from settings import StrictModel
+from settings import StrictModel, TickerSymbol
 
 
 class TickerMetadata(StrictModel):
-    ticker: str = Field(min_length=1)
+    ticker: TickerSymbol
     earliest_date: datetime | None
     instrument_type: str = Field(min_length=1)
     currency: str = Field(min_length=1)

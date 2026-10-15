@@ -82,6 +82,10 @@ class TestQuickenPricesPureData(unittest.TestCase):
 
             detect_path.assert_not_called()
 
+    def test_settings_reject_ticker_path_separators(self):
+        with self.assertRaises(ValidationError):
+            AppSettings(paths={"base": "."}, tickers=["../outside"])
+
     def test_missing_configuration_is_not_created(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "missing.yaml"
@@ -320,6 +324,9 @@ class TestQuickenPricesPureData(unittest.TestCase):
             cache_file.write_text("Ticker,Unrelated\nTEST,1\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "missing columns"):
                 storage.load_cache("TEST", temp_dir)
+
+            with self.assertRaises(ValidationError):
+                storage.load_cache("../outside", temp_dir)
 
     def test_save_cache_rejects_empty_or_mismatched_data(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -677,6 +684,14 @@ class TestQuickenPricesPureData(unittest.TestCase):
             TickerMetadata(
                 ticker="TEST",
                 earliest_date=pd.Timestamp("2026-01-01"),
+                instrument_type="EQUITY",
+                currency="USD",
+                current_price=42.5,
+            )
+        with self.assertRaises(ValidationError):
+            TickerMetadata(
+                ticker="../outside",
+                earliest_date=None,
                 instrument_type="EQUITY",
                 currency="USD",
                 current_price=42.5,

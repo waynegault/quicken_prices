@@ -1,12 +1,17 @@
 """Strict configuration models for QuickenPrices."""
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
+
+
+TickerSymbol = Annotated[
+    str, Field(pattern=r"^[A-Za-z0-9^][A-Za-z0-9.^=-]*$")
+]
 
 
 class RetrySettings(StrictModel):
@@ -52,7 +57,7 @@ class CacheSettings(StrictModel):
 
 
 class AppSettings(StrictModel):
-    tickers: list[str] = Field(default_factory=lambda: ["^FTSE"], min_length=1)
+    tickers: list[TickerSymbol] = Field(default_factory=lambda: ["^FTSE"], min_length=1)
     home_currency: str = Field(default="GBP", min_length=3, max_length=3)
     collection_period_years: float = Field(default=0.08, gt=0)
     retries: RetrySettings = Field(default_factory=RetrySettings)
