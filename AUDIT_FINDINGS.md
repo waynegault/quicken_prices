@@ -42,6 +42,9 @@ all technical debt has been eliminated.
 - **Malformed-row drops were silent** — download, cache normalization, and
   conversion emit warnings when invalid or duplicate rows are discarded.
   (`466c4e6`)
+- **Oversized FX conversion regression setup** — extracted the multi-row
+  conversion scenario into named reusable test data, reducing duplication
+  within the test and keeping the inverse-rate case explicit. (`4894685`)
 - **Startup touching user cache / missing config creation** — startup checks
   use temporary storage and missing configuration is an error.
   (`ba63033`)
@@ -145,3 +148,7 @@ all technical debt has been eliminated.
 - Transient-only retry defaults — `d800620`; 46 tests passed.
 - Malformed provider/cache/price rows now log discard warnings — `466c4e6`;
   48 tests passed.
+- Documentation aligned with the final audit and runtime behavior —
+  `d626ea1`.
+- Extracted the reusable FX conversion test scenario — `4894685`; 48 tests
+  passed, compileall and `git diff --check` passed.
