@@ -348,14 +348,6 @@ def main():
         if price_data.empty:
             raise ValueError("No valid price data fetched.")
 
-        # Drop cached rows that predate the requested collection period. They
-        # would otherwise be converted (with missing FX rates for freshly-added
-        # FX tickers) and then discarded by process_converted_prices anyway.
-        price_data["Date"] = pd.to_datetime(price_data["Date"], utc=True, errors="coerce")
-        price_data = price_data[price_data["Date"] >= start_date]
-        if price_data.empty:
-            raise ValueError("No price data falls within the requested period.")
-
         # 7) Convert prices to the home currency
         processed_data = convert_prices(price_data, home_currency=home_currency)
 

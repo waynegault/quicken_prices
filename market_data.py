@@ -418,6 +418,122 @@ def fetch_historical_data(
     logging.warning("No valid data fetched for any tickers.")
     return pd.DataFrame(columns=list(CACHE_COLUMNS) + ["Type", "Original Currency"])
 
+
+def _get_cache_bounds(
+    ticker: str, cache_data: pd.DataFrame, cache_status: str
+) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
+    if cache_status == "not_found":
+        logging.info(f"{ticker}: No cache file found. Will fetch entire range.")
+        return None, None
+
+    first_cache = cache_data["Date"].min()
+    last_cache = cache_data["Date"].max()
+    if cache_data.empty or pd.isna(first_cache) or pd.isna(last_cache):
+        logging.info(f"{ticker}: Cache contained no usable rows. Will fetch range.")
+        return None, None
+
+    logging.info(
+        f"{ticker}: Cache loaded from {first_cache.strftime('%d/%m/%Y')} to "
+        f"{last_cache.strftime('%d/%m/%Y')} "
+        f"({len(cache_data)} {pluralise('day', len(cache_data))})"
+    )
+    return first_cache, last_cache
+
+
+def _download_missing_data(
+    ticker: str, missing_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]]
+) -> pd.DataFrame:
+    downloaded_frames = []
+    for range_start, range_end in missing_ranges:
+        partial_data = download_data(ticker, range_start, range_end)
+        if not partial_data.empty:
+            downloaded_frames.append(partial_data)
+
+    if not downloaded_frames:
+        return pd.DataFrame(columns=CACHE_COLUMNS)
+    return normalize_cache_data(
+        ticker, pd.concat(downloaded_frames, ignore_index=True)
+    )
+
+
+def _merge_and_save_cache(
+    ticker: str,
+    cache_data: pd.DataFrame,
+    downloaded_data: pd.DataFrame,
+    cache_dir: str,
+) -> pd.DataFrame:
+    combined_data = normalize_cache_data(
+        ticker, pd.concat([cache_data, downloaded_data], ignore_index=True)
+    )
+    if not combined_data.empty and not downloaded_data.empty:
+        save_cache(ticker, combined_data, cache_dir)
+    return combined_data
+
+
+def _forward_fill_fx_data(
+    ticker: str, combined_data: pd.DataFrame
+) -> pd.DataFrame:
+    if "=X" not in ticker.upper() or combined_data.empty:
+        return combined_data
+
+    min_date = combined_data["Date"].min().normalize()
+    max_date = combined_data["Date"].max().normalize()
+    all_days = pd.date_range(min_date, max_date, freq="D")
+    filled_data = (
+        combined_data.set_index("Date")
+        .reindex(all_days, method="ffill")
+        .rename_axis("Date")
+        .reset_index()
+    )
+    if len(filled_data) != len(combined_data):
+        logging.info(f"{ticker}: Forward-filled FX data ({len(all_days)} days)")
+    return filled_data
+
+
+def _append_current_price(
+    ticker: str,
+    combined_data: pd.DataFrame,
+    current_price: float,
+    end_date: pd.Timestamp,
+) -> pd.DataFrame:
+    today = pd.Timestamp.now(tz="UTC").normalize()
+    if (
+        not combined_data.empty
+        and end_date.normalize() >= today
+        and combined_data["Date"].max().normalize() < today
+        and isinstance(current_price, Real)
+        and not pd.isna(current_price)
+        and current_price > 0
+    ):
+        new_row = pd.DataFrame(
+            [{"Ticker": ticker, "Old Price": current_price, "Date": today}]
+        )
+        combined_data = normalize_cache_data(
+            ticker, pd.concat([combined_data, new_row], ignore_index=True)
+        )
+        logging.info(
+            f"{ticker}: Appended today's {today.strftime('%d/%m/%Y')} "
+            f"latest price = {current_price:.3f}"
+        )
+    return combined_data
+
+
+def _select_requested_data(
+    ticker: str,
+    combined_data: pd.DataFrame,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+) -> pd.DataFrame:
+    in_range = combined_data[
+        combined_data["Date"].between(start_date, end_date, inclusive="both")
+    ]
+    if "=X" not in ticker.upper():
+        return in_range.reset_index(drop=True)
+
+    prior_context = combined_data[combined_data["Date"] < start_date].tail(1)
+    return pd.concat([prior_context, in_range], ignore_index=True)
+
+
 def fetch_ticker_data(
     ticker: str,
     start_date: pd.Timestamp,
@@ -431,114 +547,31 @@ def fetch_ticker_data(
     Forward-fills missing dates if this is a CURRENCY ticker.
     """
 
-    # 1) Load cache
+    if start_date > end_date:
+        raise ValueError("start_date must not be after end_date.")
+
     cache_data, cache_status = load_cache(ticker, cache_dir)
-
-    # 2) Identify missing date ranges in cache
-    if cache_status == "not_found":
-        logging.info(f"{ticker}: No cache file found. Will fetch entire range.")
-        first_cache, last_cache = None, None
-    else:
-        first_cache = cache_data["Date"].min()
-        last_cache = cache_data["Date"].max()
-        if cache_data.empty or pd.isna(first_cache) or pd.isna(last_cache):
-            logging.info(f"{ticker}: Cache contained no usable rows. Will fetch range.")
-            first_cache, last_cache = None, None
-        else:
-            logging.info(
-                f"{ticker}: Cache loaded from {first_cache.strftime('%d/%m/%Y')} to "
-                f"{last_cache.strftime('%d/%m/%Y')} "
-                f"({len(cache_data)} {pluralise('day', len(cache_data))})"
-            )
-
-    # 3) Determine missing date ranges
+    first_cache, last_cache = _get_cache_bounds(ticker, cache_data, cache_status)
     missing_ranges = find_missing_ranges(start_date, end_date, first_cache, last_cache)
-
-    # 4) Download missing data via yfinance
-    downloaded_frames = []
-    if missing_ranges:
-        for rng_start, rng_end in missing_ranges:
-            partial_data = download_data(ticker, rng_start, rng_end)
-            if not partial_data.empty:
-                downloaded_frames.append(partial_data)
-    downloaded_data = (
-        normalize_cache_data(ticker, pd.concat(downloaded_frames, ignore_index=True))
-        if downloaded_frames
-        else pd.DataFrame(columns=CACHE_COLUMNS)
+    downloaded_data = _download_missing_data(ticker, missing_ranges)
+    combined_data = _merge_and_save_cache(
+        ticker, cache_data, downloaded_data, cache_dir
     )
-
-    # 5) Merge newly downloaded data with cache
-    if cache_data.empty:
-        combined_data = downloaded_data
-    elif downloaded_data.empty:
-        combined_data = cache_data
-    else:
-        combined_data = pd.concat([cache_data, downloaded_data], ignore_index=True)
-
-    combined_data = normalize_cache_data(ticker, combined_data)
     if combined_data.empty:
         logging.warning(f"{ticker}: No price data available after cache and download checks.")
         return combined_data
 
-    # 6) Save cache only if changes occurred (and before forwards-fill)
-    if not downloaded_data.empty:
-        save_cache(ticker, combined_data, cache_dir)
+    combined_data = _forward_fill_fx_data(ticker, combined_data)
+    combined_data = _append_current_price(
+        ticker, combined_data, current_price, end_date
+    )
+    combined_data = _select_requested_data(
+        ticker, combined_data, start_date, end_date
+    )
+    if combined_data.empty:
+        logging.warning(f"{ticker}: No data falls within the requested date range.")
+        return combined_data
 
-    # 7) Forward-fill logic (for FX tickers)
-    if "=X" in ticker.upper():
-        min_date = combined_data["Date"].min().normalize()
-        max_date = combined_data["Date"].max().normalize()
-        # Create full range of dates for every calendar day even if there are gaps in the original data
-        all_days = pd.date_range(min_date, max_date, freq="D")
-
-        # Create a full date range for each ticker where all calendar days are present, and missing data is covered by forward-filling the last known value.
-        # Get a list of all unique tickers in the dataset
-        all_tickers = combined_data["Ticker"].unique()
-        # create a MultiIndex that combines all dates and all tickers
-        all_ticker_dates = pd.MultiIndex.from_product(
-            [all_days, all_tickers], names=["Date", "Ticker"]
-        )
-        # Create a df where all calendar days are present for every ticker, and missing data is covered by forward-filling the last known value.
-        forward_filled_data = (
-            # Temporarily use Date and Ticker as a MultiIndex
-            combined_data.set_index(["Date", "Ticker"])
-            # Reindex to include every day in all_days, (adding rows missing in combined_data) filling any missing rows with the last available data (forward-filling).
-            .reindex(all_ticker_dates, method="ffill")
-            # Convert the MultiIndex back into regular columns.
-            .reset_index()
-        )
-
-        if not combined_data.equals(forward_filled_data):
-            logging.info(f"{ticker}: Forward-filled FX data ({len(all_days)} days)")
-            combined_data = forward_filled_data
-
-    # 8) Append latest price if today's closing not available
-    max_date = combined_data["Date"].max()
-    today = pd.Timestamp.now(tz="UTC").normalize()
-
-    if (
-        pd.notna(max_date)
-        and max_date.normalize() < today
-        and isinstance(current_price, Real)
-        and not pd.isna(current_price)
-        and current_price > 0
-    ):
-        new_row = pd.DataFrame(
-            [
-                {
-                    "Ticker": ticker,
-                    "Old Price": current_price,
-                    "Date": today,
-                }
-            ]
-        )
-        combined_data = pd.concat([combined_data, new_row], ignore_index=True)
-        combined_data = normalize_cache_data(ticker, combined_data)
-        logging.info(
-            f"{ticker}: Appended today's {today.strftime('%d/%m/%Y')} latest price = {current_price:.3f}"
-        )
-
-    # 9) Final log
     logging.info(
         f"{ticker}: Got {len(combined_data)} {pluralise('day', len(combined_data))} data "
         f"from {combined_data['Date'].min().strftime('%d/%m/%Y')} to {combined_data['Date'].max().strftime('%d/%m/%Y')}\n"

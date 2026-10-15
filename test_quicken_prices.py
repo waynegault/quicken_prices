@@ -526,6 +526,78 @@ class TestQuickenPricesPureData(unittest.TestCase):
         self.assertEqual(result["Old Price"].min(), 1.0)
         self.assertEqual(result["Old Price"].max(), 5.0)
 
+    def test_fetch_ticker_data_limits_rows_and_current_price_to_requested_end(self):
+        ticker = "TEST"
+        today = pd.Timestamp.now(tz="UTC").normalize()
+        start = today - pd.Timedelta(days=5)
+        end = today - pd.Timedelta(days=2)
+        cached = pd.DataFrame(
+            [
+                {"Ticker": ticker, "Old Price": 1.0, "Date": today - pd.Timedelta(days=7)},
+                {"Ticker": ticker, "Old Price": 2.0, "Date": today - pd.Timedelta(days=4)},
+                {"Ticker": ticker, "Old Price": 3.0, "Date": today - pd.Timedelta(days=1)},
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as cache_dir:
+            storage.save_cache(ticker, cached, cache_dir)
+            with mock.patch.object(market_data, "download_data") as download:
+                result = market_data.fetch_ticker_data(
+                    ticker, start, end, 99.0, cache_dir
+                )
+                download.assert_not_called()
+
+        self.assertEqual(result["Date"].tolist(), [today - pd.Timedelta(days=4)])
+        self.assertNotIn(99.0, result["Old Price"].tolist())
+
+    def test_fx_fetch_keeps_one_prior_context_row_without_leaking_future_rows(self):
+        ticker = "USDGBP=X"
+        today = pd.Timestamp.now(tz="UTC").normalize()
+        start = today - pd.Timedelta(days=5)
+        end = today - pd.Timedelta(days=2)
+        cached = pd.DataFrame(
+            [
+                {"Ticker": ticker, "Old Price": 0.7, "Date": today - pd.Timedelta(days=7)},
+                {"Ticker": ticker, "Old Price": 0.8, "Date": today - pd.Timedelta(days=4)},
+                {"Ticker": ticker, "Old Price": 0.9, "Date": today - pd.Timedelta(days=1)},
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as cache_dir:
+            storage.save_cache(ticker, cached, cache_dir)
+            with mock.patch.object(market_data, "download_data") as download:
+                result = market_data.fetch_ticker_data(
+                    ticker, start, end, float("nan"), cache_dir
+                )
+                download.assert_not_called()
+
+        self.assertEqual(result["Date"].min(), start - pd.Timedelta(days=1))
+        self.assertEqual(result["Date"].max(), end)
+        self.assertEqual(result.iloc[0]["Old Price"], 0.7)
+        self.assertNotIn(today - pd.Timedelta(days=1), result["Date"].tolist())
+
+    def test_fetch_ticker_data_appends_live_price_only_when_requested_through_today(self):
+        ticker = "TEST"
+        today = pd.Timestamp.now(tz="UTC").normalize()
+        yesterday = today - pd.Timedelta(days=1)
+        cached = pd.DataFrame(
+            [{"Ticker": ticker, "Old Price": 1.0, "Date": yesterday}]
+        )
+
+        with tempfile.TemporaryDirectory() as cache_dir:
+            storage.save_cache(ticker, cached, cache_dir)
+            with mock.patch.object(market_data, "download_data", return_value=pd.DataFrame()):
+                result = market_data.fetch_ticker_data(
+                    ticker, yesterday, today, 2.0, cache_dir
+                )
+            persisted, _ = storage.load_cache(ticker, cache_dir)
+
+        self.assertIn(today, result["Date"].tolist())
+        self.assertEqual(
+            result.loc[result["Date"] == today, "Old Price"].iloc[0], 2.0
+        )
+        self.assertNotIn(today, persisted["Date"].tolist())
+
     def test_fetch_historical_data_propagates_ticker_failures(self):
         ticker_info = TickerMetadata(
             ticker="TEST",
