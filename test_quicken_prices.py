@@ -177,11 +177,43 @@ class TestQuickenPricesPureData(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             qp.save_cache("TEST", sample, temp_dir)
             loaded, status = qp.load_cache("TEST", temp_dir)
+            self.assertTrue((Path(temp_dir) / "TEST.csv").is_file())
+            self.assertFalse((Path(temp_dir) / "TEST.pkl").exists())
 
         self.assertEqual(status, "loaded")
         self.assertFalse(loaded.empty)
         self.assertEqual(len(loaded), 2)
         self.assertEqual(set(loaded.columns), set(qp.CACHE_COLUMNS))
+
+    def test_cache_load_rejects_empty_or_invalid_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_file = Path(temp_dir) / "TEST.csv"
+            cache_file.write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "empty"):
+                qp.load_cache("TEST", temp_dir)
+
+            cache_file.write_text("Ticker,Unrelated\nTEST,1\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "missing columns"):
+                qp.load_cache("TEST", temp_dir)
+
+    def test_save_cache_rejects_empty_or_mismatched_data(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "missing columns"):
+                qp.save_cache("TEST", pd.DataFrame(), temp_dir)
+
+            wrong_ticker = pd.DataFrame(
+                [
+                    {
+                        "Ticker": "OTHER",
+                        "Old Price": 1.23,
+                        "Date": pd.Timestamp("2026-01-01", tz="UTC"),
+                    }
+                ]
+            )
+            with self.assertRaisesRegex(ValueError, "contains tickers"):
+                qp.save_cache("TEST", wrong_ticker, temp_dir)
+
+            self.assertFalse((Path(temp_dir) / "TEST.csv").exists())
 
 
     def test_find_missing_ranges_returns_empty_when_fully_covered(self):

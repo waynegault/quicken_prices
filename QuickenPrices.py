@@ -25,7 +25,6 @@ import ctypes
 import datetime
 import logging
 import os
-import pickle
 import subprocess
 import sys
 import tempfile
@@ -914,10 +913,6 @@ def fetch_ticker_data(
         logging.info(f"{ticker}: No cache file found. Will fetch entire range.")
         first_cache, last_cache = None, None
         cache_data = pd.DataFrame(columns=CACHE_COLUMNS)
-    elif cache_status == "empty":
-        logging.info(f"{ticker}: Cache file is empty. Will fetch entire range.")
-        first_cache, last_cache = None, None
-        cache_data = pd.DataFrame(columns=CACHE_COLUMNS)
     elif cache_status == "loaded":
         # Ensure cache data has the expected schema and usable rows.
         if all(column in cache_data.columns for column in CACHE_COLUMNS):
@@ -1069,7 +1064,7 @@ def fetch_ticker_data(
 
 def load_cache(ticker: str, cache_dir: str) -> Tuple[pd.DataFrame, str]:
     """
-    Loads cached data for a specific ticker using pickle.
+    Loads schema-checked CSV data for a ticker cache.
 
     Args:
         ticker (str): The ticker symbol.
@@ -1080,33 +1075,22 @@ def load_cache(ticker: str, cache_dir: str) -> Tuple[pd.DataFrame, str]:
             - A DataFrame with cached data, or an empty DataFrame if the file is not found or empty.
             - A string indicating the cache status: "not_found", "empty", or "loaded".
     """
-    cache_file = Path(cache_dir) / f"{ticker}.pkl"
+    cache_file = Path(cache_dir) / f"{ticker}.csv"
 
-    if cache_file.exists():
-        try:
-            # Check if the file is empty
-            if cache_file.stat().st_size == 0:
-                logging.warning(f"{ticker}: Cache file exists but is empty.")
-                return pd.DataFrame(columns=CACHE_COLUMNS), "empty"
-
-            # File exists and is not empty, attempt to load.
-            # NOTE: unpickling is only safe because the cache directory is
-            # user-owned and not writable by untrusted users.
-            with open(cache_file, "rb") as f:
-                data = pickle.load(f)
-
-            # Ensure data is a DataFrame
-            if isinstance(data, pd.DataFrame):
-                return data, "loaded"
-            else:
-                logging.error(f"{ticker}: Cache file is invalid or corrupted.")
-                return pd.DataFrame(columns=CACHE_COLUMNS), "empty"
-
-        except (FileNotFoundError, IOError, pickle.UnpicklingError) as e:
-            logging.error(f"Failed to load cache for {ticker}: {e}")
-            return pd.DataFrame(columns=CACHE_COLUMNS), "empty"
-    else:
+    if not cache_file.exists():
         return pd.DataFrame(columns=CACHE_COLUMNS), "not_found"
+
+    if cache_file.stat().st_size == 0:
+        raise ValueError(f"{ticker}: Cache file is empty: {cache_file}")
+
+    data = pd.read_csv(cache_file)
+    missing_columns = set(CACHE_COLUMNS).difference(data.columns)
+    if missing_columns:
+        raise ValueError(
+            f"{ticker}: Cache file {cache_file} is missing columns "
+            f"{sorted(missing_columns)}."
+        )
+    return data.loc[:, CACHE_COLUMNS], "loaded"
 
 
 def download_data(
@@ -1172,37 +1156,64 @@ def download_data(
 
 def save_cache(ticker: str, data: pd.DataFrame, cache_dir: str) -> None:
     """
-    Save cache for a specific ticker using pickle.
+    Save a cache as an atomic CSV replacement.
 
     Args:
         ticker (str): The ticker symbol.
         data (pd.DataFrame): DataFrame containing data to cache.
     """
-    cache_file = Path(cache_dir) / f"{ticker}.pkl"  # Use .pkl extension
-    try:
-        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_path / f"{ticker}.csv"
 
-        # Filter to ensure only valid columns are saved
-        if "Ticker" not in data.columns:
-            raise ValueError(
-                f"Ticker column missing in data for {ticker}. Columns: {data.columns.tolist()}"
-            )
-        data = data[list(CACHE_COLUMNS)].dropna()
-
-        # Use pickle.dump to serialize the DataFrame
-        with open(cache_file, "wb") as f:
-            pickle.dump(data, f)
-
-        first_data = data["Date"].min().strftime("%d/%m/%Y")
-        last_data = data["Date"].max().strftime("%d/%m/%Y")
-
-        logging.info(
-            f"{ticker}: Cache saved from {first_data} to {last_data} "
-            f"({len(data)} days)."
+    missing_columns = set(CACHE_COLUMNS).difference(data.columns)
+    if missing_columns:
+        raise ValueError(
+            f"Cannot save cache for {ticker}; missing columns "
+            f"{sorted(missing_columns)}."
         )
-    except Exception as e:
-        logging.error(f"Failed to save cache for {ticker}: {e}")
-        logging.debug("Full traceback:\n%s", traceback.format_exc())
+
+    cache_data = data.loc[:, CACHE_COLUMNS].copy()
+    cache_data["Date"] = pd.to_datetime(cache_data["Date"], errors="coerce", utc=True)
+    cache_data["Old Price"] = pd.to_numeric(cache_data["Old Price"], errors="coerce")
+    cache_data = (
+        cache_data.dropna(subset=CACHE_COLUMNS)
+        .drop_duplicates(subset=["Date"], keep="last")
+        .sort_values("Date")
+        .reset_index(drop=True)
+    )
+    if cache_data.empty:
+        raise ValueError(f"Cannot save an empty cache for {ticker}.")
+    cached_tickers = set(cache_data["Ticker"].astype(str).str.upper())
+    if cached_tickers != {ticker.upper()}:
+        raise ValueError(
+            f"Cannot save cache for {ticker}; data contains tickers "
+            f"{sorted(cached_tickers)}."
+        )
+
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="",
+        prefix=f".{ticker}.",
+        suffix=".tmp",
+        dir=cache_path,
+        delete=False,
+    ) as temporary_file:
+        temporary_path = Path(temporary_file.name)
+
+    try:
+        cache_data.to_csv(temporary_path, index=False)
+        temporary_path.replace(cache_file)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+    logging.info(
+        f"{ticker}: Cache saved from {cache_data['Date'].min().strftime('%d/%m/%Y')} "
+        f"to {cache_data['Date'].max().strftime('%d/%m/%Y')} "
+        f"({len(cache_data)} days)."
+    )
 
 
 def clean_cache(config):

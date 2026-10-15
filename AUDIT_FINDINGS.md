@@ -7,10 +7,11 @@ is a defect or that all technical debt can be eliminated.
 
 ## P0 — correctness, data safety, and failure visibility
 
-- [ ] **Unsafe and opaque cache persistence** — `QuickenPrices.py` uses
-  `pickle.load` for cache files (`load_cache`) and converts several read/write
-  errors into an `"empty"` status or a log message. Use a non-executable,
-  schema-checked format and make persistence failures visible to callers.
+- [x] **Unsafe and opaque cache persistence** — cache storage now uses
+  schema-checked CSV instead of executable pickle data; corrupt/empty files
+  and invalid writes raise explicit errors, and writes replace atomically.
+  Legacy `.pkl` caches are intentionally not read. Higher-level fetch
+  exception handling remains a separate unresolved finding below.
 - [ ] **Currency conversion can silently use future rates** —
   `convert_prices` applies `.ffill().bfill()` to missing FX rates. Backfilling
   can apply a later-known exchange rate to an earlier equity date, which is
@@ -99,3 +100,8 @@ is a defect or that all technical debt can be eliminated.
   `.\.venv\Scripts\python.exe -m unittest -v` — 15 tests passed;
   `.\.venv\Scripts\python.exe -m compileall -q QuickenPrices.py settings.py
   test_quicken_prices.py` — passed. Pending commit.
+- **Safe cache format** — replaced pickle reads/writes with schema-checked CSV,
+  atomic writes, and explicit corrupt/invalid-cache errors. Added tests for the
+  format and invalid file/data cases. `.\.venv\Scripts\python.exe -m unittest
+  -v` — 17 tests passed; `.\.venv\Scripts\python.exe -m compileall -q
+  QuickenPrices.py settings.py test_quicken_prices.py` — passed. Pending commit.
