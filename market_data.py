@@ -643,13 +643,21 @@ def download_data(
 
     raw_df = raw_df.reset_index().rename(columns={"Close": "Old Price"})
     raw_df["Ticker"] = ticker_symbol
-    raw_df["Date"] = pd.to_datetime(raw_df["Date"], utc=True).dt.normalize()
+    raw_df["Date"] = pd.to_datetime(
+        raw_df["Date"], utc=True, errors="coerce"
+    ).dt.normalize()
     raw_df["Old Price"] = pd.to_numeric(raw_df["Old Price"], errors="coerce")
+    source_rows = len(raw_df)
     raw_df = raw_df.dropna(subset=["Date", "Old Price"]).loc[:, CACHE_COLUMNS]
 
     if raw_df.empty:
         logging.error(f"{ticker_symbol}: Download contained no valid price rows.")
         return raw_df
+    if len(raw_df) < source_rows:
+        logging.warning(
+            f"{ticker_symbol}: Discarded {source_rows - len(raw_df)} malformed "
+            "download rows."
+        )
 
     logging.info(
         f"{ticker_symbol}: Downloaded from {raw_df['Date'].min().strftime('%d/%m/%Y')} "

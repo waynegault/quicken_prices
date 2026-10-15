@@ -21,6 +21,7 @@ def _prepare_price_rows(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]
         )
 
     normalized = data.drop(columns=["Price"], errors="ignore").copy()
+    source_rows = len(normalized)
     normalized["Date"] = pd.to_datetime(
         normalized["Date"], utc=True, errors="coerce"
     ).dt.normalize()
@@ -30,6 +31,11 @@ def _prepare_price_rows(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]
     normalized = normalized.dropna(
         subset=["Date", "Ticker", "Type", "Old Price", "Original Currency"]
     )
+    discarded_rows = source_rows - len(normalized)
+    if discarded_rows:
+        logging.warning(
+            "Discarded %s malformed price rows before conversion.", discarded_rows
+        )
     equity_rows = normalized[normalized["Type"] != "CURRENCY"].copy()
     fx_rows = normalized[normalized["Type"] == "CURRENCY"].copy()
     return equity_rows, fx_rows

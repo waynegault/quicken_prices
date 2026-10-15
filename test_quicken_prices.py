@@ -413,13 +413,41 @@ class TestQuickenPricesPureData(unittest.TestCase):
         )
         original = source.copy(deep=True)
 
-        normalized = storage.normalize_cache_data("TEST", source)
+        with self.assertLogs(level="WARNING") as captured:
+            normalized = storage.normalize_cache_data("TEST", source)
 
         pd.testing.assert_frame_equal(source, original)
         pd.testing.assert_frame_equal(
             normalized, storage.normalize_cache_data("TEST", normalized)
         )
         self.assertEqual(normalized["Old Price"].tolist(), [1.1, 2.0])
+        self.assertIn("Discarded 1 invalid or duplicate cache rows", captured.output[0])
+
+    def test_price_conversion_warns_when_malformed_rows_are_dropped(self):
+        data = pd.DataFrame(
+            [
+                {
+                    "Ticker": "AAPL",
+                    "Old Price": 100.0,
+                    "Date": "2026-01-02",
+                    "Type": "EQUITY",
+                    "Original Currency": "GBP",
+                },
+                {
+                    "Ticker": "BROKEN",
+                    "Old Price": "not-a-price",
+                    "Date": "2026-01-02",
+                    "Type": "EQUITY",
+                    "Original Currency": "GBP",
+                },
+            ]
+        )
+
+        with self.assertLogs(level="WARNING") as captured:
+            result = processing.convert_prices(data)
+
+        self.assertEqual(result["Ticker"].tolist(), ["AAPL"])
+        self.assertIn("Discarded 1 malformed price rows", captured.output[0])
 
 
     def test_find_missing_ranges_returns_empty_when_fully_covered(self):
@@ -739,6 +767,26 @@ class TestQuickenPricesPureData(unittest.TestCase):
         self.assertEqual(ticker.history.call_count, 2)
         sleep.assert_called_once_with(0.25)
         self.assertIn("Attempt 1/2 failed", captured.output[0])
+
+    def test_download_data_warns_when_invalid_provider_rows_are_discarded(self):
+        ticker = mock.Mock()
+        ticker.history.return_value = pd.DataFrame(
+            {"Close": [12.5, "not-a-price"]},
+            index=pd.Index(["2026-01-02", "not-a-date"], name="Date"),
+        )
+
+        with (
+            mock.patch.object(market_data.yf, "Ticker", return_value=ticker),
+            self.assertLogs(level="WARNING") as captured,
+        ):
+            result = market_data.download_data(
+                "TEST",
+                pd.Timestamp("2026-01-01", tz="UTC"),
+                pd.Timestamp("2026-01-03", tz="UTC"),
+            )
+
+        self.assertEqual(result["Old Price"].tolist(), [12.5])
+        self.assertIn("Discarded 1 malformed download rows", captured.output[0])
 
     def test_validate_ticker_returns_strict_metadata_model(self):
         info = {

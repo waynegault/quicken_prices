@@ -30,6 +30,7 @@ def normalize_cache_data(ticker: str, data: pd.DataFrame) -> pd.DataFrame:
             f"{ticker}: Price data is missing columns {sorted(missing_columns)}."
         )
 
+    source_rows = len(data)
     normalized = data.loc[:, CACHE_COLUMNS].copy()
     normalized = normalized.dropna(subset=["Ticker"])
     normalized["Ticker"] = normalized["Ticker"].astype(str).str.upper()
@@ -41,6 +42,11 @@ def normalize_cache_data(ticker: str, data: pd.DataFrame) -> pd.DataFrame:
         .sort_values("Date")
         .reset_index(drop=True)
     )
+    discarded_rows = source_rows - len(normalized)
+    if discarded_rows:
+        logging.warning(
+            f"{ticker}: Discarded {discarded_rows} invalid or duplicate cache rows."
+        )
     cached_tickers = set(normalized["Ticker"])
     if cached_tickers and cached_tickers != {ticker.upper()}:
         raise ValueError(
