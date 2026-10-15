@@ -440,6 +440,10 @@ class TestQuickenPricesPureData(unittest.TestCase):
             result["Date"].tolist(),
             ["05/01/2026", "03/01/2026", "01/01/2026"],
         )
+        pd.testing.assert_frame_equal(
+            result,
+            processing.process_converted_prices(result, start_date),
+        )
 
     def test_process_converted_prices_rejects_missing_columns(self):
         with self.assertRaisesRegex(ValueError, "missing columns"):

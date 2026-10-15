@@ -197,7 +197,9 @@ def process_converted_prices(
         )
 
     output = converted_df.loc[:, PRICE_COLUMNS].copy()
-    output["Date"] = pd.to_datetime(output["Date"], errors="raise", utc=True)
+    output["Date"] = pd.to_datetime(
+        output["Date"], format="mixed", dayfirst=True, errors="raise", utc=True
+    )
     output = output.sort_values(by="Date", ascending=False)
     output = output[output["Date"] >= start_date]
     output["Date"] = output["Date"].dt.strftime("%d/%m/%Y")
