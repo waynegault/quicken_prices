@@ -13,9 +13,9 @@ jobs:
     # this needs neither network access nor a Quicken installation.
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           # Read from the repository's own declaration so the tested release and
           # the documented one cannot drift apart.
