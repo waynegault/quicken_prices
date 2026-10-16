@@ -31,9 +31,11 @@ enough, and a freeze would pin transitive packages to one machine's resolution.
 start the script. VS Code is configured for the same interpreter.
 
 Double-clicking `quicken_prices.py`, or pointing a shortcut at the `.py` instead
-of at the launcher, runs it with whatever Python Windows associates with `.py` —
-`py.exe` here, whose default is 3.12. That interpreter has none of the project's
-packages, so such a run ends at its first import and never reaches `prices.log`:
+of at the launcher, runs it with the base Python that Windows associates with
+`.py`. That is `py.exe` here, and it never picks the repository venv: a script run
+from this directory selects `python314`, while the launcher's own default is 3.12.
+Whichever it selects lacks the project's packages, so the run ends at its first
+import and never reaches `prices.log`:
 
 ```
 'pydantic' is not installed for this interpreter:

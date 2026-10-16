@@ -122,6 +122,14 @@ all technical debt has been eliminated.
   audit-era modules already used modern annotations. Both are adopted: 45
   annotation and unused-import rewrites from Ruff, and 11 over-long lines wrapped
   by hand. (`acef758`, `48940aa`)
+- **A broken launch left no evidence** — the script is normally started by
+  double-click or a shortcut, which runs a base Python rather than the repository
+  venv. The previous script survived that because its dependencies happened to be
+  installed; this one also needs pydantic, so the run died on an import *before*
+  `setup_logging` and wrote nothing at all to `prices.log`. A missing dependency
+  now names the package, the interpreter that lacks it, and the two ways to run it
+  properly, and a console log handler is installed before the interpreter and
+  configuration checks so that their failures reach the log too. (`9dc2b58`)
 
 ## Remaining and deferred
 
@@ -233,3 +241,5 @@ all technical debt has been eliminated.
 - Declared supported Python, read by CI — `9a26ef6`; 78 tests passed, Ruff clean.
 - Adopted E501 and pyupgrade in the lint gate — `acef758`, plus `48940aa` for
   the file the first commit missed; 78 tests passed, Ruff clean.
+- A non-venv launch now explains itself, and logging exists before the checks —
+  `9dc2b58`; 79 tests passed, Ruff clean.
