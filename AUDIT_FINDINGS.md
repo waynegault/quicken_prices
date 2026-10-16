@@ -96,6 +96,11 @@ all technical debt has been eliminated.
   could not fail on a clean checkout. It neutralizes the interpreter check now,
   and the interpreter contract it depended on has its own test. Caught by the CI
   gate on that gate's first run. (`fa8ea9b`)
+- **Quicken automation branches were untested** — elevation granted and refused,
+  a missing or immediately-dead executable, a window that never appears, a
+  failed step still cleaning up the process it launched, and both import-dialog
+  failures now have mocked tests. The GUI-only remainder has a documented manual
+  smoke procedure with expected results and cleanup. (`cf9ddaa`)
 
 ## Remaining and deferred
 
@@ -107,20 +112,22 @@ all technical debt has been eliminated.
 - **Calendar assumptions are incomplete.** Date adjustment handles weekends
   and a small set of fixed-date holidays, not full exchange-specific holiday
   calendars or observed holidays.
-- **Provider and Windows integration remain partly untested.** Unit tests mock
-  Yahoo Finance and GUI calls; no live network run or Quicken 2004 GUI
-  end-to-end run was performed.
+- **Provider and Windows integration remain partly untested.** The mocked
+  branches are covered and the GUI path has a documented manual smoke procedure,
+  but no live network run or Quicken 2004 GUI end-to-end run has been performed,
+  so both seams are still unverified against the real thing.
 - **Operational logs are not tracked.** `prices.log` is ignored and no
   representative runtime log was available in the worktree to inspect.
 - **Some provider/orchestration functions remain moderately large**, notably
   `get_tickers` and `validate_ticker` (63 and 48 lines in the current source).
   No remaining function is over 80 lines. Decompose further only when
   behavioral tests establish a useful boundary.
-- **Test organization is still concentrated** in `test_quicken_prices.py`.
-  The 61 tests cover validation, retries, provider response edges, retry
-  exhaustion, FX policy, cache safety, idempotency, persistence, bounded
-  results, and failure propagation, but Windows UI success flows still need
-  dedicated coverage.
+- **Test organization is still concentrated** in `test_quicken_prices.py`. The
+  73 tests cover validation, retries, provider response edges, retry exhaustion,
+  FX policy, cache safety, idempotency, persistence, bounded results, failure
+  propagation, and the Quicken automation branches. Splitting the module by
+  responsibility is still open, and the GUI success flows stay reachable only
+  through the manual smoke procedure.
 - **No LLM task or evidence-classification subsystem exists in this
   repository.** LLM benchmark coverage and consolidation of evidence
   classification models are therefore not applicable to the audited code.
@@ -193,3 +200,5 @@ all technical debt has been eliminated.
   Ruff clean, compileall clean.
 - Hermetic `main()` test and the interpreter contract — `fa8ea9b`; 61 tests
   passed, Ruff clean. The first CI run failed on the test this batch fixed.
+- Quicken automation branch coverage and the manual smoke procedure —
+  `cf9ddaa`; 73 tests passed, Ruff clean.
