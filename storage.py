@@ -4,7 +4,6 @@ import logging
 import tempfile
 import time
 from pathlib import Path
-from typing import Tuple
 
 import pandas as pd
 from pydantic import TypeAdapter
@@ -56,7 +55,7 @@ def normalize_cache_data(ticker: str, data: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
-def load_cache(ticker: str, cache_dir: str) -> Tuple[pd.DataFrame, str]:
+def load_cache(ticker: str, cache_dir: str) -> tuple[pd.DataFrame, str]:
     """
     Loads schema-checked CSV data for a ticker cache.
 
