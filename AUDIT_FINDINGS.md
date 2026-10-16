@@ -106,6 +106,11 @@ all technical debt has been eliminated.
   failed step still cleaning up the process it launched, and both import-dialog
   failures now have mocked tests. The GUI-only remainder has a documented manual
   smoke procedure with expected results and cleanup. (`cf9ddaa`)
+- **Concentrated test module** — the suite is split by responsibility into
+  `test_quicken_prices.py` (configuration and entry point), `test_market_data.py`,
+  `test_conversion.py`, `test_storage.py` and `test_quicken_automation.py`, with
+  the conversion scenario data travelling with the tests that use it. Coverage is
+  unchanged at 78 tests. (`31940c1`)
 
 ## Remaining and deferred
 
@@ -133,12 +138,9 @@ all technical debt has been eliminated.
   `get_tickers` and `validate_ticker` (63 and 48 lines in the current source).
   No remaining function is over 80 lines. Decompose further only when
   behavioral tests establish a useful boundary.
-- **Test organization is still concentrated** in `test_quicken_prices.py`. The
-  78 tests cover validation, retries, provider response edges, retry exhaustion,
-  FX policy, cache safety, idempotency, persistence, bounded results, failure
-  propagation, and the Quicken automation branches. Splitting the module by
-  responsibility is still open, and the GUI success flows stay reachable only
-  through the manual smoke procedure.
+- **GUI success flows have no unit test.** They stay reachable only through the
+  manual smoke procedure in the README, because driving Quicken's real dialogs is
+  exactly what the mocked tests avoid.
 - **No LLM task or evidence-classification subsystem exists in this
   repository.** LLM benchmark coverage and consolidation of evidence
   classification models are therefore not applicable to the audited code.
@@ -215,3 +217,5 @@ all technical debt has been eliminated.
   `cf9ddaa`; 73 tests passed, Ruff clean.
 - Cache corruption and interrupted-write coverage — `8d2561f`; 78 tests passed,
   Ruff and compileall clean.
+- Test suite split by responsibility — `31940c1`; 78 tests passed, Ruff and
+  compileall clean.
