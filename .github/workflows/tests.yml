@@ -17,7 +17,9 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          # Read from the repository's own declaration so the tested release and
+          # the documented one cannot drift apart.
+          python-version-file: ".python-version"
           cache: pip
 
       - name: Install dependencies

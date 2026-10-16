@@ -6,13 +6,24 @@ import CSV, and can automate importing it into Quicken 2004 on Windows.
 
 ## Run
 
-Windows and a project-local virtual environment are required:
+Windows and a project-local virtual environment are required. The supported
+interpreter is Python 3.14 — the release the repository `.venv` is built with and
+the one CI installs, taken from `.python-version`:
 
 ```powershell
-py -3 -m venv .venv
+py -3.14 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe quicken_prices.py
 ```
+
+Name the release explicitly when creating the venv. A bare `py -3` takes the
+launcher's own default, which is 3.12 on this machine, and the application checks
+the venv's *interpreter path* rather than its version — so a venv built from
+another release runs instead of warning.
+
+`requirements.txt` is the only declaration of the dependency constraints; there is
+no lock file. A single-user script rebuilt from those ranges is reproducible
+enough, and a freeze would pin transitive packages to one machine's resolution.
 
 Alternatively, run `quicken_prices.bat`. It uses only
 `.venv\Scripts\python.exe`. VS Code is configured to use the same interpreter.
