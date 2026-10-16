@@ -111,6 +111,17 @@ all technical debt has been eliminated.
   `test_conversion.py`, `test_storage.py` and `test_quicken_automation.py`, with
   the conversion scenario data travelling with the tests that use it. Coverage is
   unchanged at 78 tests. (`31940c1`)
+- **Undeclared supported Python** — `.python-version` declares 3.14 and CI reads
+  that declaration rather than repeating the version, so the tested release and
+  the documented one cannot drift. The README's bootstrap names 3.14 instead of
+  `py -3`, which resolves to the py launcher's own default — 3.12 on this
+  machine — while the application checks the venv's interpreter path rather than
+  its version. (`9a26ef6`)
+- **Declared but unenforced lint standard** — `line-length = 100` was declared
+  without gating `E501`, and the pyupgrade families stayed ungated while the
+  audit-era modules already used modern annotations. Both are adopted: 45
+  annotation and unused-import rewrites from Ruff, and 11 over-long lines wrapped
+  by hand. (`acef758`, `48940aa`)
 
 ## Remaining and deferred
 
@@ -154,18 +165,18 @@ all technical debt has been eliminated.
 - **Tests do not access live user data.** File-writing tests use temporary
   directories; provider and GUI behavior is mocked. All Python validation was
   run with `.venv\Scripts\python.exe`.
-- **The lint gate is deliberately narrow.** Ruff 0.16.6's own default rule set
-  reports 159 findings on this code, so a bare `ruff check` cannot gate it.
-  `ruff.toml` pins an explicit `select` covering only the families the code
-  already satisfies; the rest stay open and visible rather than fixed blindly
-  or suppressed: `LOG015` x101 (modules log through the root logger instead of
-  a module logger), `E501` x52, the `PT009`/`PT027` x116 test-assertion style,
-  `TRY003`/`TRY300`/`TRY301`/`TRY400` x50 with `EM101`/`EM102` x38 (exception
-  construction), `TRY004` x2, `UP006`/`UP035`/`UP045`/`UP007` x40 (modern
-  annotations), `SIM117` x8, `BLE001` x5 (broad handlers, each needing a stated
-  contract), `PLR0913`/`PLR0917`/`PLR2004`/`PLW2901` x11, `PERF203` x2,
-  `RUF005`/`RUF046` x3, `Q003`, `RET503`/`RET505` x2, `ARG005`. Each family
-  needs a decision rather than a blanket `--fix`.
+- **The lint standard excludes families by decision, not by neglect.** Each stays
+  visible with its reason, so none is silently missing: `LOG015` x101 stays (the
+  log format already prints filename and line, and the levels are global by
+  design, so per-module loggers would be 101 edits with no observable change);
+  `PT009`/`PT027` x116 are pytest assertion idioms in a `unittest` suite;
+  `TRY003` x36 with `EM101`/`EM102` x38 would require exception classes for a
+  single-user script; `TRY004` x2 would change the exception type callers rely
+  on; `BLE001` x5 is `quicken_automation.py`'s deliberate degrade-and-log GUI
+  contract, where every handler reports its failure; `SIM117` x8,
+  `PLR0913`/`PLR0917`/`PLR2004`/`PLW2901` x11, `PERF203` x2, `RUF005`/`RUF046`
+  x3, `Q003`, `RET503`/`RET505` x2 and `ARG005` are style preferences this
+  project has not chosen.
 
 ## Batch history
 
@@ -219,3 +230,6 @@ all technical debt has been eliminated.
   Ruff and compileall clean.
 - Test suite split by responsibility — `31940c1`; 78 tests passed, Ruff and
   compileall clean.
+- Declared supported Python, read by CI — `9a26ef6`; 78 tests passed, Ruff clean.
+- Adopted E501 and pyupgrade in the lint gate — `acef758`, plus `48940aa` for
+  the file the first commit missed; 78 tests passed, Ruff clean.
