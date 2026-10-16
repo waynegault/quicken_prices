@@ -28,6 +28,29 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(config.paths.quicken, "")
             self.assertTrue(config_path.is_file())
 
+    def test_main_configures_logging_before_it_can_fail(self):
+        """A failure before setup_logging must still reach a log handler."""
+        order = []
+
+        def record_logging():
+            order.append("logging")
+
+        def record_interpreter_check():
+            order.append("interpreter")
+            raise RuntimeError("wrong interpreter")
+
+        with (
+            mock.patch.object(qp, "_bootstrap_logging", side_effect=record_logging),
+            mock.patch.object(
+                qp, "ensure_project_python", side_effect=record_interpreter_check
+            ),
+            mock.patch.object(qp, "pause_before_exit"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "wrong interpreter"):
+                qp.main()
+
+        self.assertEqual(order, ["logging", "interpreter"])
+
     def test_load_configuration_rejects_unknown_and_coerced_values(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "configuration.yaml"

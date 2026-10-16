@@ -11,30 +11,45 @@ import tempfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-import pandas as pd
-import yaml
-import yfinance as yf
+try:
+    import pandas as pd
+    import yaml
+    import yfinance as yf
 
-from market_data import (
-    fetch_historical_data,
-    get_date_range,
-    get_tickers,
-)
-from market_models import TickerMetadata
-from price_processing import convert_prices, process_converted_prices
-from quicken_automation import (
-    ensure_project_python,
-    quicken_import,
-    run_as_admin,
-    validate_quicken_path,
-)
-from settings import AppSettings
-from storage import (
-    clean_cache,
-    load_cache,
-    save_cache,
-    save_to_csv,
-)
+    from market_data import (
+        fetch_historical_data,
+        get_date_range,
+        get_tickers,
+    )
+    from market_models import TickerMetadata
+    from price_processing import convert_prices, process_converted_prices
+    from quicken_automation import (
+        ensure_project_python,
+        quicken_import,
+        run_as_admin,
+        validate_quicken_path,
+    )
+    from settings import AppSettings
+    from storage import (
+        clean_cache,
+        load_cache,
+        save_cache,
+        save_to_csv,
+    )
+except ModuleNotFoundError as missing:
+    # By far the most likely cause: the file was launched by double-click or by
+    # a shortcut, so Windows ran it with the machine's default Python instead of
+    # the repository venv - the only interpreter that has these packages. Say
+    # which interpreter failed and how to run it properly, rather than leaving a
+    # bare import traceback that says nothing about the venv.
+    print(
+        f"'{missing.name}' is not installed for this interpreter:\n"
+        f"  {sys.executable}\n"
+        "\nRun the script through the repository environment instead:\n"
+        "  quicken_prices.bat\n"
+        "  .\\.venv\\Scripts\\python.exe quicken_prices.py\n"
+    )
+    raise SystemExit(2) from missing
 
 
 def load_configuration(config_file: str = "configuration.yaml") -> AppSettings:
@@ -164,12 +179,28 @@ def run_startup_self_check(config: AppSettings) -> None:
     logging.info("Startup self-check passed.")
 
 
+def _bootstrap_logging() -> None:
+    """Log to the console until the configured handlers are installed.
+
+    main() checks the interpreter and loads the configuration before it can
+    point the log file anywhere, so a failure in either step used to reach only
+    the console - and the log, which is where anyone looks afterwards, stayed
+    empty. This is deliberately replaced by setup_logging, which clears the
+    root handlers before installing the configured ones.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s",
+    )
+
+
 def main() -> None:
     """Run the validated market-data, conversion, export, and import flow."""
     exit_prompt = "\n\t Press Enter to exit...\n\t"
     should_pause_before_exit = True
 
     try:
+        _bootstrap_logging()
         ensure_project_python()
         config = load_configuration("configuration.yaml")
 

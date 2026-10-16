@@ -25,9 +25,27 @@ another release runs instead of warning.
 no lock file. A single-user script rebuilt from those ranges is reproducible
 enough, and a freeze would pin transitive packages to one machine's resolution.
 
-Alternatively, run `quicken_prices.bat`. It uses only
-`.venv\Scripts\python.exe`. VS Code is configured to use the same interpreter.
-The application refuses to start under another Python executable.
+### Launch it through the venv
+
+`quicken_prices.bat` uses only `.venv\Scripts\python.exe`, and that is the way to
+start the script. VS Code is configured for the same interpreter.
+
+Double-clicking `quicken_prices.py`, or pointing a shortcut at the `.py` instead
+of at the launcher, runs it with whatever Python Windows associates with `.py` —
+`py.exe` here, whose default is 3.12. That interpreter has none of the project's
+packages, so such a run ends at its first import and never reaches `prices.log`:
+
+```
+'pydantic' is not installed for this interpreter:
+  C:\Programs\Python\python314\python.exe
+
+Run the script through the repository environment instead:
+  quicken_prices.bat
+  .\.venv\Scripts\python.exe quicken_prices.py
+```
+
+Point shortcuts at `quicken_prices.bat`, not at the `.py`. The application also
+refuses to start under a different Python once it gets far enough to check.
 
 The script reads the tracked `configuration.yaml`; it does not generate or
 rewrite a missing configuration. Configuration is validated strictly with

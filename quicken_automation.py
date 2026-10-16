@@ -119,7 +119,7 @@ def ensure_project_python() -> None:
     if not interpreter.is_file():
         raise FileNotFoundError(
             f"Project virtual environment not found: {interpreter}. "
-            "Create it with 'py -3 -m venv .venv'."
+            "Create it with 'py -3.14 -m venv .venv'."
         )
     if Path(sys.executable).resolve() != interpreter.resolve():
         raise RuntimeError(

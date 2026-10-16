@@ -14,7 +14,7 @@ if not exist "%PROJECT_DIR%quicken_prices.py" (
 if not exist "%VENV_PYTHON%" (
     echo [ERROR] Project virtual environment is missing:
     echo         %VENV_PYTHON%
-    echo Create it with: py -3 -m venv .venv
+    echo Create it with: py -3.14 -m venv .venv
     pause
     exit /b 1
 )
