@@ -98,7 +98,9 @@ def shortcut_target(path: Path) -> str:
 class LauncherChainTests(unittest.TestCase):
     def test_the_start_menu_shortcut_points_at_the_wrapper(self):
         self.assertTrue(SHORTCUT.is_file(), f"shortcut missing: {SHORTCUT}")
-        self.assertEqual(shortcut_target(SHORTCUT), str(WRAPPER))
+        # Compare paths rather than strings: Windows ignores case, and the shell
+        # is free to return the stored target with different casing.
+        self.assertEqual(Path(shortcut_target(SHORTCUT)), WRAPPER)
 
     def test_the_wrapper_calls_the_repository_launcher(self):
         self.assertTrue(WRAPPER.is_file(), f"wrapper missing: {WRAPPER}")

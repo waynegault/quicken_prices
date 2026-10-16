@@ -24,7 +24,7 @@ class ConfigurationTests(unittest.TestCase):
 
             self.assertEqual(config.tickers, ["TEST"])
             self.assertEqual(config.retries.max_retries, 3)
-            self.assertEqual(config.paths.base, str(Path(qp.__file__).parent))
+            self.assertEqual(Path(config.paths.base), Path(qp.__file__).resolve().parent)
             self.assertEqual(config.paths.quicken, "")
             self.assertTrue(config_path.is_file())
 
