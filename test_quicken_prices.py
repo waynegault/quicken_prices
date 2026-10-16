@@ -477,6 +477,85 @@ class TestQuickenPricesPureData(unittest.TestCase):
         self.assertEqual(normalized["Old Price"].tolist(), [1.1, 2.0])
         self.assertIn("Discarded 1 invalid or duplicate cache rows", captured.output[0])
 
+    def test_cache_load_returns_no_rows_for_a_truncated_file(self):
+        # A cache cut off mid-row must read as "nothing usable", not as a price,
+        # so the caller refetches the range instead of trusting the fragment.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_file = Path(temp_dir) / "TEST.csv"
+            cache_file.write_text("Ticker,Old Price,Date\nTEST,", encoding="utf-8")
+
+            with self.assertLogs(level="WARNING") as captured:
+                data, status = storage.load_cache("TEST", temp_dir)
+
+        self.assertEqual(status, "loaded")
+        self.assertTrue(data.empty)
+        self.assertIn("Discarded 1 invalid or duplicate cache rows", captured.output[0])
+
+    def test_cache_load_rejects_an_unreadable_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_file = Path(temp_dir) / "TEST.csv"
+            cache_file.write_bytes(b"\x00\x01\x02\xff\xfe")
+
+            with self.assertRaises(ValueError):
+                storage.load_cache("TEST", temp_dir)
+
+    def test_cache_load_ignores_columns_it_does_not_need(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_file = Path(temp_dir) / "TEST.csv"
+            cache_file.write_text(
+                "Ticker,Old Price,Date,Volume\nTEST,1.23,01/01/2026,1000\n",
+                encoding="utf-8",
+            )
+
+            data, status = storage.load_cache("TEST", temp_dir)
+
+        self.assertEqual(status, "loaded")
+        self.assertEqual(tuple(data.columns), storage.CACHE_COLUMNS)
+        self.assertEqual(data["Old Price"].tolist(), [1.23])
+
+    def test_cache_write_leaves_the_previous_file_intact_when_it_fails(self):
+        sample = pd.DataFrame(
+            [
+                {
+                    "Ticker": "TEST",
+                    "Old Price": 2.0,
+                    "Date": pd.Timestamp("2026-01-02", tz="UTC"),
+                }
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_file = Path(temp_dir) / "TEST.csv"
+            cache_file.write_text(
+                "Ticker,Old Price,Date\nTEST,1.0,01/01/2026\n", encoding="utf-8"
+            )
+            original = cache_file.read_bytes()
+
+            with mock.patch.object(pd.DataFrame, "to_csv", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    storage.save_cache("TEST", sample, temp_dir)
+
+            # The interrupted write must not damage the cache already on disk,
+            # and must not leave its half-written replacement behind.
+            self.assertEqual(cache_file.read_bytes(), original)
+            self.assertEqual([entry.name for entry in Path(temp_dir).iterdir()], ["TEST.csv"])
+
+    def test_cache_write_leaves_no_temporary_file_behind(self):
+        sample = pd.DataFrame(
+            [
+                {
+                    "Ticker": "TEST",
+                    "Old Price": 1.23,
+                    "Date": pd.Timestamp("2026-01-01", tz="UTC"),
+                }
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage.save_cache("TEST", sample, temp_dir)
+
+            self.assertEqual([entry.name for entry in Path(temp_dir).iterdir()], ["TEST.csv"])
+
     def test_price_conversion_warns_when_malformed_rows_are_dropped(self):
         data = pd.DataFrame(
             [
