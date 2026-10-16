@@ -123,10 +123,22 @@ as potentially sensitive when sharing the repository.
 ## Tests
 
 The suite is split by responsibility and run with the repository environment, so
-imports use the project's installed dependencies:
+imports use the project's installed dependencies. The test runners and the linter
+are pinned in `requirements-dev.txt`:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+```
+
+Both runners are supported, and CI runs both, because they can disagree: pytest
+resolves `sys.path` from the arguments it is given, so an IDE passing the
+workspace URI (`file:///c%3A/...`) runs the suite with a lowercase drive. A test
+comparing Windows paths as strings passes under one runner and fails under the
+other, which is exactly what happened once.
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest -v
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
 | Module | Covers |

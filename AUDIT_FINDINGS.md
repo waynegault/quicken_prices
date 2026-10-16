@@ -141,6 +141,15 @@ all technical debt has been eliminated.
   run it properly, and a console log handler is installed before the interpreter
   and configuration checks so their failures reach the log as well as the console.
   (`9dc2b58`)
+- **The suite assumed one test runner** — it passed under `unittest` and failed
+  under pytest from VS Code, because two Windows paths were compared as strings.
+  pytest puts the test file's directory on `sys.path` exactly as given, and VS Code
+  passes the workspace URI (`file:///c%3A/...`), which resolves to a lowercase
+  drive, while `load_configuration` resolves its own path to canonical case. Paths
+  are compared as `Path` objects now, which Windows treats case-insensitively in
+  both places the suite compares them, and CI runs pytest as well as unittest so a
+  runner-specific assumption cannot hide behind the runner CI happens to prefer.
+  (`34b2c03`)
 
 ## Remaining and deferred
 
@@ -256,3 +265,5 @@ all technical debt has been eliminated.
   `9dc2b58`; 79 tests passed, Ruff clean.
 - Restored the launcher the Start-menu wrapper calls, with chain tests —
   `1f75d80`; 83 tests passed, Ruff clean.
+- Paths compared as paths, and pytest added to the gate — `34b2c03`; 83 tests
+  passed under both runners, Ruff clean.

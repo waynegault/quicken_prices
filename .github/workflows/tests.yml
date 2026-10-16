@@ -23,7 +23,9 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-dev.txt
 
       - name: Byte-compile every module
         run: python -m compileall -q .
@@ -32,14 +34,21 @@ jobs:
         run: python -m unittest -v
 
       - name: Tests under pytest
-        # VS Code's test adapter runs pytest, so a gate that only runs unittest
-        # cannot catch a runner-specific assumption. One did: the suite compared
-        # Windows paths as strings, which a lowercase-drive rootdir exposed.
+        run: python -m pytest -q
+
+      - name: Tests under pytest, with a lowercased drive
+        # VS Code's test adapter resolves the workspace URI (file:///c%3A/...), so
+        # pytest puts a lowercase-drive path on sys.path and `__file__` keeps that
+        # case. Emulating it is what makes this gate able to fail: comparing Windows
+        # paths as strings passed everything above and failed in the IDE. Drop this
+        # step only when no assertion derives a path from `__file__`.
+        shell: pwsh
         run: |
-          python -m pip install "pytest==9.1.1"
-          python -m pytest -q
+          $root = (Get-Location).Path
+          if ($root -match '^[A-Za-z]:') {
+            $root = $root.Substring(0, 1).ToLower() + $root.Substring(1)
+          }
+          python -m pytest -q $root
 
       - name: Lint
-        run: |
-          python -m pip install "ruff==0.16.6"
-          python -m ruff check .
+        run: python -m ruff check .

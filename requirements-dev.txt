@@ -1,0 +1,9 @@
+# Development tooling: the test interpreters and the linter the CI gate uses.
+# Install into the repository environment:
+#   .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+#
+# Versions are pinned so that the gate you run locally and the gate CI runs
+# cannot drift apart.
+
+pytest==9.1.1
+ruff==0.16.6
