@@ -91,14 +91,24 @@ as potentially sensitive when sharing the repository.
 
 ## Tests
 
-The tests use temporary directories and mocked provider/GUI calls:
+The suite is split by responsibility and run with the repository environment, so
+imports use the project's installed dependencies:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest -v
 ```
 
-Run project tests with the repository environment so imports use the project's
-installed dependencies.
+| Module | Covers |
+| --- | --- |
+| `test_quicken_prices.py` | Configuration loading, startup checks and `main()` |
+| `test_market_data.py` | Ticker validation, retries, downloads and cache planning |
+| `test_conversion.py` | FX conversion policy and Quicken output formatting |
+| `test_storage.py` | Cache round-trips, corruption, and atomic CSV writes |
+| `test_quicken_automation.py` | Quicken process ownership, elevation and GUI steps |
+
+Every test that writes a file uses a temporary directory, and provider and GUI
+calls are mocked, so the suite needs no network, no Quicken installation, and no
+access to your cached prices.
 
 ## Manual smoke test (Windows + Quicken 2004)
 
