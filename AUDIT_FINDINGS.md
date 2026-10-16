@@ -11,6 +11,11 @@ all technical debt has been eliminated.
 - **Unsafe cache serialization** — replaced executable pickle with
   schema-checked, atomic CSV persistence; old `.pkl` files are not read.
   (`e852ce5`)
+- **Cache corruption and interrupted writes were unpinned** — a cache truncated
+  mid-row is now proven to read as nothing usable, so the caller refetches
+  rather than trusting a fragment; an unreadable file fails; a grown schema is
+  ignored; and a failed write leaves the previous cache byte-identical with no
+  temporary file behind. (`8d2561f`)
 - **Future FX rates used for past prices** — conversion is a backward as-of
   join and errors when a non-native price has no same-day-or-prior rate.
   (`bac1546`, `69f10b3`)
@@ -109,6 +114,12 @@ all technical debt has been eliminated.
   trading dates inside those bounds. Correct detection needs an exchange-aware
   calendar and a policy for holidays, so this remains open rather than adding
   a naive weekday-only heuristic.
+- **Cache writes assume a single writer.** Replacement is atomic, so a reader
+  sees the old file or the new one and never a half-written one, and the
+  corruption cases are covered. Two overlapping runs still share the cache
+  directory and the last writer wins. No lock was added because nothing has
+  demonstrated the need: an overlap needs a lock, not a stronger atomicity
+  guarantee.
 - **Calendar assumptions are incomplete.** Date adjustment handles weekends
   and a small set of fixed-date holidays, not full exchange-specific holiday
   calendars or observed holidays.
@@ -123,7 +134,7 @@ all technical debt has been eliminated.
   No remaining function is over 80 lines. Decompose further only when
   behavioral tests establish a useful boundary.
 - **Test organization is still concentrated** in `test_quicken_prices.py`. The
-  73 tests cover validation, retries, provider response edges, retry exhaustion,
+  78 tests cover validation, retries, provider response edges, retry exhaustion,
   FX policy, cache safety, idempotency, persistence, bounded results, failure
   propagation, and the Quicken automation branches. Splitting the module by
   responsibility is still open, and the GUI success flows stay reachable only
@@ -202,3 +213,5 @@ all technical debt has been eliminated.
   passed, Ruff clean. The first CI run failed on the test this batch fixed.
 - Quicken automation branch coverage and the manual smoke procedure —
   `cf9ddaa`; 73 tests passed, Ruff clean.
+- Cache corruption and interrupted-write coverage — `8d2561f`; 78 tests passed,
+  Ruff and compileall clean.
