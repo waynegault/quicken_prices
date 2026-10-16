@@ -80,7 +80,8 @@ def load_configuration(config_file: str = "configuration.yaml") -> AppSettings:
         logging.info(f"Using Quicken at: {quicken_path}")
     else:
         logging.warning(
-            "Quicken executable not found. CSV generation will continue, but GUI import automation is unavailable."
+            "Quicken executable not found. CSV generation will continue, "
+            "but GUI import automation is unavailable."
         )
 
     resolved_settings = settings.model_copy(

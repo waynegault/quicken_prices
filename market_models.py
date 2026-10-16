@@ -1,6 +1,6 @@
 """Validated market-data records."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pydantic import Field, field_validator
 
@@ -35,4 +35,4 @@ class TickerMetadata(StrictModel):
             return None
         if earliest_date.tzinfo is None or earliest_date.utcoffset() is None:
             raise ValueError("earliest_date must include a timezone")
-        return earliest_date.astimezone(timezone.utc)
+        return earliest_date.astimezone(UTC)

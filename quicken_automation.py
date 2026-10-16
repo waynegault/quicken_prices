@@ -10,9 +10,9 @@ import sys
 import time
 import traceback
 import winreg
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
 
 import pandas as pd
 import pyautogui
@@ -31,7 +31,7 @@ QUICKEN_IMPORT_DIALOG_TITLE = "Import Price Data"
 class QuickenSession:
     """Own only a Quicken process started by this application."""
 
-    process: Optional[subprocess.Popen] = None
+    process: subprocess.Popen | None = None
 
     def close(self) -> bool:
         if self.process is None:
@@ -60,14 +60,14 @@ class QuickenSession:
             raise
 
 
-def validate_quicken_path() -> Optional[str]:
+def validate_quicken_path() -> str | None:
     """
     Validate and locate the Quicken executable.
     """
 
     return find_quicken_via_registry() or locate_quicken_in_standard_paths()
 
-def find_quicken_via_registry() -> Optional[str]:
+def find_quicken_via_registry() -> str | None:
     """
     Locate Quicken executable path via Windows Registry.
     """
@@ -94,7 +94,7 @@ def find_quicken_via_registry() -> Optional[str]:
             continue
     return None
 
-def locate_quicken_in_standard_paths() -> Optional[str]:
+def locate_quicken_in_standard_paths() -> str | None:
     """
     Locate Quicken executable in standard installation directories.
     """
@@ -206,7 +206,8 @@ def import_data_file(config: AppSettings) -> bool:
                 time.sleep(2)
                 pyautogui.press("enter")
                 logging.info(
-                    f"Successfully imported {format_path(filename)} at {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}"
+                    f"Successfully imported {format_path(filename)} at "
+                    f"{pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}"
                 )
                 time.sleep(0.5)
                 return True
@@ -362,7 +363,7 @@ def setup_pyautogui():
     Configures pyautogui for automation.
     """
 
-    pyautogui.FAILSAFE = True  # Abort ongoing automation by moving mouse to the top-left corner of screen.
+    pyautogui.FAILSAFE = True  # Fail-safe: slam the mouse into a corner to abort.
     pyautogui.PAUSE = 0.3  # Delay between actions
 
 def quicken_import(config: AppSettings) -> bool:

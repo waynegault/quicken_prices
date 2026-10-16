@@ -69,10 +69,18 @@ class QuickenAutomationTests(unittest.TestCase):
         config = AppSettings(paths={"base": "."})
         session = quicken_automation.QuickenSession()
         with (
-            mock.patch.object(quicken_automation, "open_quicken", return_value=True) as open_app,
-            mock.patch.object(quicken_automation, "navigate_to_portfolio", return_value=True) as navigate,
-            mock.patch.object(quicken_automation, "open_import_dialog", return_value=False) as open_dialog,
-            mock.patch.object(quicken_automation, "import_data_file", return_value=True) as import_file,
+            mock.patch.object(
+                quicken_automation, "open_quicken", return_value=True
+            ) as open_app,
+            mock.patch.object(
+                quicken_automation, "navigate_to_portfolio", return_value=True
+            ) as navigate,
+            mock.patch.object(
+                quicken_automation, "open_import_dialog", return_value=False
+            ) as open_dialog,
+            mock.patch.object(
+                quicken_automation, "import_data_file", return_value=True
+            ) as import_file,
         ):
             with self.assertRaisesRegex(RuntimeError, "Opening import dialog"):
                 quicken_automation.execute_import_sequence(config, session)

@@ -6,7 +6,6 @@ import logging
 import time
 from functools import wraps
 from numbers import Real
-from typing import Dict, List, Optional, Tuple, Type, Union
 
 import pandas as pd
 import requests
@@ -30,9 +29,9 @@ DEFAULT_TRANSIENT_EXCEPTIONS = (
 
 
 def retry(
-    exceptions: Union[
-        Type[BaseException], Tuple[Type[BaseException], ...]
-    ] = DEFAULT_TRANSIENT_EXCEPTIONS,
+    exceptions: (
+        type[BaseException] | tuple[type[BaseException], ...]
+    ) = DEFAULT_TRANSIENT_EXCEPTIONS,
 ):
     """
     Retry failures using explicit validated policy settings or model defaults.
@@ -105,7 +104,7 @@ def adjust_date(date: pd.Timestamp, direction: str) -> pd.Timestamp:
 
     return date.floor("D")  # Normalize to remove time component
 
-def get_date_range(config: AppSettings) -> Tuple[pd.Timestamp, pd.Timestamp]:
+def get_date_range(config: AppSettings) -> tuple[pd.Timestamp, pd.Timestamp]:
     """
     Calculates start and end dates, avoiding weekends and public holidays.
 
@@ -149,9 +148,9 @@ def get_date_range(config: AppSettings) -> Tuple[pd.Timestamp, pd.Timestamp]:
 def find_missing_ranges(
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
-    first_cache: Optional[pd.Timestamp],
-    last_cache: Optional[pd.Timestamp],
-) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+    first_cache: pd.Timestamp | None,
+    last_cache: pd.Timestamp | None,
+) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
     """Finds missing date ranges, no longer adjusting for weekends."""
 
     if start_date > end_date:
@@ -186,11 +185,11 @@ def find_missing_ranges(
     return missing_ranges
 
 def get_tickers(
-    tickers: List[str],
+    tickers: list[str],
     max_show: int = 5,
     home_currency: str = "GBP",
-    retry_settings: Optional[RetrySettings] = None,
-) -> List[TickerMetadata]:
+    retry_settings: RetrySettings | None = None,
+) -> list[TickerMetadata]:
     """
     Get and validate stock and FX tickers.
 
@@ -245,16 +244,17 @@ def get_tickers(
         all_valid_tickers = valid_tickers
 
     logging.info(
-        f"Validated {len(all_valid_tickers)} {pluralise('ticker', len(all_valid_tickers))} in total\n"
+        f"Validated {len(all_valid_tickers)} "
+        f"{pluralise('ticker', len(all_valid_tickers))} in total\n"
     )
     return all_valid_tickers
 
 def validate_tickers(
-    tickers: List[str],
+    tickers: list[str],
     max_show: int = 5,
-    retry_settings: Optional[RetrySettings] = None,
-) -> List[TickerMetadata]:
-    validated_by_symbol: Dict[str, TickerMetadata] = {}
+    retry_settings: RetrySettings | None = None,
+) -> list[TickerMetadata]:
+    validated_by_symbol: dict[str, TickerMetadata] = {}
     # Use a ThreadPoolExecutor for concurrent validation
     max_workers = max(1, min(10, len(tickers)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -291,7 +291,7 @@ def validate_tickers(
 @retry(exceptions=DEFAULT_TRANSIENT_EXCEPTIONS)
 def validate_ticker(
     ticker_symbol: str,
-) -> Optional[TickerMetadata]:
+) -> TickerMetadata | None:
     if not isinstance(ticker_symbol, str):
         raise TypeError("Ticker must be a string.")
 
@@ -308,7 +308,8 @@ def validate_ticker(
 
     if not info or info.get("symbol") is None:
         logging.error(
-            f"Ticker '{ticker_symbol}' is invalid. Check if the symbol is correct or available on yfinance."
+            f"Ticker '{ticker_symbol}' is invalid. Check if the symbol is "
+            "correct or available on yfinance."
         )
         return None
 
@@ -322,7 +323,8 @@ def validate_ticker(
             )
         except (ValueError, OverflowError) as e:
             logging.warning(
-                f"Failed to parse firstTradeDateEpochUtc={first_trade_date} for '{ticker_symbol}': {e}"
+                f"Failed to parse firstTradeDateEpochUtc={first_trade_date} "
+                f"for '{ticker_symbol}': {e}"
             )
             earliest_date = None
 
@@ -350,7 +352,7 @@ def _ticker_start_date(
     ticker_info: TickerMetadata,
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
-) -> Optional[pd.Timestamp]:
+) -> pd.Timestamp | None:
     if ticker_info.earliest_date is None:
         return start_date
 
@@ -368,8 +370,8 @@ def _fetch_ticker_history(
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
     cache_dir: str,
-    retry_settings: Optional[RetrySettings],
-) -> Optional[pd.DataFrame]:
+    retry_settings: RetrySettings | None,
+) -> pd.DataFrame | None:
     ticker_start = _ticker_start_date(ticker_info, start_date, end_date)
     if ticker_start is None:
         return None
@@ -392,11 +394,11 @@ def _fetch_ticker_history(
 
 
 def fetch_historical_data(
-    tickers: List[TickerMetadata],
+    tickers: list[TickerMetadata],
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
     cache_dir: str,
-    retry_settings: Optional[RetrySettings] = None,
+    retry_settings: RetrySettings | None = None,
 ) -> pd.DataFrame:
     """
     Fetch historical data for a list of tickers using daily yfinance data
@@ -447,7 +449,7 @@ def fetch_historical_data(
 
 def _get_cache_bounds(
     ticker: str, cache_data: pd.DataFrame, cache_status: str
-) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
+) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
     if cache_status == "not_found":
         logging.info(f"{ticker}: No cache file found. Will fetch entire range.")
         return None, None
@@ -468,8 +470,8 @@ def _get_cache_bounds(
 
 def _download_missing_data(
     ticker: str,
-    missing_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]],
-    retry_settings: Optional[RetrySettings],
+    missing_ranges: list[tuple[pd.Timestamp, pd.Timestamp]],
+    retry_settings: RetrySettings | None,
 ) -> pd.DataFrame:
     downloaded_frames = []
     for range_start, range_end in missing_ranges:
@@ -573,7 +575,7 @@ def fetch_ticker_data(
     end_date: pd.Timestamp,
     current_price: float,
     cache_dir: str,
-    retry_settings: Optional[RetrySettings] = None,
+    retry_settings: RetrySettings | None = None,
 ) -> pd.DataFrame:
     """
     Fetch historical data (daily) for a ticker using local cache + yfinance,
@@ -612,7 +614,8 @@ def fetch_ticker_data(
 
     logging.info(
         f"{ticker}: Got {len(combined_data)} {pluralise('day', len(combined_data))} data "
-        f"from {combined_data['Date'].min().strftime('%d/%m/%Y')} to {combined_data['Date'].max().strftime('%d/%m/%Y')}\n"
+        f"from {combined_data['Date'].min().strftime('%d/%m/%Y')} "
+        f"to {combined_data['Date'].max().strftime('%d/%m/%Y')}\n"
     )
     return combined_data
 
