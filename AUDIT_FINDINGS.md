@@ -267,3 +267,5 @@ all technical debt has been eliminated.
   `1f75d80`; 83 tests passed, Ruff clean.
 - Paths compared as paths, and pytest added to the gate — `34b2c03`; 83 tests
   passed under both runners, Ruff clean.
+- Test setup declared once and the IDE's invocation emulated in CI — `fbf8d0a`;
+  CI green in 1m12s across unittest, pytest, and pytest under a lowercased drive.
