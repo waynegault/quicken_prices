@@ -99,3 +99,31 @@ The tests use temporary directories and mocked provider/GUI calls:
 
 Run project tests with the repository environment so imports use the project's
 installed dependencies.
+
+## Manual smoke test (Windows + Quicken 2004)
+
+The GUI path cannot be covered by the unit suite, since provider and GUI calls
+are mocked there. Run this by hand after changing `quicken_automation.py`,
+elevation handling, or the CSV output format.
+
+**Before starting:** Quicken installed with its portfolio already set up; the
+repository `.venv` present; `configuration.yaml` holding your own tickers; and
+nothing else touching the mouse or keyboard while an import runs.
+
+| # | Do this | Expect |
+| --- | --- | --- |
+| 1 | Close Quicken, run `quicken_prices.bat`, accept the UAC prompt | "Successfully launched elevated process in a new window", then Quicken opens, the portfolio view is reached, and the run logs "Successfully imported ..." |
+| 2 | Watch the run | The import dialog title is `Import Price Data`, and the confirmation appears in the portfolio window |
+| 3 | Leave Quicken open, run the script again | "Quicken is already open." — and afterwards Quicken is **still open**: only a process this script launched gets closed |
+| 4 | Run again and decline the UAC prompt | The run continues without elevation, logs "Quicken GUI automation requires elevation; CSV export is ready.", prints the manual import steps, and leaves `data.csv` ready |
+| 5 | Point `paths.quicken` at a path that does not exist, then run | "Quicken executable not found" and a non-zero exit — the script must not imply it imported anything |
+| 6 | Quit Quicken mid-import, then run again | "Quicken window did not appear within the expected time" and a non-zero exit |
+
+**Cleanup:** an interrupted run can leave Quicken open with a modal import
+dialog. Close Quicken by hand — the script terminates only the process it
+started — then read `prices.log`, and delete a partial `data.csv` if the run
+failed before writing it.
+
+**Record:** keep the `prices.log` from a passing run. No representative runtime
+log is tracked in this repository, so that file is the only evidence of what the
+GUI path actually does.

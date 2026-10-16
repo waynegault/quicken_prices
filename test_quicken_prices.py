@@ -1272,6 +1272,206 @@ class TestQuickenPricesPureData(unittest.TestCase):
         open_dialog.assert_called_once_with()
         import_file.assert_not_called()
 
+    def test_open_quicken_reports_a_missing_executable(self):
+        config = AppSettings(paths={"base": "."})
+        session = quicken_automation.QuickenSession()
+
+        with (
+            mock.patch.object(quicken_automation.subprocess, "Popen") as popen,
+            self.assertLogs(level="ERROR") as captured,
+        ):
+            self.assertFalse(quicken_automation.open_quicken(config, session))
+
+        popen.assert_not_called()
+        self.assertIn("Quicken executable not found", captured.output[0])
+
+    def test_open_quicken_reuses_an_already_running_session(self):
+        config = AppSettings(paths={"base": ".", "quicken": __file__})
+        session = quicken_automation.QuickenSession()
+
+        with (
+            mock.patch.object(
+                quicken_automation.gw, "getWindowsWithTitle", return_value=[mock.Mock()]
+            ),
+            mock.patch.object(
+                quicken_automation, "activate_window_by_title", return_value=True
+            ) as activate,
+            mock.patch.object(quicken_automation.subprocess, "Popen") as popen,
+            self.assertLogs(level="INFO") as captured,
+        ):
+            self.assertTrue(quicken_automation.open_quicken(config, session))
+
+        activate.assert_called_once_with(
+            quicken_automation.QUICKEN_MAIN_WINDOW_TITLE, timeout=1
+        )
+        popen.assert_not_called()
+        # Nothing was launched here, so nothing here may close it.
+        self.assertIsNone(session.process)
+        self.assertIn("Quicken is already open", "\n".join(captured.output))
+
+    def test_open_quicken_forgets_a_process_that_exits_immediately(self):
+        config = AppSettings(paths={"base": ".", "quicken": __file__})
+        session = quicken_automation.QuickenSession()
+        process = mock.Mock()
+        process.poll.return_value = 1
+
+        with (
+            mock.patch.object(quicken_automation.gw, "getWindowsWithTitle", return_value=[]),
+            mock.patch.object(quicken_automation.subprocess, "Popen", return_value=process),
+            self.assertLogs(level="ERROR") as captured,
+        ):
+            self.assertFalse(quicken_automation.open_quicken(config, session))
+
+        self.assertIsNone(session.process)
+        self.assertIn("Failed to start Quicken process", captured.output[0])
+
+    def test_open_quicken_keeps_ownership_when_the_window_never_appears(self):
+        config = AppSettings(paths={"base": ".", "quicken": __file__})
+        session = quicken_automation.QuickenSession()
+        process = mock.Mock()
+        process.poll.return_value = None
+
+        with (
+            mock.patch.object(quicken_automation.gw, "getWindowsWithTitle", return_value=[]),
+            mock.patch.object(quicken_automation.subprocess, "Popen", return_value=process),
+            mock.patch.object(
+                quicken_automation, "activate_window_by_title", return_value=False
+            ),
+            mock.patch.object(quicken_automation.time, "sleep"),
+            mock.patch.object(quicken_automation.time, "time", side_effect=[0.0, 31.0]),
+            self.assertLogs(level="ERROR") as captured,
+        ):
+            self.assertFalse(quicken_automation.open_quicken(config, session))
+
+        # A half-started Quicken is still ours to clean up.
+        self.assertIs(session.process, process)
+        self.assertIn("did not appear within the expected time", captured.output[0])
+
+    def test_quicken_import_closes_its_process_when_a_step_fails(self):
+        config = AppSettings(paths={"base": "."})
+        process = mock.Mock()
+        process.poll.return_value = None
+
+        def fail_after_launch(_config, session):
+            session.process = process
+            raise RuntimeError("Quicken import failed during: Importing data file.")
+
+        with (
+            mock.patch.object(quicken_automation, "is_elevated", return_value=True),
+            mock.patch.object(quicken_automation, "setup_pyautogui"),
+            mock.patch.object(
+                quicken_automation,
+                "execute_import_sequence",
+                side_effect=fail_after_launch,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Importing data file"):
+                quicken_automation.quicken_import(config)
+
+        process.terminate.assert_called_once()
+
+    def test_run_as_admin_is_a_noop_when_already_elevated(self):
+        with (
+            mock.patch.object(quicken_automation, "is_elevated", return_value=True),
+            mock.patch.object(quicken_automation.ctypes, "windll") as windll,
+            self.assertLogs(level="INFO") as captured,
+        ):
+            self.assertFalse(quicken_automation.run_as_admin())
+
+        windll.shell32.ShellExecuteW.assert_not_called()
+        self.assertIn("administrative privileges", "\n".join(captured.output))
+
+    def test_run_as_admin_launches_the_project_interpreter(self):
+        with (
+            mock.patch.object(quicken_automation, "is_elevated", return_value=False),
+            mock.patch.object(
+                quicken_automation, "project_python", return_value=Path(__file__)
+            ),
+            mock.patch.object(quicken_automation.ctypes, "windll") as windll,
+            self.assertLogs(level="INFO") as captured,
+        ):
+            windll.shell32.ShellExecuteW.return_value = 42
+            self.assertTrue(quicken_automation.run_as_admin())
+
+        launch = windll.shell32.ShellExecuteW.call_args.args
+        self.assertEqual(launch[1], "runas")
+        self.assertEqual(launch[2], str(Path(__file__)))
+        self.assertIn("Successfully launched elevated process", "\n".join(captured.output))
+
+    def test_run_as_admin_reports_a_refused_elevation_and_continues(self):
+        with (
+            mock.patch.object(quicken_automation, "is_elevated", return_value=False),
+            mock.patch.object(
+                quicken_automation, "project_python", return_value=Path(__file__)
+            ),
+            mock.patch.object(quicken_automation.ctypes, "windll") as windll,
+            self.assertLogs(level="ERROR") as captured,
+        ):
+            windll.shell32.ShellExecuteW.return_value = 5
+            self.assertFalse(quicken_automation.run_as_admin())
+
+        self.assertIn("ShellExecuteW returned code: 5", captured.output[0])
+
+    def test_import_data_file_reports_a_missing_import_dialog(self):
+        config = AppSettings(paths={"base": "."})
+
+        with (
+            mock.patch.object(
+                quicken_automation, "activate_window_by_title", return_value=False
+            ),
+            self.assertLogs(level="ERROR") as captured,
+        ):
+            self.assertFalse(quicken_automation.import_data_file(config))
+
+        self.assertIn("Import Price Data dialog is not available", captured.output[0])
+
+    def test_import_data_file_reports_a_missing_confirmation(self):
+        config = AppSettings(paths={"base": "."})
+
+        with (
+            mock.patch.object(
+                quicken_automation, "activate_window_by_title", return_value=True
+            ),
+            mock.patch.object(quicken_automation.pyautogui, "typewrite") as typewrite,
+            mock.patch.object(quicken_automation.pyautogui, "press"),
+            mock.patch.object(quicken_automation.time, "sleep"),
+            mock.patch.object(quicken_automation.time, "time", side_effect=[0.0, 121.0]),
+            self.assertLogs(level="ERROR") as captured,
+        ):
+            self.assertFalse(quicken_automation.import_data_file(config))
+
+        typewrite.assert_called_once()
+        self.assertIn(
+            "Timed out waiting for the Quicken import confirmation", captured.output[0]
+        )
+
+    def test_activate_window_restores_a_minimized_window(self):
+        window = mock.Mock()
+        window.isMinimized = True
+
+        with (
+            mock.patch.object(
+                quicken_automation.gw, "getWindowsWithTitle", return_value=[window]
+            ),
+            mock.patch.object(quicken_automation.time, "sleep"),
+        ):
+            self.assertTrue(
+                quicken_automation.activate_window_by_title("Quicken", timeout=1)
+            )
+
+        window.restore.assert_called_once()
+        window.activate.assert_called_once()
+
+    def test_activate_window_reports_a_missing_window(self):
+        with (
+            mock.patch.object(quicken_automation.gw, "getWindowsWithTitle", return_value=[]),
+            mock.patch.object(quicken_automation.time, "sleep"),
+            mock.patch.object(quicken_automation.time, "time", side_effect=[0.0, 2.0]),
+        ):
+            self.assertFalse(
+                quicken_automation.activate_window_by_title("Quicken", timeout=1)
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
