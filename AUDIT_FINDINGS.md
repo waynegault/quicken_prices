@@ -90,7 +90,9 @@ all technical debt has been eliminated.
   section scaffolding, clarified completion logging, and only configures GUI
   automation when elevated. (`da0dcac`)
 - **Inconsistent entry-point names** — renamed the script and launcher to
-  snake_case without compatibility aliases. (`5b01723`)
+  snake_case. The audit dropped the aliases deliberately, but a wrapper outside
+  the checkout still calls the old launcher name, so that alias came back once the
+  outage below proved a caller depended on it. (`5b01723`, `1f75d80`)
 - **Interpreter fallback** — batch launcher, VS Code, application startup, and
   UAC relaunch require the repository `.venv`. (`ba63033`)
 - **No automated gate** — a Windows CI workflow byte-compiles every module, runs
@@ -122,14 +124,23 @@ all technical debt has been eliminated.
   audit-era modules already used modern annotations. Both are adopted: 45
   annotation and unused-import rewrites from Ruff, and 11 over-long lines wrapped
   by hand. (`acef758`, `48940aa`)
-- **A broken launch left no evidence** — the script is normally started by
-  double-click or a shortcut, which runs a base Python rather than the repository
-  venv. The previous script survived that because its dependencies happened to be
-  installed; this one also needs pydantic, so the run died on an import *before*
-  `setup_logging` and wrote nothing at all to `prices.log`. A missing dependency
-  now names the package, the interpreter that lacks it, and the two ways to run it
-  properly, and a console log handler is installed before the interpreter and
-  configuration checks so that their failures reach the log too. (`9dc2b58`)
+- **The launcher the Start-menu chain calls had been renamed away** — the
+  shortcut runs a wrapper outside the checkout that still called
+  `quickenprice.bat`, so the chain ended in "The system cannot find the file
+  specified" before the application started: no message worth reading, nothing in
+  `prices.log`, and the `.pkl` caches untouched. The file is restored, and the
+  chain is pinned by tests covering the shortcut's target, the wrapper's text, the
+  launcher's text, and the two launcher names staying in step. Those tests read
+  files outside the checkout, so they skip rather than fail on any other machine.
+  (`1f75d80`)
+- **Hardening found while chasing that outage, not its cause** — a non-venv launch
+  (double-click, or a shortcut aimed at the `.py`) runs a base Python that lacks
+  the packages; the previous script survived that only because its dependencies
+  happened to be installed, while this one also needs pydantic. A missing
+  dependency now names the package, the interpreter that lacks it, and the ways to
+  run it properly, and a console log handler is installed before the interpreter
+  and configuration checks so their failures reach the log as well as the console.
+  (`9dc2b58`)
 
 ## Remaining and deferred
 
@@ -243,3 +254,5 @@ all technical debt has been eliminated.
   the file the first commit missed; 78 tests passed, Ruff clean.
 - A non-venv launch now explains itself, and logging exists before the checks —
   `9dc2b58`; 79 tests passed, Ruff clean.
+- Restored the launcher the Start-menu wrapper calls, with chain tests —
+  `1f75d80`; 83 tests passed, Ruff clean.
